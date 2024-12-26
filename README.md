@@ -1,0 +1,2 @@
+使用python来模拟PC端和移动端使用bing进行搜索，获取积分
+在Ubuntu下测试通过，Windows系统也可以使用
