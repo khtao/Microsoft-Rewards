@@ -41,7 +41,7 @@ def edge_rewards(url, mobile=False):
     # 启用Chrome浏览器参数配置
     chrome_options = webdriver.EdgeOptions()
     # 添加用户数据目录
-    chrome_options.add_argument("--user-data-dir=" + r"/home/khtao/.cache/Microsoft/Edge/")
+    chrome_options.add_argument("--user-data-dir=" + r"~/.cache/Microsoft/Edge/")
     if mobile:
         chrome_options.add_experimental_option('mobileEmulation', {'deviceName': 'iPhone X'})
         search_num = 25
