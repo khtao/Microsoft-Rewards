@@ -26,6 +26,18 @@ def top_list():
     return name_list
 
 
+def get_chengyu():
+    data = open('chengyu.txt').readlines()
+    all_data = []
+    for dd in data:
+        dd = dd.rstrip('\n')
+        lls = dd.split('\u3000')
+        for ll in lls:
+            if len(ll) > 3:
+                all_data.append(ll)
+    return all_data
+
+
 def get_args():
     parser = OptionParser()
     parser.add_option('--device', dest='device', default='pm', help='电脑端或者移动端进行搜索')
@@ -37,44 +49,48 @@ def get_args():
 def edge_rewards(url, mobile=False):
     """使用Chrome浏览器访问bing.com 网站
     """
-    search_num = 35
+    search_num = 40
     # 启用Chrome浏览器参数配置
     chrome_options = webdriver.EdgeOptions()
     # 添加用户数据目录
-    chrome_options.add_argument("--user-data-dir=" + r"~/.cache/Microsoft/Edge/")
+    chrome_options.add_argument("--user-data-dir=" + "/home/khtao/.cache/Microsoft/Edge")
     if mobile:
         chrome_options.add_experimental_option('mobileEmulation', {'deviceName': 'iPhone X'})
-        search_num = 25
+        search_num = 30
     # 使用用户已有的缓存
     chrome_options.add_argument("--profile-directory=Default")
     #   设置为开发者模式、避免出现浏览器上提示 受到测试软件的控制
     chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
 
+    data = get_chengyu()[:search_num]+top_list()
+    random.shuffle(data)
     # 创建webdriver对象
     driver = webdriver.Edge(options=chrome_options)
     driver.implicitly_wait(10)
     # 设置浏览器窗口大小
-    driver.set_window_size(1600, 768)
-    driver.get(url)
-    data = top_list()
-    random.shuffle(data)
+    if mobile:
+        driver.set_window_size(200, 768)
+    else:
+        driver.set_window_size(1600, 768)
+
     for x in data[:search_num]:
-        # sleep(2)
+        driver.get(url)
+        sleep(random.uniform(120, 240))
         # 定位搜索框
         search_box = driver.find_element(By.ID, "sb_form_q")
         # 传入搜索关键词并搜索
         search_box.send_keys(x)
         search_box.send_keys(Keys.RETURN)
+        sleep(random.uniform(60, 120))
         # 等待加载完成
         total = 0
-        for i in range(100):  # 实现网页下拉
-            num = random.randint(0, 50)
+        for i in range(200):  # 实现网页下拉
+            num = random.randint(0, 25)
             total += num
             js = 'window.scrollTo(0,%s)' % total
             driver.execute_script(js)
-            sleep(random.uniform(0, 0.1))
-        driver.get(url)
-        sleep(random.randint(1, 7))
+            sleep(random.uniform(0, 0.2))
+
     driver.quit()
 
 
