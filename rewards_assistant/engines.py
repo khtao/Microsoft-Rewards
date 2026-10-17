@@ -59,6 +59,21 @@ def resolve_engine(name: str | None) -> str:
     return name if name in ENGINES else DEFAULT_ENGINE
 
 
+def home_url(engine: Engine, geo=None) -> str:
+    """首页 URL 带市场参数，与 IP 归属保持一致。"""
+    mkt = getattr(geo, "market", None) or "zh-CN"
+    return f"https://www.bing.com/?mkt={mkt}"
+
+
+def on_engine_domain(page, engine: Engine) -> bool:
+    """当前页面是否已经在 Bing 上（决定能否复用 SERP）。"""
+    try:
+        url = page.url or ""
+    except Exception:
+        return False
+    return "bing.com" in url
+
+
 def _first_visible(page, selectors: list, timeout_ms: int = 8000):
     for sel in selectors:
         try:
@@ -122,13 +137,21 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
 
     budget 不为 None 时，全程按剩余时间裁剪动作，保证在预算内收尾。
     返回 {"ok": bool, "clicked": str|None, "reason": str|None}
+
+    导航链：首轮进首页；后续轮次若已在 Bing 上，就**留在 SERP 直接改词**——
+    真人不会每搜一个词都重新打开一次首页，那会产生一串可疑的重复首页请求。
     """
     if budget is not None:
         human.bind(budget)
 
-    goto_home(page, engine, human, log, budget)
-    if budget is not None and budget.left <= RESULTS_RESERVE + 1:
-        log("warn", f"打开首页已耗时 {budget.elapsed:.1f}s，本轮压缩后续动作")
+    reuse = bool(getattr(cfg, "reuse_serp", True))
+    if reuse and on_engine_domain(page, engine):
+        log("reuse", "停留在搜索结果页，直接改词（不重新打开首页）")
+        human.pause(0.3, 1.2)
+    else:
+        goto_home(page, engine, human, log, budget)
+        if budget is not None and budget.left <= RESULTS_RESERVE + 1:
+            log("warn", f"打开首页已耗时 {budget.elapsed:.1f}s，本轮压缩后续动作")
 
     if detect_captcha(page, engine, log, cfg.on_captcha):
         log("captcha", "验证后继续本轮搜索")

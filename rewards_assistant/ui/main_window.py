@@ -377,7 +377,6 @@ class SearchPanel(QWidget):
         root.addWidget(self._build_params())
         root.addLayout(self._build_button_row())
         root.addWidget(self._build_log(), 1)
-        root.addLayout(self._build_status_row())
 
         self._load_settings()
         self._wire_settings()
@@ -385,9 +384,8 @@ class SearchPanel(QWidget):
         self._on_idle()
 
         if self.runner is not None:
-            self.runner.status.connect(self._status)
+            # 状态与进度统一显示在主窗口状态栏（MainWindow._wire_runner 已连接）
             self.runner.log.connect(self._append_log)
-            self.runner.progress.connect(self._on_progress)
             self.runner.finished.connect(self._on_finished)
             self.runner.failed.connect(self._on_failed)
             self.runner.running_changed.connect(self._on_runner_state)
@@ -602,25 +600,7 @@ class SearchPanel(QWidget):
         lay.addWidget(self.txt_log)
         return box
 
-    # ---------- 状态行
-    def _build_status_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        self.lbl_status = QLabel("就绪")
-        self.lbl_status.setMinimumWidth(320)
-        row.addWidget(self.lbl_status, 1)
-
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 100)
-        self.bar.setValue(0)
-        self.bar.setFixedWidth(180)
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("0 / 0")
-        row.addWidget(self.bar)
-
-        self.lbl_env = QLabel("")
-        row.addWidget(self.lbl_env)
-        return row
-
+    # ---------- 环境提示（写入日志，不再占用状态栏）
     def _refresh_env(self):
         edge = find_edge_binary()
         parts = []
@@ -629,23 +609,19 @@ class SearchPanel(QWidget):
         else:
             parts.append("未找到 Edge")
         parts.append("root（可能有 --no-sandbox 警告）" if is_root() else "普通用户")
-        self.lbl_env.setText(" · ".join(parts))
+        self.txt_log.append(f"[环境] {' · '.join(parts)}")
         if not edge:
-            self._status("自动搜索需要 Microsoft Edge；打开任务链接仍可使用系统默认浏览器")
+            self.txt_log.append("[环境] 自动搜索需要 Microsoft Edge；"
+                                "打开任务链接仍可使用系统默认浏览器")
 
     # ---------- 状态切换
     def _on_idle(self):
         self.btn_run.setText("运行")
         self.btn_run.setEnabled(True)
-        self.bar.setFormat("0 / 0")
-        self.bar.setValue(0)
 
     def _on_running(self):
         self.btn_run.setText("停止")
         self.btn_run.setEnabled(True)
-
-    def _status(self, text: str):
-        self.lbl_status.setText(text)
 
     def _on_runner_state(self, active: bool):
         # 搜索可能从「今日」页或定时任务启动；两个页面显示相同的运行状态。
@@ -683,16 +659,12 @@ class SearchPanel(QWidget):
             self.runner.stop()
             self.btn_run.setEnabled(False)
             self.btn_run.setText("停止中…")
-            self._status("正在停止，等当前这一轮结束…")
             return
 
         params = self._collect()
         self.txt_log.clear()
         self._on_running()
-        self._status(f"启动浏览器…共 {params['repeat']} 轮")
-        self.bar.setRange(0, max(1, params["repeat"]))
-        self.bar.setValue(0)
-        self.bar.setFormat(f"0 / {params['repeat']}")
+        self.txt_log.append(f"[启动] 共 {params['repeat']} 轮")
         if self.runner is not None:
             self.runner.start(params)
 
@@ -701,23 +673,11 @@ class SearchPanel(QWidget):
         self.txt_log.append(line)
         self.txt_log.moveCursor(QTextCursor.End)
 
-    def _on_progress(self, cur: int, total: int):
-        self.bar.setRange(0, max(1, total))
-        self.bar.setValue(cur)
-        self.bar.setFormat(f"{cur} / {total}")
-
     def _on_finished(self, report):
         self._on_idle()
-        self.bar.setRange(0, max(1, report.ok_count + report.fail_count))
-        self.bar.setValue(report.ok_count + report.fail_count)
-        self.bar.setFormat(f"{report.ok_count + report.fail_count} 轮完成")
-        self._status(
-            f"完成：成功 {report.ok_count} / 失败 {report.fail_count}，"
-            f"点击结果 {report.clicked_count} 次，用时 {report.total_seconds:.1f}s")
         self.txt_log.append(f"\n=== 完成：成功 {report.ok_count} 失败 {report.fail_count} "
                             f"点击 {report.clicked_count} 用时 {report.total_seconds:.1f}s ===")
 
     def _on_failed(self, msg: str):
         self._on_idle()
-        self._status("启动/运行失败，见日志")
         self.txt_log.append(f"[错误] {msg}")

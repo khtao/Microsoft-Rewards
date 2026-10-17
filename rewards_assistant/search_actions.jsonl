@@ -1,0 +1,53 @@
+{"ts": "2026-10-17T15:44:42.334", "t": 0.001, "sid": "161c0165", "action": "session_start", "detail": "sid=161c0165"}
+{"ts": "2026-10-17T15:44:42.340", "t": 0.006, "sid": "161c0165", "action": "geo", "detail": "Guangzhou/China · tz=Asia/Shanghai · locale=zh-CN · mkt=zh-CN · ip=183.62.48.142"}
+{"ts": "2026-10-17T15:45:09.159", "t": 26.826, "sid": "161c0165", "action": "browser", "detail": "Edge 启动 user_data_dir=/home/khtao/.cache/human_search_edge_profile headless=False"}
+{"ts": "2026-10-17T15:45:09.251", "t": 26.917, "sid": "161c0165", "action": "context", "detail": "请求头就绪：AL=zh-CN,zh;q=0.9,en;q=0.8,en-G | ClientHints 0 项"}
+{"ts": "2026-10-17T15:45:09.255", "t": 26.921, "sid": "161c0165", "action": "queries", "detail": "查询改写开启（会话链=开）"}
+{"ts": "2026-10-17T15:45:09.381", "t": 27.047, "sid": "161c0165", "action": "trend", "detail": "[baidu] 抓到 52 条"}
+{"ts": "2026-10-17T15:45:09.541", "t": 27.207, "sid": "161c0165", "action": "trend", "detail": "[weibo] 抓到 52 条"}
+{"ts": "2026-10-17T15:45:09.789", "t": 27.455, "sid": "161c0165", "action": "trend", "detail": "[toutiao] 抓到 50 条"}
+{"ts": "2026-10-17T15:45:09.943", "t": 27.61, "sid": "161c0165", "action": "trend_fail", "detail": "[zhihu] HTTPError: 401 Client Error: Authorization Required for url: https://www.zhihu.com/api/v3/f"}
+{"ts": "2026-10-17T15:45:10.478", "t": 28.144, "sid": "161c0165", "action": "trend_fail", "detail": "[bing] HTTPError: 404 Client Error: Not Found for url: https://cn.bing.com/news/trendingtopics?for"}
+{"ts": "2026-10-17T15:45:10.727", "t": 28.394, "sid": "161c0165", "action": "trend", "detail": "[sina] 抓到 2 条"}
+{"ts": "2026-10-17T15:45:10.728", "t": 28.395, "sid": "161c0165", "action": "keywords", "detail": "关键词池 40 条（来源 http），示例：沙退湖清 好日子跟着好生态一起来了 | 自愿放弃社保无效 | 诈骗电话打给了香港保安局局长 | 广交会70年热门单品大变迁 | 新人发彩票做伴手礼宾客刮中25万"}
+{"ts": "2026-10-17T15:45:10.729", "t": 28.395, "sid": "161c0165", "action": "queries", "detail": "查询质量：均长 17.48 字，长尾率 1.0，提问式 0.42"}
+{"ts": "2026-10-17T15:45:10.729", "t": 28.395, "sid": "161c0165", "action": "search_start", "detail": "第 1/50 次：80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间", "source": "baidu", "plan_seconds": 30.0}
+{"ts": "2026-10-17T15:45:10.729", "t": 28.395, "sid": "161c0165", "action": "navigate", "detail": "打开首页 https://www.bing.com/?mkt=zh-CN", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:29.458", "t": 47.125, "sid": "161c0165", "action": "focus", "detail": "定位搜索框 #sb_form_q", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:31.637", "t": 49.304, "sid": "161c0165", "action": "paste", "detail": "粘贴关键词：80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间（预算 1.0s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:42.270", "t": 59.936, "sid": "161c0165", "action": "submit", "detail": "点击搜索按钮 label#search_icon", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:43.840", "t": 61.506, "sid": "161c0165", "action": "results", "detail": "结果已渲染（li.b_algo h2 a），共 10 条", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:43.840", "t": 61.506, "sid": "161c0165", "action": "budget", "detail": "本轮耗时 33.1s / 预算 30.0s", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:43.840", "t": 61.506, "sid": "161c0165", "action": "round_end", "detail": "第 1 轮结束：成功=True 用时=33.11s（预算 30.0s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间"}
+{"ts": "2026-10-17T15:45:43.840", "t": 61.507, "sid": "161c0165", "action": "idle", "detail": "间隔 16.0s"}
+{"ts": "2026-10-17T15:45:59.863", "t": 77.529, "sid": "161c0165", "action": "search_start", "detail": "第 2/50 次：80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情", "source": "baidu", "plan_seconds": 30.0}
+{"ts": "2026-10-17T15:45:59.863", "t": 77.53, "sid": "161c0165", "action": "reuse", "detail": "停留在搜索结果页，直接改词（不重新打开首页）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:15.294", "t": 92.96, "sid": "161c0165", "action": "focus", "detail": "定位搜索框 #sb_form_q", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:16.699", "t": 94.366, "sid": "161c0165", "action": "paste", "detail": "粘贴关键词：80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情（预算 1.8s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:19.326", "t": 96.993, "sid": "161c0165", "action": "submit", "detail": "回车提交", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:19.347", "t": 97.014, "sid": "161c0165", "action": "results", "detail": "结果已渲染（li.b_algo h2 a），共 10 条", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:27.789", "t": 105.455, "sid": "161c0165", "action": "skip", "detail": "剩余时间不足，跳过点击结果", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:27.789", "t": 105.456, "sid": "161c0165", "action": "budget", "detail": "本轮耗时 27.9s / 预算 30.0s", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:27.790", "t": 105.456, "sid": "161c0165", "action": "round_end", "detail": "第 2 轮结束：成功=True 用时=27.93s（预算 30.0s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 怎么弄 时间 详情"}
+{"ts": "2026-10-17T15:46:27.790", "t": 105.457, "sid": "161c0165", "action": "idle", "detail": "间隔 11.4s"}
+{"ts": "2026-10-17T15:46:40.169", "t": 117.835, "sid": "161c0165", "action": "search_start", "detail": "第 3/50 次：80万个假冰箱贴卖了1660万 主犯获刑 官网", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网", "source": "baidu", "plan_seconds": 30.0}
+{"ts": "2026-10-17T15:46:40.169", "t": 117.835, "sid": "161c0165", "action": "reuse", "detail": "停留在搜索结果页，直接改词（不重新打开首页）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:46:55.361", "t": 133.027, "sid": "161c0165", "action": "focus", "detail": "定位搜索框 #sb_form_q", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:46:58.104", "t": 135.77, "sid": "161c0165", "action": "paste", "detail": "粘贴关键词：80万个假冰箱贴卖了1660万 主犯获刑 官网（预算 1.6s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:01.907", "t": 139.573, "sid": "161c0165", "action": "submit", "detail": "回车提交", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:02.840", "t": 140.506, "sid": "161c0165", "action": "results", "detail": "结果已渲染（li.b_algo h2 a），共 10 条", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:08.669", "t": 146.335, "sid": "161c0165", "action": "skip", "detail": "剩余时间不足，跳过点击结果", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:08.669", "t": 146.336, "sid": "161c0165", "action": "budget", "detail": "本轮耗时 28.5s / 预算 30.0s", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:08.670", "t": 146.336, "sid": "161c0165", "action": "round_end", "detail": "第 3 轮结束：成功=True 用时=28.5s（预算 30.0s）", "engine": "bing", "keyword": "80万个假冰箱贴卖了1660万 主犯获刑 官网"}
+{"ts": "2026-10-17T15:47:08.670", "t": 146.337, "sid": "161c0165", "action": "idle", "detail": "间隔 16.6s"}
+{"ts": "2026-10-17T15:47:25.267", "t": 162.933, "sid": "161c0165", "action": "search_start", "detail": "第 4/50 次：刘诗诗新剧面相变了 多少钱 推荐", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐", "source": "baidu", "plan_seconds": 30.0}
+{"ts": "2026-10-17T15:47:25.267", "t": 162.934, "sid": "161c0165", "action": "reuse", "detail": "停留在搜索结果页，直接改词（不重新打开首页）", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:41.135", "t": 178.801, "sid": "161c0165", "action": "focus", "detail": "定位搜索框 #sb_form_q", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:42.862", "t": 180.528, "sid": "161c0165", "action": "paste", "detail": "粘贴关键词：刘诗诗新剧面相变了 多少钱 推荐（预算 1.7s）", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:44.854", "t": 182.52, "sid": "161c0165", "action": "submit", "detail": "回车提交", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:44.875", "t": 182.542, "sid": "161c0165", "action": "results", "detail": "结果已渲染（li.b_algo h2 a），共 10 条", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:53.063", "t": 190.73, "sid": "161c0165", "action": "budget", "detail": "本轮耗时 27.8s / 预算 30.0s", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:53.063", "t": 190.73, "sid": "161c0165", "action": "round_end", "detail": "第 4 轮结束：成功=True 用时=27.8s（预算 30.0s）", "engine": "bing", "keyword": "刘诗诗新剧面相变了 多少钱 推荐"}
+{"ts": "2026-10-17T15:47:53.064", "t": 190.73, "sid": "161c0165", "action": "idle", "detail": "间隔 16.6s"}
+{"ts": "2026-10-17T15:47:58.618", "t": 196.284, "sid": "161c0165", "action": "abort", "detail": "收到停止请求，在第 5 轮前退出"}
+{"ts": "2026-10-17T15:47:58.618", "t": 196.284, "sid": "161c0165", "action": "keep_open", "detail": "保持窗口 30.0s"}

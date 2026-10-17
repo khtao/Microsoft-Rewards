@@ -19,51 +19,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .fingerprint import STEALTH_MIN_JS, STEALTH_PLUGINS_JS
+
 # Edge on Linux 的管理策略目录（Chromium 是 /etc/chromium/policies/managed）
 EDGE_POLICY_DIRS = (Path("/etc/opt/edge/policies/managed"),
                     Path("/etc/opt/microsoft/edge/policies/managed"))
 # 这条策略专门用来关掉「不受支持的命令行标志」的安全警告横幅
 FLAG_WARNING_POLICY = {"CommandLineFlagSecurityWarningsEnabled": False}
 
-STEALTH_JS = """
-(() => {
-  const patch = (obj, name, value) => {
-    try { Object.defineProperty(obj, name, { get: () => value, configurable: true }); } catch (e) {}
-  };
-  patch(navigator, 'webdriver', undefined);
-  patch(navigator, 'languages', ['zh-CN', 'zh', 'en-US', 'en']);
-  patch(navigator, 'hardwareConcurrency', 8);
-  patch(navigator, 'deviceMemory', 8);
-  patch(navigator, 'maxTouchPoints', 0);
-  if (!window.chrome) window.chrome = {};
-  window.chrome.runtime = window.chrome.runtime || {};
-  window.chrome.loadTimes = window.chrome.loadTimes || function(){};
-  window.chrome.csi = window.chrome.csi || function(){};
-  const plugins = [
-    {name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-    {name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-    {name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-    {name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-    {name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format'}
-  ];
-  plugins.forEach((p, i) => { p.length = 1; Object.defineProperty(p, i, {value: p}); });
-  patch(navigator, 'plugins', plugins);
-  patch(navigator, 'mimeTypes', [1, 2, 3]);
-  try {
-    const orig = navigator.permissions && navigator.permissions.query;
-    if (orig) {
-      navigator.permissions.query = (p) =>
-        (p && p.name === 'notifications')
-          ? Promise.resolve({ state: Notification.permission })
-          : orig(p);
-    }
-  } catch (e) {}
-  try {
-    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    void origToDataURL;
-  } catch (e) {}
-})();
-"""
+# 指纹注入原则：一致性 > 伪装。
+# 这里**不硬编码** hardwareConcurrency / deviceMemory / languages —— 真机上这些值
+# 与自己写死的值不一致，反而变成强特征；只有 headless 缺失对象时才补齐。
+STEALTH_JS = STEALTH_MIN_JS          # 兼容旧引用名
 
 IGNORE_DIRS = {
     "Cache", "Code Cache", "GPUCache", "ShaderCache", "Service Worker",
@@ -291,12 +258,16 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
                 edge_path: str | None = None, slow_mo: int = 0,
                 sandbox: str | None = None, suppress_flag_warning: bool | None = None,
                 policy_dir: str | None = None, verbose: bool = True,
-                flag_warning: str = "auto"):
+                flag_warning: str = "auto", geo=None):
     """返回一个 persistent context（页面与 Cookie 全部落在真实 profile 里）。
 
     sandbox              "on" 开沙箱 / "off" 关沙箱 / None 自动（root 自动关）
     flag_warning         "off" 强制抑制警告条 / "on" 保留 / "auto" 仅在关沙箱时抑制
+    geo                  GeoProfile；用它统一时区 / locale，保证与 IP 归属一致
     """
+    tz = getattr(geo, "timezone", None) or "Asia/Shanghai"
+    loc = getattr(geo, "locale", None) or "zh-CN"
+    lang = loc.split("-")[0]
     from playwright.sync_api import Error as PWError  # 延迟导入
 
     use_sandbox = resolve_sandbox(sandbox)
@@ -327,12 +298,13 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
     kwargs = dict(
         user_data_dir=str(user_data_dir),
         headless=headless,
-        args=build_args(window_size, proxy, suppress_flag_warning=suppress_flag_warning),
+        args=build_args(window_size, proxy, lang=lang,
+                        suppress_flag_warning=suppress_flag_warning),
         chromium_sandbox=use_sandbox,   # True 时 Playwright 不会加 --no-sandbox
         ignore_default_args=["--enable-automation"],
         permissions=["clipboard-read", "clipboard-write"],
-        locale="zh-CN",
-        timezone_id="Asia/Shanghai",
+        locale=loc,                # 与 IP 归属一致
+        timezone_id=tz,            # 与 IP 归属一致
         slow_mo=slow_mo,
         no_viewport=True,          # 不强制 viewport，窗口就是真实窗口大小
     )
@@ -365,5 +337,8 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
             ctx = _try(**kwargs)
         else:
             raise
-    ctx.add_init_script(STEALTH_JS)
+    ctx.add_init_script(STEALTH_MIN_JS)
+    # 只有无头模式才需要补齐插件列表（真实有头 Edge 自带，补了反而可能与真机不符）
+    if headless:
+        ctx.add_init_script(STEALTH_PLUGINS_JS)
     return ctx

@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """函数式接口：一句话启动一轮"真人搜索"实验。
 
-提供给桌面程序的内部搜索接口：
+给其它脚本用：
 
-    from rewards_assistant.api import fetch_keywords, run_human_search
+    from human_search import run_human_search
+    report = run_human_search(repeat=10, level=3)
+    print(report.ok_count, report.rounds[0].keyword, report.rounds[0].duration)
 
 也可以只取关键词：
 
-    from rewards_assistant.api import fetch_keywords
+    from human_search import fetch_keywords
     kws = fetch_keywords(limit=30)          # [Keyword(text, source, rank, heat, url), ...]
 """
 from __future__ import annotations
@@ -21,9 +23,14 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from .engines import ENGINES, resolve_engine, run_search
-from .human import Budget, Human
-from .trends import Keyword, get_keyword_pool
+try:                                   # 作为包导入
+    from .engines import ENGINES, resolve_engine, run_search, home_url
+    from .human import Budget, Human
+    from .trends import Keyword, get_keyword_pool
+except ImportError:                     # 直接把目录加入 sys.path 后导入
+    from engines import ENGINES, resolve_engine, run_search, home_url
+    from human import Budget, Human
+    from trends import Keyword, get_keyword_pool
 
 DEFAULT_LOG = "search_actions.jsonl"
 
@@ -60,6 +67,11 @@ class SearchReport:
     clicked_count: int = 0
     rounds: list = field(default_factory=list)
     log_path: str = ""
+    geo: dict = field(default_factory=dict)
+    fingerprint: dict = field(default_factory=dict)
+    checks: list = field(default_factory=list)
+    query_quality: dict = field(default_factory=dict)
+    request_samples: list = field(default_factory=list)
 
     def to_dict(self):
         d = asdict(self)
@@ -167,6 +179,13 @@ def run_human_search(
         sandbox: str | None = None,
         flag_warning: str = "auto",
         policy_dir: str | None = None,
+        geo=None,
+        detect_geo: bool = True,
+        force_geo: bool = False,
+        rewrite_queries: bool = True,
+        session_chain: bool = True,
+        reuse_serp: bool = True,
+        audit_requests: bool = False,
         log_file: str | None = DEFAULT_LOG,
         log_callback=None,
         stop_check=None,
@@ -216,7 +235,24 @@ def run_human_search(
     cfg = SimpleNamespace(
         on_captcha=on_captcha, click_prob=click_prob,
         enter_rate=enter_rate, scroll_screens=scroll_screens, no_back=False,
+        reuse_serp=reuse_serp,
     )
+
+    # ---- 地理位置：统一时区 / 语言 / 市场，保证与 IP 归属自洽
+    if geo is None and detect_geo:
+        try:
+            from .geo import detect as _detect_geo
+            geo = _detect_geo(use_cache=True, timeout=4.0, verbose=verbose, force=force_geo)
+        except Exception:
+            geo = None
+    if geo is not None:
+        from .geo import describe as _describe_geo
+        report.geo = getattr(geo, "to_dict", lambda: {})()
+        logger("geo", _describe_geo(geo))
+        if verbose:
+            from entropy import Circadian
+            circ = Circadian(geo.tz_offset_hours)
+            print(f"[信息] 当地作息：{circ.describe()}")
 
     # ---- 浏览器：用外部的，或自己启动
     own_context = False
@@ -224,8 +260,8 @@ def run_human_search(
     if ctx is None and page is not None:
         ctx = page.context
     if ctx is None:
-        from .browser import (copy_profile as _copy, default_profile_dir,
-                              edge_is_running, launch_edge, find_edge_binary, profile_locked)
+        from .browser import (copy_profile as _copy, default_profile_dir, edge_is_running,
+                             launch_edge, find_edge_binary, profile_locked)
         from playwright.sync_api import sync_playwright
 
         profile = Path(user_data_dir).expanduser() if user_data_dir else default_profile_dir()
@@ -248,7 +284,7 @@ def run_human_search(
                           window_size=window_size, proxy=proxy,
                           edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
                           sandbox=sandbox, flag_warning=flag_warning,
-                          policy_dir=policy_dir, verbose=verbose)
+                          policy_dir=policy_dir, verbose=verbose, geo=geo)
         own_context = True
         logger("browser", f"Edge 启动 user_data_dir={profile} headless={headless}")
     else:
@@ -256,6 +292,41 @@ def run_human_search(
 
     try:
         main_page = page or (ctx.pages[0] if ctx.pages else ctx.new_page())
+
+        # ---- 请求上下文：真实 Client Hints + 与地区一致的 Accept-Language
+        try:
+            from .  import context as _ctxmod
+            from .  import fingerprint as _fpmod
+            fp = _fpmod.collect(main_page)
+            report.fingerprint = fp or {}
+            rctx = _ctxmod.build(geo, (fp or {}).get("uaData"))
+            _ctxmod.apply(ctx, rctx, verbose=verbose)
+            if audit_requests:
+                _req_samples = []
+                _ctxmod.install_recorder(main_page, _req_samples)
+                report.request_samples = _req_samples
+            logger("context", f"请求头就绪：AL={rctx.accept_language[:28]} | "
+                              f"ClientHints {len(rctx.client_hints)} 项")
+        except Exception as _e:
+            logger("warn", f"请求上下文设置失败（不影响运行）：{_e}")
+
+        # ---- 查询改写：把热搜词改写成自然查询，并组织成会话链
+        rewriter = None
+        if rewrite_queries:
+            try:
+                from .queries import QueryBuilder, SessionChain, quality as _q
+                qb = QueryBuilder(geo, rng)
+                chain = SessionChain(qb, rng) if session_chain else None
+                if chain is not None:
+                    def rewriter(text, _c=chain):
+                        return _c.next(text)[0]
+                else:
+                    def rewriter(text, _b=qb):
+                        return _b.build(text)
+                logger("queries", f"查询改写开启（会话链={'开' if session_chain else '关'}）")
+            except Exception as _e:
+                logger("warn", f"查询改写不可用：{_e}")
+                rewriter = None
 
         # ---- 关键词池
         def _collect(tmp_page):
@@ -272,7 +343,16 @@ def run_human_search(
         if not pool:
             raise RuntimeError("关键词池为空，检查网络或自定义 keywords 参数")
 
-        plan = _sample_plan(pool, repeat, rng, unique_keywords, engines, alternate)
+        plan = _sample_plan(pool, repeat, rng, unique_keywords, engines, alternate,
+                            rewriter=rewriter)
+        try:
+            from .queries import quality as _qq
+            report.query_quality = _qq([kw.text for _, kw in plan])
+            logger("queries", f"查询质量：均长 {report.query_quality.get('avg_len')} 字，"
+                              f"长尾率 {report.query_quality.get('long_tail_rate')}，"
+                              f"提问式 {report.query_quality.get('question_rate')}")
+        except Exception:
+            pass
 
         # ---- 逐轮执行
         for i, (ename, kw) in enumerate(plan, 1):
@@ -331,7 +411,9 @@ def run_human_search(
                     report.keyword_source = how2
                     logger("keywords", f"刷新关键词池 {len(pool)} 条（来源 {how2}）")
                     rest = _sample_plan(pool, repeat - i, rng, unique_keywords,
-                                        engines, alternate, used=[p[1].text for p in plan[:i]])
+                                        engines, alternate,
+                                        used=[p[1].text for p in plan[:i]],
+                                        rewriter=rewriter)
                     plan = plan[:i] + rest
                 finally:
                     tmp.close()
@@ -353,6 +435,25 @@ def run_human_search(
                 pass
         logger.close()
         report.log_path = str(Path(log_file).resolve()) if log_file else ""
+        try:
+            from . import fingerprint as _fpmod
+            from . import geo as _geomod
+            fp = report.fingerprint or _fpmod.collect(main_page)
+            ck = list(_fpmod.checks(fp))
+            if geo is not None:
+                ck += _geomod.consistency_checks(
+                    geo, fp.get("timezone"), fp.get("language"), fp.get("languages"))
+                if getattr(report, "request_samples", None):
+                    from . import context as _ctxmod
+                    ck = _ctxmod.check_request_coherence(report.request_samples, geo, ck)
+            report.checks = [{"name": a, "value": b, "ok": bool(c)} for a, b, c in ck]
+            bad = [c for c in report.checks if not c["ok"]]
+            if bad and verbose:
+                print(f"[提示] 一致性检查有 {len(bad)} 项不通过：")
+                for c in bad[:8]:
+                    print(f"       · {c['name']}：{c['value']}")
+        except Exception:
+            pass
 
     if verbose:
         print(f"\n完成：成功 {report.ok_count} / 失败 {report.fail_count}，"
@@ -364,8 +465,9 @@ def run_human_search(
 
 def _sample_plan(pool: list[Keyword], n: int, rng: random.Random,
                  unique: bool, engines, alternate: bool,
-                 used: list | None = None) -> list:
+                 used: list | None = None, rewriter=None) -> list:
     """从关键词池采样 n 条，并分配引擎。"""
+    texts = [k.text for k in pool]
     chosen: list[Keyword] = []
     if unique:
         avoid = set(used or [])
@@ -387,5 +489,13 @@ def _sample_plan(pool: list[Keyword], n: int, rng: random.Random,
             ename = engines[i % len(engines)]
         else:
             ename = rng.choice(engines)
+        if rewriter is not None:
+            try:
+                new_text = rewriter(kw.text)
+                if new_text:
+                    kw = Keyword(new_text, kw.source, kw.rank)
+            except Exception:
+                pass
         plan.append((ename, kw))
+    del texts
     return plan
