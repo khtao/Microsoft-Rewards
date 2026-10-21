@@ -11,11 +11,13 @@ import sys
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
+from copy import deepcopy
+import re
 from typing import Literal, Optional, Union
 
 APP_NAME = "MSRewardsAssistant"
-APP_TITLE = "Microsoft Rewards 每日助手"
-APP_VERSION = "1.0.0"
+APP_TITLE = "积分活动管理助手"
+APP_VERSION = "1.1.3"
 
 REWARDS_HOME = "https://rewards.bing.com/"
 REWARDS_DASHBOARD = "https://rewards.bing.com/"
@@ -88,7 +90,12 @@ DEFAULT_SETTINGS = {
     # 每天定时自动打开未完成任务页（HH:MM），空字符串=关闭
     "auto_open_time": "09:00",
     "auto_open_time_value": "09:00",
-    "auto_run_pending": False,
+    # 独立的“自动完成未完成任务”时间表，0~10 个且互不重复。
+    # 旧版 auto_run_pending/auto_open_time 会在加载时迁移。
+    "auto_run_enabled": False,
+    "auto_run_times": ["09:00"],
+    "auto_run_fired_day": "",
+    "auto_run_fired_times": [],
     # 逐个打开时的随机间隔区间（秒），模拟人的操作节奏
     "auto_open_gap_min": 5,
     "auto_open_gap_max": 10,
@@ -101,7 +108,7 @@ DEFAULT_SETTINGS = {
     # 趋势图显示天数
     "chart_days": 30,
     "chart_metric": "earned",
-    # 拟人搜索页的全部表单选项。
+    # 账户与设置中拟人搜索区域的全部表单选项（兼容原独立选项卡）。
     "search_panel": {},
 }
 
@@ -149,11 +156,27 @@ class TaskConfig:
         return asdict(self)
 
 
+_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+def normalize_run_times(times) -> list[str]:
+    """验证启动时刻：每天本地 HH:MM；最多 10 个，不允许重复。"""
+    if not isinstance(times, (list, tuple)):
+        raise ValueError("启动时间必须为列表")
+    if len(times) > 10:
+        raise ValueError("最多只能设置 10 个启动时间点")
+    if any(not isinstance(t, str) or not _TIME_RE.fullmatch(t) for t in times):
+        raise ValueError("启动时间必须为 HH:MM（24 小时制）")
+    if len(set(times)) != len(times):
+        raise ValueError("自动完成任务的启动时间不能重复")
+    return sorted(times)
+
+
 class Settings:
     """JSON 设置存储：合并更新、原子替换、旧版本设置兼容。"""
 
     def __init__(self) -> None:
-        self._data = dict(DEFAULT_SETTINGS)
+        self._data = deepcopy(DEFAULT_SETTINGS)
         self.load()
 
     def load(self) -> None:
@@ -164,6 +187,16 @@ class Settings:
                 if isinstance(loaded, dict):
                     # 已取消浏览器选择，下次保存时自动丢弃旧版字段。
                     loaded.pop("browser_name", None)
+                    # 从旧版“到点自动运行”开关迁移，保留原有时间。
+                    if "auto_run_times" not in loaded:
+                        old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
+                        loaded["auto_run_times"] = [old_time] if _TIME_RE.fullmatch(str(old_time)) else ["09:00"]
+                        loaded["auto_run_enabled"] = bool(loaded.get("auto_run_pending", False))
+                    loaded.pop("auto_run_pending", None)
+                    try:
+                        loaded["auto_run_times"] = normalize_run_times(loaded["auto_run_times"])
+                    except ValueError:
+                        loaded["auto_run_times"] = ["09:00"]
                     self._data.update(loaded)
             except (OSError, ValueError, TypeError):
                 # 损坏文件不阻断启动；下一次保存使用正常数据原子替换。
@@ -194,6 +227,11 @@ class Settings:
 
     def update(self, changes: dict) -> bool:
         """一次保存多项；无变化不写盘。失败时保留原内存设置。"""
+        changes = dict(changes)
+        if "auto_run_times" in changes:
+            changes["auto_run_times"] = normalize_run_times(changes["auto_run_times"])
+        # 不再往设置文件回写已废弃的开关。
+        changes.pop("auto_run_pending", None)
         changed = {k: v for k, v in changes.items()
                    if k not in self._data or self._data[k] != v}
         if not changed:

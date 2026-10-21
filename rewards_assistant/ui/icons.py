@@ -74,11 +74,12 @@ def _render_svg(size: int) -> QPixmap:
 def _png_for(size: int) -> QPixmap:
     """挑一张最接近 size 的 PNG（优先不小于它的）。"""
     d = icons_dir()
-    up = [s for s in _ICON_SIZES if s >= size and (d / f"app_{s}.png").is_file()]
-    pick = up[0] if up else max(_ICON_SIZES, key=lambda s: (d / f"app_{s}.png").is_file() and -abs(s - size))
-    path = d / f"app_{pick}.png"
-    if not path.is_file():
+    available = [s for s in _ICON_SIZES if (d / f"app_{s}.png").is_file()]
+    if not available:
         return QPixmap()
+    up = [s for s in available if s >= size]
+    pick = min(up) if up else max(available)
+    path = d / f"app_{pick}.png"
     pm = QPixmap(str(path))
     return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
                      Qt.TransformationMode.SmoothTransformation) if pm.height() != size else pm

@@ -80,7 +80,7 @@ def _headers() -> Dict[str, str]:
     }
 
 
-def fetch_with_cookies(raw_cookie: str, timeout: int = 25) -> Dict[str, Any]:
+def fetch_with_cookies(raw_cookie: str, timeout: int | tuple = 25) -> Dict[str, Any]:
     """用 Cookie 直接请求官方接口；失败抛 AuthError。"""
     import json
 
@@ -133,7 +133,7 @@ class AuthManager:
             self.log(str(exc))
             return False
 
-    def fetch_dashboard(self, timeout: int = 25) -> Dict[str, Any]:
+    def fetch_dashboard(self, timeout: int | tuple = 25) -> Dict[str, Any]:
         """返回原始 dashboard JSON。未登录或过期抛 AuthError。"""
         raw = self.cookies.load()
         if not raw:

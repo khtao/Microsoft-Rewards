@@ -27,12 +27,15 @@ try:                                   # 作为包导入
     from .engines import ENGINES, resolve_engine, run_search, home_url
     from .human import Budget, Human
     from .trends import Keyword, get_keyword_pool
+    from .config import data_dir
 except ImportError:                     # 直接把目录加入 sys.path 后导入
     from engines import ENGINES, resolve_engine, run_search, home_url
     from human import Budget, Human
     from trends import Keyword, get_keyword_pool
+    from config import data_dir
 
-DEFAULT_LOG = "search_actions.jsonl"
+# 不在启动目录写日志；系统登录后自启动时 CWD 常常不可写。
+DEFAULT_LOG = str(data_dir() / "search_actions.jsonl")
 
 
 # ------------------------------------------------------------------ 数据结构
@@ -330,8 +333,12 @@ def run_human_search(
 
         # ---- 关键词池
         def _collect(tmp_page):
-            pool, how = get_keyword_pool(sources=keyword_sources, limit=keyword_limit,
-                                         page=tmp_page, log=logger)
+            # 全部取消热搜来源时尊重选择，只使用用户自行填写的关键词。
+            if keyword_sources:
+                pool, how = get_keyword_pool(sources=keyword_sources, limit=keyword_limit,
+                                             page=tmp_page, log=logger)
+            else:
+                pool, how = [], "自定义关键词"
             extra = [Keyword(str(k), "custom", i + 1) for i, k in enumerate(keywords or [])]
             return extra + pool, how
 
@@ -421,8 +428,10 @@ def run_human_search(
 
         if keep_open:
             logger("keep_open", f"保持窗口 {keep_open}s")
+            until = time.monotonic() + keep_open
             try:
-                time.sleep(keep_open)
+                while time.monotonic() < until and not (stop_check is not None and stop_check()):
+                    time.sleep(min(0.25, max(0.0, until - time.monotonic())))
             except KeyboardInterrupt:
                 pass
     finally:

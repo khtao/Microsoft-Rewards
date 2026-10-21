@@ -15,6 +15,7 @@ from typing import Iterable, List, Optional
 
 from .config import db_path
 from .task_labels import humanize_task
+from .pending import all_reward_tasks_done
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily (
@@ -43,6 +44,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     link          TEXT NOT NULL DEFAULT '',
     manual        INTEGER NOT NULL DEFAULT 0,
     title_source  TEXT NOT NULL DEFAULT 'guess',
+    offer_id      TEXT NOT NULL DEFAULT '',
+    raw_name      TEXT NOT NULL DEFAULT '',
     updated_at    TEXT,
     UNIQUE(day, key)
 );
@@ -84,7 +87,7 @@ class Store:
             conn.commit()
 
     def _ensure_columns(self) -> None:
-        """老库补列：title_source。"""
+        """老库补列：标题来源及用于核对同一活动的官方标识。"""
         with self._connect() as conn:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "title_source" not in cols:
@@ -92,6 +95,10 @@ class Store:
                     "ALTER TABLE tasks ADD COLUMN title_source TEXT NOT NULL DEFAULT 'guess'")
             if "manual" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
+            if "offer_id" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN offer_id TEXT NOT NULL DEFAULT ''")
+            if "raw_name" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN raw_name TEXT NOT NULL DEFAULT ''")
 
     def _connect(self):
         conn = getattr(self._local, "conn", None)
@@ -126,14 +133,16 @@ class Store:
         manual: bool = False,
         link: str = "",
         title_source: str = "guess",
+        offer_id: str = "",
+        raw_name: str = "",
     ) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with self.tx() as conn:
             conn.execute(
                 """
                 INSERT INTO tasks (day, key, name, category, points_max, points_earned,
-                                   complete, link, manual, title_source, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                   complete, link, manual, title_source, offer_id, raw_name, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(day, key) DO UPDATE SET
                     name=excluded.name,
                     category=excluded.category,
@@ -143,6 +152,8 @@ class Store:
                     link=COALESCE(NULLIF(excluded.link, ''), tasks.link),
                     manual=excluded.manual,
                     title_source=excluded.title_source,
+                    offer_id=excluded.offer_id,
+                    raw_name=excluded.raw_name,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -156,9 +167,25 @@ class Store:
                     link or "",
                     1 if manual else 0,
                     title_source,
+                    offer_id or "",
+                    raw_name or "",
                     now,
                 ),
             )
+
+    def remove_missing_official_tasks(self, day: str, current_keys) -> int:
+        """同步后移除本日已不在官方接口内的旧任务，防止误判未完成。"""
+        keys = set(current_keys)
+        if not keys:
+            # 空接口可能是网络异常/地区响应，不贸然清空缓存。
+            return 0
+        with self.tx() as conn:
+            stale = [r["key"] for r in conn.execute(
+                "SELECT key FROM tasks WHERE day=? AND manual=0", (day,)) if r["key"] not in keys]
+            if stale:
+                conn.executemany("DELETE FROM tasks WHERE day=? AND key=?",
+                                 [(day, key) for key in stale])
+        return len(stale)
 
     def set_task_complete(self, day: str, key: str, complete: bool) -> None:
         """手动勾选/取消勾选：同步更新完成状态与已得积分。"""
@@ -217,7 +244,7 @@ class Store:
             "points_max": points_max,
             "tasks_done": done,
             "tasks_total": total,
-            "all_done": bool(total and done == total),
+            "all_done": all_reward_tasks_done(rows),
             "available_points": int(prev["available_points"]) if prev else 0,
             "level": int(prev["level"]) if prev else 0,
             "synced_at": datetime.now().isoformat(timespec="seconds"),

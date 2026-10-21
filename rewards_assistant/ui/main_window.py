@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""主窗口：今日 / 趋势 / 历史 / 账户与设置 / 拟人搜索。
+"""主窗口：今日 / 趋势 / 历史 / 账户与设置。
 
-拟人搜索运行内核（SearchRunner）被三个入口共用：
-  1) 今日页「自动完成未完成任务」
-  2) 账户页「每天定时自动完成未完成任务」
-  3) 拟人搜索独立选项卡（手动配置参数运行）
+拟人搜索的运行参数、启动按钮和日志整合到账户与设置；
+今日页的电脑端搜索与定时自动运行共用同一个 SearchRunner。
 """
 from __future__ import annotations
 
@@ -33,7 +31,7 @@ from .task_panel import TaskPanel
 from ..api import DEFAULT_LOG, run_human_search
 from ..browser import find_edge_binary, is_root
 from ..trends import HTTP_SOURCES
-from ..search_terms import remaining_searches
+from ..pending import pending_desktop_rounds
 
 ALL_SOURCES = tuple(HTTP_SOURCES.keys()) if isinstance(HTTP_SOURCES, dict) else \
     ("baidu", "weibo", "toutiao", "zhihu", "bing", "sina")
@@ -85,7 +83,7 @@ class SearchWorker(QThread):
 
 
 class SearchRunner(QObject):
-    """拟人搜索运行内核，三个入口共用。"""
+    """拟人搜索运行内核，电脑端搜索与手动启动共用。"""
 
     status = Signal(str)
     log = Signal(str, str)
@@ -119,24 +117,24 @@ class SearchRunner(QObject):
         """根据「未完成任务」推算本轮参数：轮数 = 还差几次搜索。"""
         p = dict(SearchRunner.defaults())
         p.update(settings)
-        row = store.daily(date.today().isoformat())
-        if row is not None:
-            tasks = store.tasks_of_day(date.today().isoformat())
-            need = 0
-            for t in tasks:
-                if t["key"] in ("pc_search", "mobile_search") and not t["complete"]:
-                    left = max(0, int(t["points_max"]) - int(t["points_earned"]))
-                    need += remaining_searches(left)
-            if need > 0:
-                p["repeat"] = min(need, 200)
+        day = date.today().isoformat()
+        row = store.daily(day)
+        if row is None or row["all_done"]:
+            return None
+        tasks = store.tasks_of_day(day)
+        # 只运行电脑端搜索：Edge 桌面浏览器不能冒充移动搜索进度。
+        need = pending_desktop_rounds(tasks)
+        if need <= 0:
+            return None
+        p["repeat"] = min(need, 200)
         return p
 
     def is_running(self) -> bool:
         return self.worker is not None and self.worker.isRunning()
 
-    def start(self, params: dict):
+    def start(self, params: dict) -> bool:
         if self.is_running():
-            return
+            return False
         self.worker = SearchWorker(params, self)
         w = self.worker
         w.sig.log.connect(lambda a, d: self.status.emit(f"{a} {d}".strip()[:120]))
@@ -149,6 +147,7 @@ class SearchRunner(QObject):
         self.status.emit(f"启动浏览器…共 {params.get('repeat', '?')} 轮")
         w.start()
         self.running_changed.emit(True)
+        return True
 
     def _clear_worker(self, worker):
         if self.worker is worker:
@@ -185,7 +184,7 @@ class MainWindow(QMainWindow):
         self.resize(1040, 720)
         self.setMinimumSize(880, 600)
 
-        # 拟人搜索运行内核（三个入口共用）
+        # 拟人搜索内核：今日、计划任务、手动启动均共用。
         self.runner = SearchRunner(self)
 
         self.stats = StatsRow()
@@ -195,8 +194,8 @@ class MainWindow(QMainWindow):
         self.quick = QuickPanel()
         self.chart = ChartView(self.store, settings=app.settings, save_settings=app.save_settings)
         self.history = HistoryPanel(self.store)
-        self.account = AccountPanel(app)
         self.search = SearchPanel(self, self.runner, app.settings, app.save_settings)
+        self.account = AccountPanel(app, search_panel=self.search)
 
         today_tab = QWidget()
         lay = QVBoxLayout(today_tab)
@@ -211,11 +210,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.chart, "趋势")
         self.tabs.addTab(self.history, "历史")
         self.tabs.addTab(self.account, "账户与设置")
-        self.tabs.addTab(self.search, "拟人搜索")
         self.setCentralWidget(self.tabs)
 
         # 今日页「自动完成」按钮 → 主窗口入口
-        self.quick.run_pending_requested.connect(self.run_pending_tasks)
+        self.quick.run_pending_requested.connect(self.app.run_pending_tasks)
         self.account.settings_changed.connect(self.app.apply_settings)
         self.quick.stop_requested.connect(self.stop_running)
 
@@ -234,16 +232,17 @@ class MainWindow(QMainWindow):
 
         act_sync = QAction("立即同步", self)
         act_sync.setShortcut(QKeySequence("F5"))
-        act_sync.triggered.connect(self.app.sync_now)
+        act_sync.triggered.connect(lambda: self.app.sync_now())
         act_login = QAction("登录微软账号", self)
         act_login.triggered.connect(self.app.login)
         act_refresh = QAction("刷新界面", self)
         act_refresh.triggered.connect(self.refresh_all)
 
-        bar.addAction(act_sync)
+        # 主界面不展示“立即同步 / 刷新界面”。保留隐藏 QAction：
+        # F5、系统托盘菜单及同步完成后的后台刷新不受影响。
+        self.addAction(act_sync)
+        self.addAction(act_refresh)
         bar.addAction(act_login)
-        bar.addSeparator()
-        bar.addAction(act_refresh)
         self.act_sync = act_sync
         self.act_login = act_login
         self.act_refresh = act_refresh
@@ -271,7 +270,12 @@ class MainWindow(QMainWindow):
         self.runner.running_changed.connect(self._on_runner_activity)
 
     def _on_runner_activity(self, active: bool) -> None:
-        self.quick.set_busy(active)
+        self.update_running_state()
+
+    def update_running_state(self):
+        busy = (self.runner.is_running() or self.app._opener.running
+                or self.app.activity_running() or bool(self.app._after_sync))
+        self.quick.set_busy(busy)
         self.app.update_tray_actions()
 
     def _on_run_progress(self, cur: int, total: int):
@@ -330,15 +334,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- 对外入口
 
-    def run_pending_tasks(self, settings: Optional[dict] = None):
-        """今日页「自动完成未完成任务」/ 定时任务的统一入口。"""
+    def run_pending_tasks(self, settings: Optional[dict] = None) -> bool:
+        """仅执行未完成的电脑端搜索；遵守统一的拟人搜索参数。"""
         if self.runner.is_running():
-            return
-        params = SearchRunner.for_pending(self.store, settings if settings is not None else self.search._collect())
-        self.runner.start(params)
+            self.set_status_message("电脑端拟人搜索正在执行，跳过重复启动")
+            return False
+        config = settings if settings is not None else self.search._collect()
+        params = SearchRunner.for_pending(self.store, config)
+        if params is not None and not params["keyword_sources"] and not params["keywords"]:
+            self.set_status_message("搜索词来源为空，请在账户与设置中选择热搜来源或填写关键词")
+            return False
+        if params is None:
+            self.set_status_message("当前没有未完成的电脑端搜索，不启动拟人搜索")
+            return False
+        return self.runner.start(params)
 
     def stop_running(self):
+        self.app.cancel_pending_actions()
         self.runner.stop()
+        self.app._opener.stop()
+        self.update_running_state()
 
     # ------------------------------------------------------------------ 关闭
 
@@ -359,9 +374,9 @@ class MainWindow(QMainWindow):
         self.app.quit()
 
 
-# ============================================================ 拟人搜索选项卡面板
+# ============================================================ 账户页内的拟人搜索设置
 class SearchPanel(QWidget):
-    """拟人搜索测试面板，可独立配置参数运行。"""
+    """电脑端搜索的统一参数设置和运行日志，嵌入账户与设置页。"""
 
     def __init__(self, parent=None, runner: Optional[SearchRunner] = None,
                  settings=None, save_settings=None):
@@ -392,7 +407,7 @@ class SearchPanel(QWidget):
 
     # ---------- 参数区
     def _build_params(self) -> QGroupBox:
-        box = QGroupBox("参数")
+        box = QGroupBox("拟人搜索设置（电脑端搜索共用）")
         g = QGridLayout(box)
         g.setVerticalSpacing(8)
         g.setHorizontalSpacing(10)
@@ -445,6 +460,8 @@ class SearchPanel(QWidget):
         self.spin_keep.setRange(0, 3600)
         self.spin_keep.setValue(30.0)
         self.spin_keep.setSuffix(" s")
+        self.spin_keep.setEnabled(self.chk_open.isChecked())
+        self.chk_open.toggled.connect(self.spin_keep.setEnabled)
 
         rows = [
             ("搜索轮数", self.spin_repeat, "拟人等级", self.cmb_level),
@@ -597,6 +614,7 @@ class SearchPanel(QWidget):
         except Exception:
             pass
         self.txt_log.setLineWrapMode(QTextEdit.NoWrap)
+        self.txt_log.setMinimumHeight(150)
         lay.addWidget(self.txt_log)
         return box
 
@@ -642,11 +660,12 @@ class SearchPanel(QWidget):
             repeat=self.spin_repeat.value(),
             level=self.cmb_level.currentIndex() + 1,
             round_seconds=(lo, hi),
+            max_round_seconds=hi,
             gap_seconds=(gmin, gmax),
             click_prob=self.spin_click.value(),
             seed=None if seed < 0 else seed,
             keywords=kws or None,
-            keyword_sources=sources or ALL_SOURCES,
+            keyword_sources=sources,
             headless=self.chk_headless.isChecked(),
             copy_profile=self.chk_copy.isChecked(),
             keep_open=self.spin_keep.value() if self.chk_open.isChecked() else 0.0,
@@ -655,6 +674,13 @@ class SearchPanel(QWidget):
 
     # ---------- 运行 / 停止
     def _on_run_clicked(self):
+        # 避免手动拟人搜索与自动点击 Rewards 卡片同时抢占 Edge 会话。
+        parent = self.parent()
+        if parent is not None and getattr(parent, "app", None) is not None:
+            if parent.app.activity_running():
+                QMessageBox.information(self, "活动任务正在运行",
+                                        "请等待活动卡片点击和官方同步结束，或先点击“停止”。")
+                return
         if self.runner is not None and self.runner.is_running():
             self.runner.stop()
             self.btn_run.setEnabled(False)
@@ -662,6 +688,9 @@ class SearchPanel(QWidget):
             return
 
         params = self._collect()
+        if not params["keyword_sources"] and not params["keywords"]:
+            QMessageBox.warning(self, "搜索词来源为空", "请至少选择一个热搜来源或填写额外关键词。")
+            return
         self.txt_log.clear()
         self._on_running()
         self.txt_log.append(f"[启动] 共 {params['repeat']} 轮")

@@ -108,12 +108,16 @@ def _linux_set(enabled: bool) -> bool:
     icon = _icon_path()
     if icon:
         lines.append(f"Icon={icon}")
+    lines.append("StartupWMClass=MSRewardsAssistant")
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return True
 
 
 def _icon_path() -> str:
-    """给 .desktop 用的图标路径：优先 SVG，其次 256 PNG。"""
+    """系统安装版使用主题图标名；便携/源码模式使用绝对 SVG 路径。"""
+    if (Path("/usr/share/icons/hicolor/scalable/apps/ms-rewards-assistant.svg").is_file()
+            or Path("/usr/share/pixmaps/ms-rewards-assistant.png").is_file()):
+        return "ms-rewards-assistant"
     from .ui.icons import icons_dir
 
     d = icons_dir()

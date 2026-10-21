@@ -25,6 +25,12 @@ extra=()
 if [[ -d "$ROOT/fonts" ]]; then
   extra+=(--add-data "$ROOT/fonts:fonts")
 fi
+# 必须显式打包图标资源；否则源码运行正常，deb 里 Qt 会退回默认图标。
+if [[ ! -f "$ROOT/assets/icons/app.svg" ]]; then
+  echo "[ERROR] Missing application icon assets/icons/app.svg" >&2
+  exit 1
+fi
+extra+=(--add-data "$ROOT/assets/icons:assets/icons")
 "$PY" -m PyInstaller --noconfirm --clean --onedir --windowed \
   --name MSRewardsAssistant --paths "$ROOT" \
   --collect-all playwright \

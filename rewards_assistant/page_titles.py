@@ -18,6 +18,7 @@ API（/api/getuserinfo）返回的 name 常常是内部 ID，例如
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -270,21 +271,40 @@ def fetch_html(url: str, cookies: Dict[str, str], timeout: int = 25) -> str:
     return resp.text
 
 
-def fetch_real_titles(cookies: Dict[str, str], timeout: int = 25
-                      ) -> Dict[str, List[PageCard]]:
-    """抓两个页面，返回 {'daily': [...], 'routine': [...]}。
+def fetch_real_titles(cookies: Dict[str, str], timeout=(3, 5), *,
+                      include=("daily", "routine"),
+                      with_dashboard_html: bool = False) -> Dict:
+    """并行读取需要的官方页面；某个页面失败不影响其他页面。
 
-    daily   = dashboard 页面的每日活动
-    routine = earn 页面的日常任务
-
-    任一页面失败不影响另一个，也不影响主流程。
+    使用 requests 的 (连接, 读取) 双超时；只拉取指定页面。可选返回
+    dashboard_html 给连续天数提取复用，避免原实现第三次请求同一页面。
+    任务完成与积分不从这些 HTML 判定，仅通过 getuserinfo 实时验证。
     """
-    result: Dict[str, List[PageCard]] = {"daily": [], "routine": []}
-    for key, url in (("daily", REWARDS_DASHBOARD_URL), ("routine", REWARDS_EARN_URL)):
-        try:
-            result[key] = parse_cards(fetch_html(url, cookies, timeout))
-        except Exception:
-            result[key] = []
+    result = {"daily": [], "routine": []}
+    if with_dashboard_html:
+        result["dashboard_html"] = ""
+    urls = {
+        "daily": REWARDS_DASHBOARD_URL,
+        "routine": REWARDS_EARN_URL,
+    }
+    targets = [key for key in urls if key in include]
+    if not targets:
+        return result
+
+    # 独立 requests.get 可安全并发（不共享 requests.Session）。
+    with ThreadPoolExecutor(max_workers=len(targets), thread_name_prefix="rewards-page") as pool:
+        futures = {pool.submit(fetch_html, urls[key], cookies, timeout): key
+                   for key in targets}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                html = future.result()
+                result[key] = parse_cards(html)
+                if key == "daily" and with_dashboard_html:
+                    result["dashboard_html"] = html
+            except Exception:
+                # 附助信息不可用时用官方 API 标题兜底，不能妨碍任务同步。
+                result[key] = []
     return result
 
 

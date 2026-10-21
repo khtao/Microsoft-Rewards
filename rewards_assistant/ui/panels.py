@@ -8,12 +8,13 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy,
+    QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QScrollArea,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import autostart
 from ..search_terms import remaining_searches
+from ..config import normalize_run_times
 from .controls import NoWheelSpinBox, NoWheelTimeEdit
 
 
@@ -82,7 +83,7 @@ class QuickPanel(QFrame):
         self.setObjectName("QuickPanel")
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
-        self.info = QLabel("点\"刷新界面\"后再看剩余次数")
+        self.info = QLabel("同步后自动更新今日剩余搜索次数")
         self.info.setWordWrap(True)
         self.info.setStyleSheet("color:#495057;font-size:12px;")
 
@@ -100,7 +101,7 @@ class QuickPanel(QFrame):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
-        browser_note = QLabel("任务链接使用系统默认浏览器；自动搜索仍使用 Edge")
+        browser_note = QLabel("自动任务使用 Edge 点击 Rewards 活动卡片；任务行双击仍打开链接")
         browser_note.setStyleSheet("color:#868e96;font-size:12px;")
         lay.addWidget(browser_note)
         lay.addWidget(self.info)
@@ -127,7 +128,7 @@ class QuickPanel(QFrame):
             parts.append(f"移动搜索还差 {remaining_searches(left)} 次（{left} 分）")
         pending = [t for t in tasks if not t["complete"] and t["link"]
                    and (int(t["points_max"]) > 0 or int(t["points_earned"]) > 0)]
-        parts.append(f"{len(pending)} 个任务可直接打开")
+        parts.append(f"{len(pending)} 个任务有活动链接（自动模式改为点击卡片）")
         self.info.setText(" · ".join(parts))
 
 
@@ -190,7 +191,7 @@ class HistoryPanel(QWidget):
 class AccountPanel(QWidget):
     settings_changed = Signal(dict)
 
-    def __init__(self, app, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, app, parent: Optional[QWidget] = None, search_panel=None) -> None:
         super().__init__(parent)
         self.app = app
         settings = app.settings
@@ -202,7 +203,7 @@ class AccountPanel(QWidget):
         self.logout_btn = QPushButton("退出登录（仅清除本地会话）")
         self.logout_btn.clicked.connect(app.logout)
         self.sync_btn = QPushButton("立即同步")
-        self.sync_btn.clicked.connect(app.sync_now)
+        self.sync_btn.clicked.connect(lambda: app.sync_now())
 
         acc = QGroupBox("微软账号")
         acc_lay = QVBoxLayout(acc)
@@ -245,7 +246,7 @@ class AccountPanel(QWidget):
         self.evening_time.setEnabled(self.evening.isChecked())
         self.evening.toggled.connect(self.evening_time.setEnabled)
 
-        self.auto_open = QCheckBox("每天定时自动打开未完成任务页")
+        self.auto_open = QCheckBox("每天定时点击未完成的 Rewards 活动卡片")
         self.auto_open.setChecked(bool(settings.get("auto_open_time")))
         self.auto_open_time = NoWheelTimeEdit()
         self.auto_open_time.setDisplayFormat("HH:mm")
@@ -268,8 +269,18 @@ class AccountPanel(QWidget):
         self.gap_max.valueChanged.connect(
             lambda v: self.gap_min.setValue(min(v, self.gap_min.value())))
 
-        self.auto_run_pending = QCheckBox("到点后自动完成未完成任务（拟人搜索）")
-        self.auto_run_pending.setChecked(bool(settings.get("auto_run_pending", False)))
+        # 搜索定时启动独立于“打开活动页面”的时间，不再只支持一个时间点。
+        self.auto_run_enabled = QCheckBox("启用定时自动完成未完成任务")
+        self.auto_run_enabled.setChecked(bool(settings.get("auto_run_enabled", False)))
+        self._time_rows = []
+        self.time_list = QVBoxLayout()
+        self.time_list.setSpacing(4)
+        self.add_time_btn = QPushButton("+ 添加启动时间（最多 10 个）")
+        self.add_time_btn.clicked.connect(self._add_time)
+        for time_text in settings.get("auto_run_times", ["09:00"]):
+            self._add_time(time_text, save=False)
+        self._update_time_controls()
+        self.auto_run_enabled.toggled.connect(self._update_time_controls)
 
         self.silent_cb = QCheckBox("任务全部完成后不再提醒")
         self.silent_cb.setChecked(bool(settings.get("silent_when_all_done", True)))
@@ -295,12 +306,11 @@ class AccountPanel(QWidget):
         gap_row.addWidget(QLabel("~"))
         gap_row.addWidget(self.gap_max)
         grid.addLayout(gap_row, 4, 0)
-        grid.addWidget(QLabel("每个页面随机间隔弹出（默认 5~10 秒），不一次性全开"), 4, 1)
-        grid.addWidget(self.auto_run_pending, 5, 0)
-        grid.addWidget(self.silent_cb, 6, 0)
-        grid.addWidget(self.notify_cb, 6, 1)
-        grid.addWidget(self.close_cb, 7, 0)
-        grid.addWidget(self.autostart_cb, 7, 1)
+        grid.addWidget(QLabel("活动点击间隔（默认 5~10 秒）；点击后同步核验是否完成"), 4, 1)
+        grid.addWidget(self.silent_cb, 5, 0)
+        grid.addWidget(self.notify_cb, 5, 1)
+        grid.addWidget(self.close_cb, 6, 0)
+        grid.addWidget(self.autostart_cb, 6, 1)
 
         self.save_btn = QPushButton("保存设置")
         self.save_btn.clicked.connect(app.apply_settings)
@@ -315,21 +325,112 @@ class AccountPanel(QWidget):
         row_save.addWidget(QLabel("修改后自动保存并立即生效"))
         auto_lay.addLayout(row_save)
 
-        lay = QVBoxLayout(self)
+        # 统一放入账户页的滚动区域，替代原“拟人搜索”选项卡。
+        self.scroller = QScrollArea(self)
+        self.scroller.setWidgetResizable(True)
+        self.scroller.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(12)
         lay.addWidget(acc)
         lay.addWidget(auto)
+
+        schedule_box = QGroupBox("定时自动完成未完成任务")
+        schedule_lay = QVBoxLayout(schedule_box)
+        schedule_lay.addWidget(self.auto_run_enabled)
+        schedule_lay.addWidget(QLabel("设置 0~10 个不同的每日启动时间（本地时间）；全部完成时自动跳过。"))
+        schedule_lay.addLayout(self.time_list)
+        schedule_lay.addWidget(self.add_time_btn)
+        note = QLabel("定时任务先同步官方进度；电脑搜索使用下方拟人搜索参数。"
+                      "其他活动仅可打开任务页供手动完成；移动搜索不会被误当作电脑搜索完成。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#868e96;font-size:12px;")
+        schedule_lay.addWidget(note)
+        lay.addWidget(schedule_box)
+        if search_panel is not None:
+            lay.addWidget(search_panel)
         lay.addStretch(1)
+        self.scroller.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.scroller)
 
         # 初始化结束后再连接：避免加载保存值时产生写盘及系统操作。
         for checkbox in (self.auto_sync, self.remind, self.evening, self.auto_open,
-                         self.auto_run_pending, self.silent_cb, self.notify_cb,
+                         self.auto_run_enabled, self.silent_cb, self.notify_cb,
                          self.close_cb, self.autostart_cb):
             checkbox.toggled.connect(self._changed)
         for spin in (self.interval, self.gap_min, self.gap_max):
             spin.valueChanged.connect(self._changed)
         for time_edit in (self.remind_time, self.evening_time, self.auto_open_time):
             time_edit.timeChanged.connect(self._changed)
+
+    def _add_time(self, text=None, *, save=True) -> None:
+        if len(self._time_rows) >= 10:
+            QMessageBox.information(self, "数量已达上限", "最多支持 10 个不同的启动时间点。")
+            return
+        existing = {edit.time().toString("HH:mm") for edit, _, _ in self._time_rows}
+        if not isinstance(text, str):
+            # 默认以半小时为单位选取一个可用时刻。
+            start = (int(self._time_rows[-1][0].time().hour()) * 2
+                     + int(self._time_rows[-1][0].time().minute() >= 30) + 1) if self._time_rows else 18
+            text = next((f"{((start + i) % 48) // 2:02d}:{((start + i) % 2) * 30:02d}"
+                         for i in range(48)
+                         if f"{((start + i) % 48) // 2:02d}:{((start + i) % 2) * 30:02d}" not in existing), "09:00")
+        if text in existing:
+            if save:
+                QMessageBox.warning(self, "启动时间重复", "每个启动时间点必须不同。")
+            return
+        edit = NoWheelTimeEdit()
+        edit.setDisplayFormat("HH:mm")
+        edit.setTime(self._parse_time(text))
+        edit.setProperty("last_time", edit.time().toString("HH:mm"))
+        btn = QPushButton("删除")
+        row_widget = QWidget()
+        row_lay = QHBoxLayout(row_widget)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.addWidget(QLabel(f"启动时间 {len(self._time_rows) + 1}"))
+        row_lay.addWidget(edit)
+        row_lay.addWidget(btn)
+        row_lay.addStretch(1)
+        self.time_list.addWidget(row_widget)
+        self._time_rows.append((edit, btn, row_widget))
+        edit.timeChanged.connect(lambda _, control=edit: self._time_changed(control))
+        btn.clicked.connect(lambda _, control=edit: self._remove_time(control))
+        self._update_time_controls()
+        if save:
+            self._changed()
+
+    def _remove_time(self, control) -> None:
+        for i, (edit, _, widget) in enumerate(self._time_rows):
+            if edit is control:
+                self._time_rows.pop(i)
+                self.time_list.removeWidget(widget)
+                widget.deleteLater()
+                break
+        for i, (_, _, widget) in enumerate(self._time_rows, 1):
+            widget.layout().itemAt(0).widget().setText(f"启动时间 {i}")
+        self._update_time_controls()
+        self._changed()
+
+    def _time_changed(self, control) -> None:
+        value = control.time().toString("HH:mm")
+        other = {edit.time().toString("HH:mm") for edit, _, _ in self._time_rows if edit is not control}
+        if value in other:
+            control.blockSignals(True)
+            control.setTime(self._parse_time(control.property("last_time")))
+            control.blockSignals(False)
+            QMessageBox.warning(self, "启动时间重复", "每个启动时间点必须不同。")
+            return
+        control.setProperty("last_time", value)
+        self._changed()
+
+    def _update_time_controls(self, *_args) -> None:
+        self.add_time_btn.setEnabled(self.auto_run_enabled.isChecked() and len(self._time_rows) < 10)
+        for edit, btn, _ in self._time_rows:
+            edit.setEnabled(self.auto_run_enabled.isChecked())
+            btn.setEnabled(self.auto_run_enabled.isChecked())
 
     def _changed(self, *_args) -> None:
         self.settings_changed.emit(self.collect())
@@ -365,7 +466,9 @@ class AccountPanel(QWidget):
             "auto_open_time_value": self.auto_open_time.time().toString("HH:mm"),
             "auto_open_gap_min": int(self.gap_min.value()),
             "auto_open_gap_max": int(self.gap_max.value()),
-            "auto_run_pending": self.auto_run_pending.isChecked(),
+            "auto_run_enabled": self.auto_run_enabled.isChecked(),
+            "auto_run_times": normalize_run_times(
+                [edit.time().toString("HH:mm") for edit, _, _ in self._time_rows]),
             "silent_when_all_done": self.silent_cb.isChecked(),
             "notify_after_sync": self.notify_cb.isChecked(),
             "close_to_tray": self.close_cb.isChecked(),

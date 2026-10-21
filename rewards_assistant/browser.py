@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .fingerprint import STEALTH_MIN_JS, STEALTH_PLUGINS_JS
@@ -41,7 +42,13 @@ IGNORE_FILES = {"SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK", "
 
 
 def default_profile_dir() -> Path:
+    """Edge 用户数据根目录：Windows/macOS/Linux 均可识别。"""
     home = Path.home()
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        return base / "Microsoft" / "Edge" / "User Data"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Microsoft Edge"
     cands = [
         home / ".config/microsoft-edge",
         home / ".config/microsoft-edge-stable",
@@ -216,23 +223,36 @@ def resolve_sandbox(want: str | None = None) -> bool:
 
 def find_edge_binary() -> str | None:
     for name in ("microsoft-edge", "microsoft-edge-stable", "microsoft-edge-beta",
-                 "microsoft-edge-dev", "msedge", "edge"):
+                 "microsoft-edge-dev", "msedge", "msedge.exe", "edge"):
         p = shutil.which(name)
         if p:
             return p
-    for p in ("/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
-              "/opt/microsoft/msedge/msedge", "/opt/microsoft/msedge-dev/msedge"):
-        if os.path.exists(p):
-            return p
-    return None
+    candidates = ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+                  "/opt/microsoft/msedge/msedge", "/opt/microsoft/msedge-dev/msedge",
+                  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+    if sys.platform == "win32":
+        for base in (os.environ.get("PROGRAMFILES(X86)"), os.environ.get("PROGRAMFILES"),
+                     os.environ.get("LOCALAPPDATA")):
+            if base:
+                candidates.append(str(Path(base) / "Microsoft" / "Edge" /
+                                      "Application" / "msedge.exe"))
+    return next((p for p in candidates if os.path.isfile(p)), None)
 
 
 def edge_is_running() -> bool:
     try:
-        r = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", "msedge"],
-                           capture_output=True, text=True, timeout=5)
-        return bool(r.stdout.strip())
-    except Exception:
+        if sys.platform == "win32":
+            result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
+                                    capture_output=True, text=True, timeout=5)
+            return any(line.lstrip().lower().startswith("msedge.exe ")
+                       for line in result.stdout.splitlines())
+        name = "Microsoft Edge" if sys.platform == "darwin" else "msedge"
+        cmd = ["pgrep", "-f", name]
+        if sys.platform != "darwin":
+            cmd[1:1] = ["-u", str(os.getuid())]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return bool(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
 
 
