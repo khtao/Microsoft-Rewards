@@ -348,6 +348,9 @@ class ChartView(QWidget):
     def refresh(self) -> None:
         rows = self._rows()
         key = self.metric.currentData() or "earned"
+        # 官方 Earn 未核验的日子不参加今日积分趋势，否则历史会继续沿用任务积分之和。
+        if key == "earned":
+            rows = [row for row in rows if row["points_source"] == "earn"]
         labels: List[str] = []
         values: List[float] = []
 
@@ -361,9 +364,9 @@ class ChartView(QWidget):
             elif key == "streak":
                 values.append(float(r["streak"] or 0))
             else:  # rate
-                mx = int(r["points_max"] or 0)
-                got = int(r["points_earned"] or 0)
-                values.append(100.0 if mx and got >= mx else (got / mx * 100 if mx else 0.0))
+                total_tasks = int(r["tasks_total"] or 0)
+                done_tasks = int(r["tasks_done"] or 0)
+                values.append(done_tasks / total_tasks * 100 if total_tasks else 0.0)
 
         kind = "bar" if key in ("earned", "rate") else "line"
         unit = "%" if key == "rate" else (" 天" if key == "streak" else " 分")
@@ -378,7 +381,7 @@ class ChartView(QWidget):
         avg = total / len(vals) if vals else 0
         best = max(vals) if vals else 0
         if key == "earned":
-            return (f"共 {len(rows)} 天 · 累计 {total:,.0f} 分 · "
+            return (f"已核验 {len(rows)} 天 · 官方 Earn 记录累计 {total:,.0f} 分 · "
                     f"日均 {avg:,.0f} 分 · 单日最高 {best:,.0f} 分")
         if key == "available":
             return f"共 {len(rows)} 天 · 最新 {vals[-1]:,.0f} 分 · 区间最高 {best:,.0f} 分"

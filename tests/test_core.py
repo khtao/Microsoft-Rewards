@@ -502,7 +502,7 @@ def test_sync_page_enrichment_cooldown_and_failure_retry():
     class Signal:
         def connect(self, fn): pass
     class FakeWorker:
-        def __init__(self, store, day, app, enrich_pages):
+        def __init__(self, store, day, app, enrich_pages, **kwargs):
             created.append(enrich_pages)
             self.progress = self.succeeded = self.failed = self.finished = Signal()
         def start(self): pass

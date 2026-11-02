@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QScrollArea,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QComboBox,
 )
 
 from .. import autostart
@@ -64,12 +64,20 @@ class StatsRow(QWidget):
         available, level, official = store.latest_available()
         earned = int(today["points_earned"]) if today else 0
         pmax = int(today["points_max"]) if today else 0
-        self.cards["today"].set(f"{earned}", f"今日上限 {pmax} 分")
+        verified = bool(today and today["points_source"] == "earn")
+        self.cards["today"].set(
+            f"{earned}" if verified else "—",
+            "来自 Rewards Earn 今日积分" if verified else f"等待 Earn 核验（任务估算 {earned} 分）")
         cur = int(today["streak"]) if today else 0
         self.cards["streak"].set(f"{cur} 天",
                                  f"官方显示 {official} 天" if official else f"历史最佳 {stats['best_streak']} 天")
         self.cards["available"].set(f"{available:,}", f"Level {level}" if level else "未同步")
-        self.cards["month"].set(f"{stats['month_points']:,}", f"已记录 {stats['tracked_days']} 天")
+        verified_days = [r for r in store.all_days()
+                         if r["day"].startswith(date.today().strftime("%Y-%m"))
+                         and r["points_source"] == "earn"]
+        checked_total = sum(int(r["points_earned"]) for r in verified_days)
+        self.cards["month"].set(f"{checked_total:,}",
+                                f"仅合计已核验 {len(verified_days)} 天（未核验日不计入）")
 
 
 class QuickPanel(QFrame):
@@ -137,7 +145,7 @@ class HistoryPanel(QWidget):
         super().__init__(parent)
         self.store = store
         self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["日期", "获得", "上限", "完成", "连续", "可用积分", "同步时间"])
+        self.table.setHorizontalHeaderLabels(["日期", "今日获得", "任务上限", "完成", "连续", "可用积分", "同步时间"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -160,7 +168,8 @@ class HistoryPanel(QWidget):
         for r in rows:
             i = self.table.rowCount()
             self.table.insertRow(i)
-            values = [r["day"], str(r["points_earned"]), str(r["points_max"]),
+            values = [r["day"], (str(r["points_earned"]) if r["points_source"] == "earn" else
+                       f"未核验（估算 {r['points_earned']}）"), str(r["points_max"]),
                       f"{r['tasks_done']}/{r['tasks_total']}", str(r["streak"]),
                       str(r["available_points"]), (r["synced_at"] or "").replace("T", " ")]
             for c, v in enumerate(values):
@@ -178,9 +187,11 @@ class HistoryPanel(QWidget):
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                w.writerow(["日期", "获得积分", "积分上限", "完成任务数", "任务总数", "连续天数", "账户可用积分", "等级", "同步时间"])
+                w.writerow(["日期", "获得积分", "积分来源", "任务积分上限", "完成任务数", "任务总数", "连续天数", "账户可用积分", "等级", "同步时间"])
                 for r in self.store.all_days():
-                    w.writerow([r["day"], r["points_earned"], r["points_max"], r["tasks_done"],
+                    w.writerow([r["day"], r["points_earned"],
+                                "Rewards Earn" if r["points_source"] == "earn" else "任务估算/旧记录",
+                                r["points_max"], r["tasks_done"],
                                 r["tasks_total"], r["streak"], r["available_points"],
                                 r["level"], r["synced_at"] or ""])
             QMessageBox.information(self, "导出完成", f"已保存到：\n{path}")
@@ -282,12 +293,21 @@ class AccountPanel(QWidget):
         self._update_time_controls()
         self.auto_run_enabled.toggled.connect(self._update_time_controls)
 
+        self.streak_rule = QComboBox()
+        self.streak_rule.addItem("有积分记录即算一天", "any_points")
+        self.streak_rule.addItem("所有任务完成才算一天", "all_done")
+        self.streak_rule.setCurrentIndex(max(0, self.streak_rule.findData(
+            settings.get("streak_rule", "any_points"))))
         self.silent_cb = QCheckBox("任务全部完成后不再提醒")
         self.silent_cb.setChecked(bool(settings.get("silent_when_all_done", True)))
         self.notify_cb = QCheckBox("同步完成后弹出通知")
         self.notify_cb.setChecked(bool(settings.get("notify_after_sync", True)))
         self.close_cb = QCheckBox("关闭窗口时最小化到托盘")
         self.close_cb.setChecked(bool(settings.get("close_to_tray", True)))
+        self.earn_browser_cb = QCheckBox("Earn 积分无法直接读取时临时启动 Edge 核验（完成后关闭）")
+        self.earn_browser_cb.setChecked(bool(settings.get("earn_browser_fallback", True)))
+        self.sleep_cb = QCheckBox("今日任务全部完成后低内存休眠，次日自动恢复托盘")
+        self.sleep_cb.setChecked(bool(settings.get("sleep_when_all_done", False)))
         self.autostart_cb = QCheckBox("随系统启动")
         self.autostart_cb.setChecked(autostart.is_enabled())
 
@@ -311,6 +331,10 @@ class AccountPanel(QWidget):
         grid.addWidget(self.notify_cb, 5, 1)
         grid.addWidget(self.close_cb, 6, 0)
         grid.addWidget(self.autostart_cb, 6, 1)
+        grid.addWidget(self.sleep_cb, 7, 0, 1, 2)
+        grid.addWidget(self.earn_browser_cb, 8, 0, 1, 2)
+        grid.addWidget(QLabel("连续天数规则"), 9, 0)
+        grid.addWidget(self.streak_rule, 9, 1)
 
         self.save_btn = QPushButton("保存设置")
         self.save_btn.clicked.connect(app.apply_settings)
@@ -359,8 +383,10 @@ class AccountPanel(QWidget):
         # 初始化结束后再连接：避免加载保存值时产生写盘及系统操作。
         for checkbox in (self.auto_sync, self.remind, self.evening, self.auto_open,
                          self.auto_run_enabled, self.silent_cb, self.notify_cb,
-                         self.close_cb, self.autostart_cb):
+                         self.close_cb, self.sleep_cb, self.earn_browser_cb,
+                         self.autostart_cb):
             checkbox.toggled.connect(self._changed)
+        self.streak_rule.currentIndexChanged.connect(self._changed)
         for spin in (self.interval, self.gap_min, self.gap_max):
             spin.valueChanged.connect(self._changed)
         for time_edit in (self.remind_time, self.evening_time, self.auto_open_time):
@@ -472,5 +498,8 @@ class AccountPanel(QWidget):
             "silent_when_all_done": self.silent_cb.isChecked(),
             "notify_after_sync": self.notify_cb.isChecked(),
             "close_to_tray": self.close_cb.isChecked(),
+            "sleep_when_all_done": self.sleep_cb.isChecked(),
+            "earn_browser_fallback": self.earn_browser_cb.isChecked(),
+            "streak_rule": self.streak_rule.currentData(),
             "launch_at_login": self.autostart_cb.isChecked(),
         }

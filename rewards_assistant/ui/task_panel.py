@@ -125,13 +125,16 @@ class TaskPanel(QWidget):
         if row is None:
             self.hint.setText("今天还没有记录，点“立即同步”拉取官方数据。")
             return
-        left = int(row["points_max"]) - int(row["points_earned"])
+        tasks = self.store.tasks_of_day(self.day)
+        left = sum(max(0, int(t["points_max"]) - int(t["points_earned"])) for t in tasks)
         if row["all_done"]:
-            self.hint.setText(f"今日任务已全部完成 🎉  累计 {row['points_earned']} 分，"
-                              f"连续 {row['streak']} 天。")
+            source = (f"官方 Earn 今日积分 {row['points_earned']} 分"
+                      if row["points_source"] == "earn"
+                      else "官方 Earn 今日积分尚未核验")
+            self.hint.setText(f"今日任务已全部完成 🎉  {source}；连续 {row['streak']} 天。")
         else:
             self.hint.setText(
-                f"还剩 {row['tasks_total'] - row['tasks_done']} 项 / 约 {left} 分未完成。"
+                f"还剩 {row['tasks_total'] - row['tasks_done']} 项 / 约 {left} 任务分未完成。"
                 f"  双击任务行可在浏览器里打开该任务页面。"
             )
 

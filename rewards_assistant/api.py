@@ -259,6 +259,7 @@ def run_human_search(
 
     # ---- 浏览器：用外部的，或自己启动
     own_context = False
+    pw = None  # Playwright 驱动也必须退出；只关闭 Edge context 可能残留子进程。
     ctx = context
     if ctx is None and page is not None:
         ctx = page.context
@@ -283,11 +284,19 @@ def run_human_search(
             profile = _copy(profile, snapshot)
 
         pw = sync_playwright().start()
-        ctx = launch_edge(pw, user_data_dir=profile, headless=headless,
-                          window_size=window_size, proxy=proxy,
-                          edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
-                          sandbox=sandbox, flag_warning=flag_warning,
-                          policy_dir=policy_dir, verbose=verbose, geo=geo)
+        try:
+            ctx = launch_edge(pw, user_data_dir=profile, headless=headless,
+                              window_size=window_size, proxy=proxy,
+                              edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
+                              sandbox=sandbox, flag_warning=flag_warning,
+                              policy_dir=policy_dir, verbose=verbose, geo=geo)
+        except BaseException:
+            # 浏览器启动失败时尚未进入主运行循环，也必须释放驱动。
+            try:
+                pw.stop()
+            finally:
+                logger.close()
+            raise
         own_context = True
         logger("browser", f"Edge 启动 user_data_dir={profile} headless={headless}")
     else:
@@ -442,6 +451,13 @@ def run_human_search(
                 ctx.close()
             except Exception:
                 pass
+            finally:
+                # ctx.close() 只关闭 Chromium context，不能替代 Playwright.stop()。
+                if pw is not None:
+                    try:
+                        pw.stop()
+                    except Exception:
+                        pass
         logger.close()
         report.log_path = str(Path(log_file).resolve()) if log_file else ""
         try:

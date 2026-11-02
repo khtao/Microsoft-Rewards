@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Optional
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -22,7 +22,6 @@ from .storage import Store, day_str
 from .sync import StatusWorker, SyncWorker
 from .ui.icons import app_icon
 from .ui.login_dialog import LoginDialog
-from .ui.main_window import MainWindow
 SINGLE_INSTANCE_KEY = "MSRewardsAssistant_SingleInstance_v1"
 
 
@@ -47,7 +46,9 @@ class Application(QObject):
         self.argv = argv
         self.start_minimized = "--minimized" in argv
         self.settings = Settings()
-        self.store = Store()
+        self.store = Store(streak_rule=self.settings.get("streak_rule", "any_points"))
+        self._sleep_day = str(self.settings.get("sleep_until_day", "") or "")
+        self._pending_sleep = False
         self.notifier: Optional[Notifier] = None
         self.window: Optional[MainWindow] = None
         self.tray: Optional[QSystemTrayIcon] = None
@@ -89,13 +90,15 @@ class Application(QObject):
             return 0
 
         self.notifier = Notifier(logger=self._log)
-        self.window = MainWindow(self)
-        # 搜索结束后刷新官方进度，否则界面会一直显示启动前的剩余积分。
-        self.window.runner.finished.connect(
-            lambda _report: QTimer.singleShot(3000, lambda: self.sync_now(auto=True)))
-        self._build_tray()
         self._build_scheduler()
-
+        if self._sleep_day == datetime.now().date().isoformat():
+            # 真正释放 QWidget / Qt 图表；保留一个极轻量的 QTimer 和单实例 IPC。
+            self._log("今日任务已经完成：低内存守护中，跨天自动恢复托盘")
+            return app.exec()
+        self._sleep_day = ""
+        self.settings.set("sleep_until_day", "")
+        self._ensure_window()
+        self._build_tray()
         if not self.start_minimized or self.tray is None:
             self.window.show()
         else:
@@ -109,7 +112,17 @@ class Application(QObject):
             QTimer.singleShot(3000, lambda: self.sync_now(auto=True))
         else:
             self.check_login_status()
+        if self.settings.get("sleep_when_all_done", False) and self._all_done():
+            QTimer.singleShot(0, self.sleep_today)
         return app.exec()
+
+    def _ensure_window(self) -> None:
+        if self.window is not None:
+            return
+        from .ui.main_window import MainWindow
+        self.window = MainWindow(self)
+        self.window.runner.finished.connect(
+            lambda _report: QTimer.singleShot(3000, lambda: self.sync_now(auto=True)))
 
     def _setup_fonts(self, app) -> None:
         """打包后目标机可能没有中文字体，这里把内置字体注册上。"""
@@ -214,7 +227,6 @@ class Application(QObject):
         menu.addSeparator()
         self.act_tray_sync = menu.addAction("立即同步")
         self.act_tray_sync.triggered.connect(self.window.act_sync.trigger)
-        menu.addAction("登录微软账号").triggered.connect(self.window.act_login.trigger)
         menu.addAction("刷新界面").triggered.connect(self.window.act_refresh.trigger)
         menu.addSeparator()
         self.act_tray_run = menu.addAction("自动完成未完成任务")
@@ -222,7 +234,9 @@ class Application(QObject):
         self.act_tray_stop = menu.addAction("停止")
         self.act_tray_stop.triggered.connect(self.window.quick.stop_btn.click)
         menu.addSeparator()
-        menu.addAction("退出程序").triggered.connect(self.quit)
+        self.act_tray_sleep = menu.addAction("今日完成后休眠至明天")
+        self.act_tray_sleep.triggered.connect(self.sleep_today)
+        menu.addAction("真正退出程序").triggered.connect(self.quit)
         menu.aboutToShow.connect(self.update_tray_actions)
 
         self.tray.setContextMenu(menu)
@@ -238,6 +252,7 @@ class Application(QObject):
         self.act_tray_sync.setEnabled(self.window.act_sync.isEnabled())
         self.act_tray_run.setEnabled(self.window.quick.tasks_btn.isEnabled())
         self.act_tray_stop.setEnabled(self.window.quick.stop_btn.isEnabled())
+        self.act_tray_sleep.setEnabled(self._all_done() and not self._is_busy())
 
     def _on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.DoubleClick,
@@ -245,8 +260,12 @@ class Application(QObject):
             self.show_window()
 
     def show_window(self) -> None:
-        if self.window is None:
+        if self._sleep_day:
+            self._wake_from_sleep(show=True)
             return
+        self._ensure_window()
+        if self.tray is None:
+            self._build_tray()
         if self.window.isVisible():
             self.window.raise_()
             self.window.activateWindow()
@@ -262,8 +281,11 @@ class Application(QObject):
         if row is None:
             self.tray.setToolTip(f"{APP_TITLE}\n今天还没有记录")
             return
+        today_text = (f"今日 {row['points_earned']} 分（Earn 官方）"
+                      if row["points_source"] == "earn" else
+                      f"今日积分待核验（任务估算 {row['points_earned']} 分）")
         self.tray.setToolTip(
-            f"{APP_TITLE}\n今日 {row['points_earned']}/{row['points_max']} 分"
+            f"{APP_TITLE}\n{today_text}"
             f" · 任务 {row['tasks_done']}/{row['tasks_total']} · 连续 {row['streak']} 天"
         )
 
@@ -272,6 +294,7 @@ class Application(QObject):
     def _build_scheduler(self) -> None:
         self.timer = QTimer(self)
         self.timer.setInterval(30_000)
+        self.timer.setTimerType(Qt.TimerType.VeryCoarseTimer)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
         self._today = datetime.now().date()
@@ -287,6 +310,11 @@ class Application(QObject):
 
     def _tick(self) -> None:
         now = datetime.now()
+        if getattr(self, "_sleep_day", ""):
+            if now.date().isoformat() != self._sleep_day:
+                self._wake_from_sleep(show=False)
+            else:
+                return
 
         # 跨天：重置提醒与已触发标记、刷新界面
         if now.date() != self._today:
@@ -453,6 +481,8 @@ class Application(QObject):
             self._activity_worker = None
         if self.window is not None:
             self.window.update_running_state()
+        if self._pending_sleep and not self._is_busy():
+            QTimer.singleShot(0, self.sleep_today)
 
     def _open_pending_links(self, snap=None) -> None:
         """兼容旧“定时打开”设置：现在实际执行 Rewards 活动卡片点击。"""
@@ -494,14 +524,21 @@ class Application(QObject):
         if row is None:
             self.notifier.notify(APP_TITLE, "今天的 Rewards 还没开始，点托盘图标同步一下吧")
             return
-        left_points = int(row["points_max"]) - int(row["points_earned"])
-        left_tasks = int(row["tasks_total"]) - int(row["tasks_done"])
+        # 今日 Earn 官方总分与任务积分上限不是同一指标，禁止相减。
+        tasks = self.store.tasks_of_day(day_str())
+        left_points = sum(max(0, int(t["points_max"]) - int(t["points_earned"]))
+                          for t in tasks)
+        left_tasks = max(0, int(row["tasks_total"]) - int(row["tasks_done"]))
         title = "早间打卡提醒" if key == "morning" else "晚间补做提醒"
         self.notifier.notify(APP_TITLE, f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
 
     # ------------------------------------------------------------------ 同步
 
     def sync_now(self, auto: bool = False) -> None:
+        if getattr(self, "_sleep_day", ""):
+            if auto:
+                return
+            self._wake_from_sleep(show=False)
         if getattr(self, "_syncing", False):
             if not auto:
                 self._toast("同步正在进行中，请稍候…")
@@ -515,7 +552,14 @@ class Application(QObject):
         enrich = last is None or (now - last) >= timedelta(minutes=45)
         # 等官方 API 确认成功后才启动冷却计时；网络失败可立即重试。
         self._sync_enrich_current = enrich
-        worker = SyncWorker(self.store, day_str(), self, enrich_pages=enrich)
+        settings = getattr(self, "settings", None)
+        enabled = (bool(settings.get("earn_browser_fallback", True)) if settings else False)
+        # 如果 DOM 方案近期失败，静默自动同步不要反复启动浏览器。
+        dom_retry = getattr(self, "_next_earn_dom_attempt", None)
+        if auto and dom_retry and now < dom_retry:
+            enabled = False
+        worker = SyncWorker(self.store, day_str(), self, enrich_pages=enrich,
+                            earn_browser_fallback=enabled)
         worker.progress.connect(lambda msg: self.window.set_busy(True, msg))
         worker.succeeded.connect(self._on_sync_ok)
         worker.failed.connect(self._on_sync_fail)
@@ -531,14 +575,21 @@ class Application(QObject):
         self._sync_enrich_current = False
         summary = payload["summary"]
         snap = payload["snapshot"]
+        if payload.get("earn_browser_attempted"):
+            self._next_earn_dom_attempt = (
+                datetime.now() + timedelta(hours=4)
+                if payload.get("official_today_points") is None else None)
         self.window.set_busy(False)
         self.window.refresh_all()
         self.update_tray_tooltip()
 
         earned = int(summary.get("points_earned") or 0)
+        verified = summary.get("points_source") == "earn"
         total = int(summary.get("points_max") or 0)
         available, _level, _official = self.store.latest_available()
-        text = f"今日 {earned}/{total} 分 · 任务 {snap.tasks_done}/{len(snap.tasks)}"
+        earned_text = (f"今日 {earned} 分 [Rewards Earn 已核验]" if verified else
+                       f"今日 Earn 积分待核验 [任务估算 {earned} 分]")
+        text = f"{earned_text} · 任务 {snap.tasks_done}/{len(snap.tasks)}（任务上限约 {total}）"
         if available:
             text += f" · 账户可用 {available:,}"
         self._log(text)
@@ -546,9 +597,10 @@ class Application(QObject):
         if self.settings.get("notify_after_sync", True):
             if summary.get("all_done"):
                 self.notifier.notify(APP_TITLE, f"今日任务已全部完成 🎉  {text}")
-            elif self._last_points is not None and earned > self._last_points:
-                self.notifier.notify(APP_TITLE, f"积分有更新：{text}")
-        self._last_points = earned
+            elif verified and self._last_points is not None and earned > self._last_points:
+                self.notifier.notify(APP_TITLE, f"Earn 今日积分有更新：{text}")
+        # 未经核验的任务估算不得被当作上次官方积分的比较基准。
+        self._last_points = earned if verified else None
         self.set_login_status("已登录 · 同步正常", True)
 
         actions = self._after_sync.copy()
@@ -560,6 +612,9 @@ class Application(QObject):
         elif "search" in actions:
             self._start_pc_search()
         self.window.update_running_state()
+        if self._all_done() and (self._pending_sleep or
+                self.settings.get("sleep_when_all_done", False)):
+            QTimer.singleShot(0, self.sleep_today)
 
     def _on_sync_fail(self, message: str) -> None:
         self._syncing = False
@@ -568,7 +623,10 @@ class Application(QObject):
         self.window.update_running_state()
         self.window.set_busy(False, message)
         self._log(message)
-        self.set_login_status("未登录或会话已过期", False)
+        if "Cookie" in message or "未登录" in message or "会话" in message:
+            self.set_login_status("未登录或会话已过期", False)
+        else:
+            self.set_login_status("网络或服务异常（保留登录状态）", None)
         if self.window.isVisible():
             self.notifier.notify(APP_TITLE, message, timeout_ms=10000)
         else:
@@ -682,6 +740,8 @@ class Application(QObject):
     def _forget_worker(self, worker) -> None:
         if worker in self._workers:
             self._workers.remove(worker)
+        if self._pending_sleep and not self._is_busy():
+            QTimer.singleShot(0, self.sleep_today)
 
     def save_settings(self, data: dict) -> bool:
         """集中处理持久化错误，防止界面误报“保存成功”。"""
@@ -726,6 +786,9 @@ class Application(QObject):
             if manual and all(previous.get(k) == value for k, value in data.items()):
                 self._toast("设置已保存")
             return
+        if data.get("streak_rule") and data.get("streak_rule") != previous.get("streak_rule"):
+            self.store.set_streak_rule(data["streak_rule"])
+            self.window.refresh_all()
         interval = int(data.get("sync_interval_minutes") or 0)
         if interval != previous.get("sync_interval_minutes"):
             self._next_sync = (datetime.now() + timedelta(minutes=interval)
@@ -739,6 +802,67 @@ class Application(QObject):
         # 其他设置均由使用方实时读取，无需重启或重新创建定时器。
         if manual:
             self._toast("设置已保存")
+        if (data.get("sleep_when_all_done") and not previous.get("sleep_when_all_done")
+                and self._all_done()):
+            QTimer.singleShot(0, self.sleep_today)
+
+    def _is_busy(self) -> bool:
+        return bool((self.window is not None and self.window.runner.is_running())
+                    or self.activity_running() or getattr(self, "_syncing", False)
+                    or self._opener.running
+                    or any(worker.isRunning() for worker in self._workers))
+
+    def sleep_today(self) -> None:
+        """不是退出进程：回收窗口/托盘，保留跨天定时器与单实例 IPC。"""
+        if not self._all_done():
+            self._toast("只有官方任务全部完成后才能休眠；请先同步核验任务")
+            return
+        if self._is_busy():
+            self._pending_sleep = True
+            self._log("等待正在运行的操作安全结束后休眠")
+            return
+        self._pending_sleep = False
+        today = datetime.now().date().isoformat()
+        if not self.save_settings({"sleep_until_day": today}):
+            if self.settings.get("sleep_until_day") != today:
+                return
+        self._sleep_day = today
+        if self.tray is not None:
+            self.tray.hide()
+            self.tray.setContextMenu(None)
+            self.notifier.attach(None)
+            self.tray.deleteLater()
+            self.tray = None
+        if self.window is not None:
+            window = self.window
+            window.hide()
+            self.window = None
+            window.deleteLater()
+        self._tray_menu = None
+        self._after_sync.clear()
+        self._log("已进入低内存休眠，进程继续值守，次日自动恢复托盘")
+
+    def _wake_from_sleep(self, *, show: bool) -> None:
+        self._sleep_day = ""
+        self._pending_sleep = False
+        self._last_points = None
+        self.save_settings({"sleep_until_day": ""})
+        self._today = datetime.now().date()
+        self._fired.clear()
+        self._next_sync = None
+        interval = int(self.settings.get("sync_interval_minutes") or 0)
+        if interval:
+            self._next_sync = datetime.now() + timedelta(minutes=interval)
+        self._ensure_window()
+        self._build_tray()
+        self._migrate_labels()
+        self._prune_zero_tasks()
+        self.window.refresh_all()
+        if show or self.tray is None:
+            self.window.show()
+        # 次日恢复后同步一次当前积分，无须等待定时间隔。
+        QTimer.singleShot(500, lambda: self.sync_now(auto=True))
+        self._log("已跨天唤醒并恢复托盘")
 
     def quit(self) -> None:
         """等待正在运行的线程完成，避免退出时销毁运行中的 QThread。"""

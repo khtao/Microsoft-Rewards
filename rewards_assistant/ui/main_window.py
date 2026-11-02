@@ -211,6 +211,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.history, "历史")
         self.tabs.addTab(self.account, "账户与设置")
         self.setCentralWidget(self.tabs)
+        self._detail_dirty = {"chart": True, "history": True}
+        self.tabs.currentChanged.connect(self._refresh_active_detail)
 
         # 今日页「自动完成」按钮 → 主窗口入口
         self.quick.run_pending_requested.connect(self.app.run_pending_tasks)
@@ -233,8 +235,6 @@ class MainWindow(QMainWindow):
         act_sync = QAction("立即同步", self)
         act_sync.setShortcut(QKeySequence("F5"))
         act_sync.triggered.connect(lambda: self.app.sync_now())
-        act_login = QAction("登录微软账号", self)
-        act_login.triggered.connect(self.app.login)
         act_refresh = QAction("刷新界面", self)
         act_refresh.triggered.connect(self.refresh_all)
 
@@ -242,9 +242,7 @@ class MainWindow(QMainWindow):
         # F5、系统托盘菜单及同步完成后的后台刷新不受影响。
         self.addAction(act_sync)
         self.addAction(act_refresh)
-        bar.addAction(act_login)
         self.act_sync = act_sync
-        self.act_login = act_login
         self.act_refresh = act_refresh
 
     def _build_statusbar(self) -> None:
@@ -297,15 +295,23 @@ class MainWindow(QMainWindow):
         self.stats.update(self.store)
         self.tasks.set_day(date.today().isoformat())
         self.quick.update(self.store)
-        self.chart.refresh()
-        self.history.reload()
+        self._detail_dirty = {"chart": True, "history": True}
+        self._refresh_active_detail()
         self._update_status()
+
+    def _refresh_active_detail(self, *_args) -> None:
+        if self.tabs.currentWidget() is self.chart and self._detail_dirty.get("chart"):
+            self.chart.refresh()
+            self._detail_dirty["chart"] = False
+        elif self.tabs.currentWidget() is self.history and self._detail_dirty.get("history"):
+            self.history.reload()
+            self._detail_dirty["history"] = False
 
     def on_data_changed(self) -> None:
         self.stats.update(self.store)
         self.quick.update(self.store)
-        self.chart.refresh()
-        self.history.reload()
+        self._detail_dirty = {"chart": True, "history": True}
+        self._refresh_active_detail()
         self._update_status()
         self.app.update_tray_tooltip()
 
@@ -314,9 +320,12 @@ class MainWindow(QMainWindow):
         if row is None:
             self.status_left.setText("今天还没有记录 —— 点\"立即同步\"拉取官方数据")
             return
+        today = (f"今日 {row['points_earned']} 分（Earn 官方）"
+                 if row["points_source"] == "earn" else
+                 f"今日积分待核验（任务估算 {row['points_earned']} 分）")
         self.status_left.setText(
-            f"今日 {row['points_earned']}/{row['points_max']} 分 · "
-            f"任务 {row['tasks_done']}/{row['tasks_total']} · 连续 {row['streak']} 天 · "
+            f"{today} · 任务 {row['tasks_done']}/{row['tasks_total']} · "
+            f"连续 {row['streak']} 天 · "
             f"上次同步 {(row['synced_at'] or '手动').replace('T', ' ')}"
         )
 
@@ -609,6 +618,8 @@ class SearchPanel(QWidget):
         lay = QVBoxLayout(box)
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
+        # QTextEdit 默认无限追加；长期运行将导致文档与 QTextLayout 常驻膨胀。
+        self.txt_log.document().setMaximumBlockCount(350)
         try:
             self.txt_log.setFont(QFont("WenQuanYi Micro Hei", 10))
         except Exception:

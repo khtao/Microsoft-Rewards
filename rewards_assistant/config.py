@@ -17,7 +17,7 @@ from typing import Literal, Optional, Union
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分活动管理助手"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.0"
 
 REWARDS_HOME = "https://rewards.bing.com/"
 REWARDS_DASHBOARD = "https://rewards.bing.com/"
@@ -105,6 +105,11 @@ DEFAULT_SETTINGS = {
     "notify_after_sync": True,
     # 主窗口关闭时最小化到托盘而不是退出
     "close_to_tray": True,
+    # 在官方任务全部完成后低内存休眠：进程仍运行，次日自动恢复托盘。
+    "sleep_when_all_done": False,
+    "sleep_until_day": "",
+    # Earn 页面纯 HTML 未包含积分时，允许临时启动无头 Edge 读取卡片；结束后必关。
+    "earn_browser_fallback": True,
     # 趋势图显示天数
     "chart_days": 30,
     "chart_metric": "earned",
