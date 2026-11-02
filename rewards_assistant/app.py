@@ -46,7 +46,7 @@ class Application(QObject):
         self.argv = argv
         self.start_minimized = "--minimized" in argv
         self.settings = Settings()
-        self.store = Store(streak_rule=self.settings.get("streak_rule", "any_points"))
+        self.store = Store()
         self._sleep_day = str(self.settings.get("sleep_until_day", "") or "")
         self._pending_sleep = False
         self.notifier: Optional[Notifier] = None
@@ -54,6 +54,7 @@ class Application(QObject):
         self.tray: Optional[QSystemTrayIcon] = None
         self._workers: list = []
         self._last_points: Optional[int] = None
+        self._last_done_notified_day = ""
         self._after_sync: set[str] = set()
         self._last_page_enrichment: Optional[datetime] = None
         self._sync_enrich_current = False
@@ -231,6 +232,8 @@ class Application(QObject):
         menu.addSeparator()
         self.act_tray_run = menu.addAction("自动完成未完成任务")
         self.act_tray_run.triggered.connect(self.window.quick.tasks_btn.click)
+        self.act_tray_open = menu.addAction("仅打开未完成任务页（手动完成）")
+        self.act_tray_open.triggered.connect(self.open_pending_pages)
         self.act_tray_stop = menu.addAction("停止")
         self.act_tray_stop.triggered.connect(self.window.quick.stop_btn.click)
         menu.addSeparator()
@@ -251,6 +254,7 @@ class Application(QObject):
             return
         self.act_tray_sync.setEnabled(self.window.act_sync.isEnabled())
         self.act_tray_run.setEnabled(self.window.quick.tasks_btn.isEnabled())
+        self.act_tray_open.setEnabled(not self._all_done() and not self._is_busy())
         self.act_tray_stop.setEnabled(self.window.quick.stop_btn.isEnabled())
         self.act_tray_sleep.setEnabled(self._all_done() and not self._is_busy())
 
@@ -281,9 +285,8 @@ class Application(QObject):
         if row is None:
             self.tray.setToolTip(f"{APP_TITLE}\n今天还没有记录")
             return
-        today_text = (f"今日 {row['points_earned']} 分（Earn 官方）"
-                      if row["points_source"] == "earn" else
-                      f"今日积分待核验（任务估算 {row['points_earned']} 分）")
+        from .points import points_display
+        today_text = points_display(row["points_source"], int(row["points_earned"]))
         self.tray.setToolTip(
             f"{APP_TITLE}\n{today_text}"
             f" · 任务 {row['tasks_done']}/{row['tasks_total']} · 连续 {row['streak']} 天"
@@ -334,12 +337,6 @@ class Application(QObject):
             self._next_sync = now + timedelta(minutes=interval)
 
         clock = now.strftime("%H:%M")
-        # 定时自动打开任务页与定时自动完成各自独立。
-        when = self.settings.get("auto_open_time") or ""
-        if when and "autoopen" not in self._fired and clock == when:
-            self._fired.add("autoopen")
-            self._auto_open_morning()
-
         # 各时刻每天只触发一次，最多 10 个且由 Settings 保证去重。
         if self.settings.get("auto_run_enabled", False):
             for time_text in self.settings.get("auto_run_times", []):
@@ -372,10 +369,10 @@ class Application(QObject):
         tasks = self.store.tasks_of_day(day_str())
         return bool(day["all_done"]) or all_reward_tasks_done(tasks)
 
-    def _auto_open_morning(self) -> None:
-        """保留原先的定时打开功能，与新自动运行的 10 个时间点互不影响。"""
+    def open_pending_pages(self) -> None:
+        """手动逐个打开未完成任务页；不再与定时自动运行重复调度。"""
         if self._all_done():
-            self._log("任务已全部完成，跳过定时打开")
+            self._log("任务已全部完成，无需再打开任务页")
             return
         # 活动卡片可能在当天发生变化，定时点击前始终同步官方任务列表。
         self._after_sync.add("open")
@@ -440,8 +437,7 @@ class Application(QObject):
             pass
         worker = ActivityWorker(
             tasks, browser_options=options,
-            gap_range=(int(self.settings.get("auto_open_gap_min", 5)),
-                       int(self.settings.get("auto_open_gap_max", 10))),
+            gap_range=(5, 10),
             parent=self,
         )
         self._activity_worker = worker
@@ -524,7 +520,7 @@ class Application(QObject):
         if row is None:
             self.notifier.notify(APP_TITLE, "今天的 Rewards 还没开始，点托盘图标同步一下吧")
             return
-        # 今日 Earn 官方总分与任务积分上限不是同一指标，禁止相减。
+        # 任务剩余分与账户余额净变化是不同指标，必须按任务逐项计算。
         tasks = self.store.tasks_of_day(day_str())
         left_points = sum(max(0, int(t["points_max"]) - int(t["points_earned"]))
                           for t in tasks)
@@ -545,21 +541,14 @@ class Application(QObject):
             return
         self._syncing = True
         self.window.set_busy(True, "正在同步 Rewards 数据…")
-        # 页面辅助数据最多约 45 分钟更新一次；中间的同步只调用官方 API。
-        # 活动点击前后虽会连续同步，但并不需要重复拉取两个 HTML 页面。
+        # 仅活动标题和连续天数每 45 分钟按需补充页面信息；
+        # 积分余额只读取 dashboard API，不再抓取 Earn 页面。
         now = datetime.now()
         last = getattr(self, "_last_page_enrichment", None)
         enrich = last is None or (now - last) >= timedelta(minutes=45)
         # 等官方 API 确认成功后才启动冷却计时；网络失败可立即重试。
         self._sync_enrich_current = enrich
-        settings = getattr(self, "settings", None)
-        enabled = (bool(settings.get("earn_browser_fallback", True)) if settings else False)
-        # 如果 DOM 方案近期失败，静默自动同步不要反复启动浏览器。
-        dom_retry = getattr(self, "_next_earn_dom_attempt", None)
-        if auto and dom_retry and now < dom_retry:
-            enabled = False
-        worker = SyncWorker(self.store, day_str(), self, enrich_pages=enrich,
-                            earn_browser_fallback=enabled)
+        worker = SyncWorker(self.store, day_str(), self, enrich_pages=enrich)
         worker.progress.connect(lambda msg: self.window.set_busy(True, msg))
         worker.succeeded.connect(self._on_sync_ok)
         worker.failed.connect(self._on_sync_fail)
@@ -575,32 +564,30 @@ class Application(QObject):
         self._sync_enrich_current = False
         summary = payload["summary"]
         snap = payload["snapshot"]
-        if payload.get("earn_browser_attempted"):
-            self._next_earn_dom_attempt = (
-                datetime.now() + timedelta(hours=4)
-                if payload.get("official_today_points") is None else None)
         self.window.set_busy(False)
         self.window.refresh_all()
         self.update_tray_tooltip()
 
         earned = int(summary.get("points_earned") or 0)
-        verified = summary.get("points_source") == "earn"
+        from .points import points_display
         total = int(summary.get("points_max") or 0)
         available, _level, _official = self.store.latest_available()
-        earned_text = (f"今日 {earned} 分 [Rewards Earn 已核验]" if verified else
-                       f"今日 Earn 积分待核验 [任务估算 {earned} 分]")
+        earned_text = points_display(summary.get("points_source", "task_fallback"), earned)
         text = f"{earned_text} · 任务 {snap.tasks_done}/{len(snap.tasks)}（任务上限约 {total}）"
-        if available:
+        if snap.balance_valid:
             text += f" · 账户可用 {available:,}"
         self._log(text)
 
         if self.settings.get("notify_after_sync", True):
             if summary.get("all_done"):
-                self.notifier.notify(APP_TITLE, f"今日任务已全部完成 🎉  {text}")
-            elif verified and self._last_points is not None and earned > self._last_points:
-                self.notifier.notify(APP_TITLE, f"Earn 今日积分有更新：{text}")
-        # 未经核验的任务估算不得被当作上次官方积分的比较基准。
-        self._last_points = earned if verified else None
+                # 自动同步可能每小时运行，完成提醒一天只发送一次。
+                today = day_str()
+                if self._last_done_notified_day != today:
+                    self.notifier.notify(APP_TITLE, f"今日任务已全部完成 🎉  {text}")
+                    self._last_done_notified_day = today
+            elif self._last_points is not None and earned > self._last_points:
+                self.notifier.notify(APP_TITLE, f"今日积分变化：{text}")
+        self._last_points = earned
         self.set_login_status("已登录 · 同步正常", True)
 
         actions = self._after_sync.copy()
@@ -689,8 +676,7 @@ class Application(QObject):
         self.window.update_running_state()
 
     def _gap_seconds(self) -> int:
-        return random_gap(int(self.settings.get("auto_open_gap_min", 5)),
-                          int(self.settings.get("auto_open_gap_max", 10)))
+        return random_gap(5, 10)
 
     def _on_waiting(self, next_name: str, gap: int) -> None:
         """刚排上队，先给一条带总间隔的记录（随后倒计时每秒覆盖它）。"""
@@ -786,15 +772,11 @@ class Application(QObject):
             if manual and all(previous.get(k) == value for k, value in data.items()):
                 self._toast("设置已保存")
             return
-        if data.get("streak_rule") and data.get("streak_rule") != previous.get("streak_rule"):
-            self.store.set_streak_rule(data["streak_rule"])
-            self.window.refresh_all()
         interval = int(data.get("sync_interval_minutes") or 0)
         if interval != previous.get("sync_interval_minutes"):
             self._next_sync = (datetime.now() + timedelta(minutes=interval)
                                if interval else None)
-        for key, marker in (("auto_open_time", "autoopen"),
-                            ("remind_time", "morning"),
+        for key, marker in (("remind_time", "morning"),
                             ("evening_remind_time", "evening")):
             if data.get(key) != previous.get(key):
                 self._fired.discard(marker)

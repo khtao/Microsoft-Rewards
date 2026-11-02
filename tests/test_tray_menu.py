@@ -18,7 +18,8 @@ def test_tray_menu_has_no_private_business_actions():
                 labels.append(node.args[0].value)
     assert set(labels) == {
         "显示主窗口", "立即同步", "刷新界面",
-        "自动完成未完成任务", "停止", "今日完成后休眠至明天", "真正退出程序",
+        "自动完成未完成任务", "仅打开未完成任务页（手动完成）",
+        "停止", "今日完成后休眠至明天", "真正退出程序",
     }
     assert "复制一个搜索词" not in source
     assert "停止继续打开" not in source

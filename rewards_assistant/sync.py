@@ -7,8 +7,6 @@ from PySide6.QtCore import QThread, Signal
 
 from .auth import AuthError, AuthManager
 from .page_titles import fetch_real_titles, merge_titles
-from .earn_points import parse_earn_today_points, fetch_today_points_in_edge
-from .config import REWARDS_EARN_URL
 from .rewards_client import Snapshot, extract_streak, parse_dashboard
 from .storage import Store, day_str
 
@@ -34,12 +32,11 @@ class SyncWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, store: Store, day: Optional[str] = None, parent=None,
-                 enrich_pages: bool = True, earn_browser_fallback: bool = True) -> None:
+                 enrich_pages: bool = True) -> None:
         super().__init__(parent)
         self.store = store
         self.day = day or day_str()
         self.enrich_pages = enrich_pages
-        self.earn_browser_fallback = earn_browser_fallback
 
     def run(self) -> None:
         try:
@@ -49,27 +46,8 @@ class SyncWorker(QThread):
             # 缩短连接与读取等待；错误时不得使用旧缓存伪装同步成功。
             data = manager.fetch_dashboard(timeout=(4, 12))
             snap: Snapshot = parse_dashboard(data, self.day)
-            # 今日获得积分仅以 Earn 页面明确显示的值为准。
-            # 页面在某些地区是客户端渲染，拿不到时不能用任务和冒充官方数据。
-            official_today = None
-            try:
-                self.progress.emit("正在读取 Earn 页面的今日积分…")
-                earn_html = manager.fetch_page_html(REWARDS_EARN_URL, timeout=(4, 8))
-                official_today = parse_earn_today_points(earn_html)
-                if official_today is None:
-                    self.progress.emit("Earn 页今日积分尚未渲染；本次无法核验该数字")
-            except Exception as exc:
-                self.progress.emit(f"Earn 页今日积分读取失败：{type(exc).__name__}")
-
-            earn_browser_attempted = False
-            if official_today is None and getattr(self, "earn_browser_fallback", False):
-                # 一次性浏览器尝试；仅在需要核验时启动，绝不在托盘闲置时常驻。
-                try:
-                    earn_browser_attempted = True
-                    self.progress.emit("Earn 为动态页面，正在短暂启动 Edge 核验积分…")
-                    official_today = fetch_today_points_in_edge(manager.jar())
-                except Exception as exc:
-                    self.progress.emit(f"Edge 核验未成功：{type(exc).__name__}")
+            # 今日积分只通过数据库中的今日/昨日余额快照计算；
+            # 缺少昨日快照时自动回退到任务积分和，不再抓取 Earn 页面。
             # 保存当日先前从页面获取的可靠中文标题，避免快速同步时被内部 ID 覆盖。
             # 只有链接、任务类别、分值均未改变才认为仍是同一活动。
             previous = {row["key"]: row for row in self.store.tasks_of_day(self.day)}
@@ -132,8 +110,11 @@ class SyncWorker(QThread):
                 )
             if snap.tasks:
                 self.store.remove_missing_official_tasks(self.day, (t.key for t in snap.tasks))
-            self.store.upsert_available(self.day, snap.available_points, snap.level)
-            summary = self.store.refresh_day(self.day, official_points=official_today)
+            if snap.balance_valid:
+                self.store.upsert_available(self.day, snap.available_points, snap.level)
+            else:
+                self.progress.emit("本次 API 未提供有效账户余额，保留上次快照；积分使用可用数据计算")
+            summary = self.store.refresh_day(self.day)
 
             if official is not None:
                 self.store.save_official_streak(self.day, official)
@@ -144,13 +125,13 @@ class SyncWorker(QThread):
                 "summary": dict(summary),
                 "snapshot": snap,
                 "official_streak": official,
-                "official_today_points": official_today,
-                "earn_browser_attempted": earn_browser_attempted,
             })
         except AuthError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:
             self.failed.emit(f"同步失败：{exc}")
+        finally:
+            self.store.close_thread_connection()
 
 
 def logout() -> None:

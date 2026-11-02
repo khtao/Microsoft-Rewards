@@ -128,9 +128,8 @@ class TaskPanel(QWidget):
         tasks = self.store.tasks_of_day(self.day)
         left = sum(max(0, int(t["points_max"]) - int(t["points_earned"])) for t in tasks)
         if row["all_done"]:
-            source = (f"官方 Earn 今日积分 {row['points_earned']} 分"
-                      if row["points_source"] == "earn"
-                      else "官方 Earn 今日积分尚未核验")
+            from ..points import points_display
+            source = points_display(row["points_source"], int(row["points_earned"]))
             self.hint.setText(f"今日任务已全部完成 🎉  {source}；连续 {row['streak']} 天。")
         else:
             self.hint.setText(

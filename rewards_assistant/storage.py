@@ -16,6 +16,7 @@ from typing import Iterable, List, Optional
 from .config import db_path
 from .task_labels import humanize_task
 from .pending import all_reward_tasks_done
+from .points import calculate_daily_points, BALANCE_DELTA, TASK_FALLBACK
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily (
@@ -28,8 +29,10 @@ CREATE TABLE IF NOT EXISTS daily (
     level            INTEGER NOT NULL DEFAULT 0,
     streak           INTEGER NOT NULL DEFAULT 0,
     official_streak  INTEGER NOT NULL DEFAULT 0,
-    official_points_earned INTEGER,
-    points_source TEXT NOT NULL DEFAULT 'estimated',
+    official_points_earned INTEGER,  -- 旧版字段，保留用于数据库兼容，不再参与计算
+    available_synced_at TEXT,       -- 仅 API 真正返回余额时记录，0 也有效
+    baseline_points INTEGER,       -- 差值所使用的昨日账户余额
+    points_source TEXT NOT NULL DEFAULT 'task_fallback',
     all_done         INTEGER NOT NULL DEFAULT 0,
     synced_at        TEXT
 );
@@ -67,14 +70,14 @@ CREATE TABLE IF NOT EXISTS used_terms (
 class Store:
     """线程安全的 SQLite 封装。GUI 线程与后台同步线程都会访问它。"""
 
-    def __init__(self, path: Optional[str] = None, streak_rule: str = "any_points") -> None:
-        self.streak_rule = streak_rule if streak_rule in ("all_done", "any_points") else "any_points"
+    def __init__(self, path: Optional[str] = None) -> None:
         self.path = str(path or db_path())
         self._local = threading.local()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
         self._migrate()
         self._ensure_columns()
+        self._migrate_legacy_points()
 
     def _migrate(self) -> None:
         """老库升级：缺列自动补，避免用户升级后打不开。"""
@@ -87,7 +90,14 @@ class Store:
             if "official_points_earned" not in cols:
                 conn.execute("ALTER TABLE daily ADD COLUMN official_points_earned INTEGER")
             if "points_source" not in cols:
-                conn.execute("ALTER TABLE daily ADD COLUMN points_source TEXT NOT NULL DEFAULT 'estimated'")
+                conn.execute("ALTER TABLE daily ADD COLUMN points_source TEXT NOT NULL DEFAULT 'task_fallback'")
+            if "available_synced_at" not in cols:
+                conn.execute("ALTER TABLE daily ADD COLUMN available_synced_at TEXT")
+                # 旧版仅能确认正余额快照；0 可能是无同步记录的默认值，不能猜。
+                conn.execute("UPDATE daily SET available_synced_at=synced_at "
+                             "WHERE available_points>0 AND synced_at IS NOT NULL")
+            if "baseline_points" not in cols:
+                conn.execute("ALTER TABLE daily ADD COLUMN baseline_points INTEGER")
             tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "link" not in tcols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN link TEXT NOT NULL DEFAULT ''")
@@ -107,6 +117,40 @@ class Store:
             if "raw_name" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN raw_name TEXT NOT NULL DEFAULT ''")
 
+    def _migrate_legacy_points(self) -> None:
+        """一次性迁移旧版 Earn/估算记录到统一的日差或任务回退规则。"""
+        with self._connect() as conn:
+            legacy = conn.execute(
+                "SELECT 1 FROM daily WHERE points_source NOT IN (?,?) LIMIT 1",
+                (BALANCE_DELTA, TASK_FALLBACK),
+            ).fetchone()
+            if legacy is None:
+                return
+            rows = list(conn.execute(
+                "SELECT day, available_points, available_synced_at FROM daily ORDER BY day"))
+            totals = {r["day"]: int(r["points"] or 0) for r in conn.execute(
+                "SELECT day, SUM(points_earned) AS points FROM tasks GROUP BY day")}
+            by_day = {r["day"]: r for r in rows}
+            updates = []
+            for row in rows:
+                yesterday = (datetime.strptime(row["day"], "%Y-%m-%d").date()
+                             - timedelta(days=1)).isoformat()
+                prev = by_day.get(yesterday)
+                current_balance = (int(row["available_points"])
+                                   if row["available_synced_at"] is not None else None)
+                prev_balance = (int(prev["available_points"])
+                                if prev is not None and prev["available_synced_at"] is not None
+                                else None)
+                earned, source, baseline = calculate_daily_points(
+                    current_balance, prev_balance, totals.get(row["day"], 0))
+                updates.append((earned, source, baseline, row["day"]))
+            with self.tx() as tx:
+                tx.executemany(
+                    "UPDATE daily SET points_earned=?, points_source=?, baseline_points=?, "
+                    "official_points_earned=NULL WHERE day=?", updates)
+        if rows:
+            self.recompute_streaks_from(rows[0]["day"])
+
     def _connect(self):
         conn = getattr(self._local, "conn", None)
         if conn is None:
@@ -115,6 +159,13 @@ class Store:
             conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn = conn
         return conn
+
+    def close_thread_connection(self) -> None:
+        """后台同步线程退出时主动关闭 SQLite 连接，避免长时间积累句柄。"""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            self._local.conn = None
+            conn.close()
 
     @contextmanager
     def tx(self):
@@ -231,78 +282,88 @@ class Store:
     # ------------------------------------------------------------------ 汇总
 
     def summarize_day(self, day: str) -> dict:
-        """依据任务明细重算当日汇总，并写回 daily 表。"""
+        """唯一积分算法：账户今日余额减昨日余额；缺快照则用任务积分和。"""
+        yesterday = (datetime.strptime(day, "%Y-%m-%d").date()
+                     - timedelta(days=1)).isoformat()
         with self._connect() as conn:
             rows = list(conn.execute("SELECT * FROM tasks WHERE day=?", (day,)))
-            prev = conn.execute(
-                "SELECT available_points, level, official_points_earned FROM daily WHERE day=?", (day,)
+            current = conn.execute(
+                "SELECT available_points, available_synced_at, level FROM daily WHERE day=?",
+                (day,),
+            ).fetchone()
+            previous = conn.execute(
+                "SELECT available_points, available_synced_at FROM daily WHERE day=?",
+                (yesterday,),
             ).fetchone()
             totals = conn.execute(
-                "SELECT SUM(points_earned) e, SUM(points_max) m FROM tasks WHERE day=?", (day,)
+                "SELECT SUM(points_earned) e, SUM(points_max) m FROM tasks WHERE day=?",
+                (day,),
             ).fetchone()
 
         task_earned = int(totals["e"] or 0)
-        # 本日已核验的数字不可被下一次 API 任务求和覆盖。
-        official = prev["official_points_earned"] if prev else None
-        earned = int(official) if official is not None else task_earned
-        points_max = int(totals["m"] or 0)
+        today_balance = (int(current["available_points"])
+                         if current is not None and current["available_synced_at"] is not None
+                         else None)
+        yesterday_balance = (int(previous["available_points"])
+                             if previous is not None and previous["available_synced_at"] is not None
+                             else None)
+        earned, source, baseline = calculate_daily_points(
+            today_balance, yesterday_balance, task_earned)
         done = sum(1 for r in rows if r["complete"])
-        total = len(rows)
-        summary = {
+        return {
             "day": day,
             "points_earned": earned,
-            "official_points_earned": official,
-            "points_source": "earn" if official is not None else "estimated",
-            "points_max": points_max,
+            "points_source": source,
+            "baseline_points": baseline,
+            "available_synced_at": (current["available_synced_at"] if current else None),
+            "points_max": int(totals["m"] or 0),
             "tasks_done": done,
-            "tasks_total": total,
+            "tasks_total": len(rows),
             "all_done": all_reward_tasks_done(rows),
-            "available_points": int(prev["available_points"]) if prev else 0,
-            "level": int(prev["level"]) if prev else 0,
+            "available_points": int(current["available_points"]) if current else 0,
+            "level": int(current["level"]) if current else 0,
             "synced_at": datetime.now().isoformat(timespec="seconds"),
         }
-        return summary
 
     def save_daily(self, summary: dict) -> None:
         summary = dict(summary)
-        summary["streak"] = self.compute_streak(summary["day"])
+        summary["streak"] = 0  # 本轮保存后统一批量重算，避免逐日重复查询
         with self.tx() as conn:
             conn.execute(
                 """
                 INSERT INTO daily (day, points_earned, points_max, tasks_done, tasks_total,
                                    available_points, level, streak, all_done, synced_at,
-                                   official_points_earned, points_source)
+                                   available_synced_at, baseline_points, points_source)
                 VALUES (:day,:points_earned,:points_max,:tasks_done,:tasks_total,
                         :available_points,:level,:streak,:all_done,:synced_at,
-                        :official_points_earned,:points_source)
+                        :available_synced_at,:baseline_points,:points_source)
                 ON CONFLICT(day) DO UPDATE SET
                     points_earned=excluded.points_earned,
                     points_max=excluded.points_max,
-                    official_points_earned=excluded.official_points_earned,
+                    baseline_points=excluded.baseline_points,
                     points_source=excluded.points_source,
                     tasks_done=excluded.tasks_done,
                     tasks_total=excluded.tasks_total,
                     available_points=excluded.available_points,
+                    available_synced_at=excluded.available_synced_at,
                     level=excluded.level,
-                    streak=excluded.streak,
                     all_done=excluded.all_done,
-                    synced_at=excluded.synced_at
+                    synced_at=excluded.synced_at,
+                    official_points_earned=NULL
                 """,
                 {**summary, "all_done": 1 if summary["all_done"] else 0},
             )
 
-    def refresh_day(self, day: str, official_points: Optional[int] = None) -> dict:
-        s = self.summarize_day(day)
-        if official_points is not None:
-            if isinstance(official_points, bool) or int(official_points) < 0:
-                raise ValueError("官方今日积分无效")
-            s["official_points_earned"] = int(official_points)
-            s["points_earned"] = int(official_points)
-            s["points_source"] = "earn"
-        self.save_daily(s)
-        # 连续天数会随当天完成情况变化，次日记录需要重算
+    def refresh_day(self, day: str) -> dict:
+        summary = self.summarize_day(day)
+        self.save_daily(summary)
+        # 若补录昨日余额，次日差值也应同步更新。
+        following = (datetime.strptime(day, "%Y-%m-%d").date()
+                     + timedelta(days=1)).isoformat()
+        if self.daily(following) is not None:
+            self.save_daily(self.summarize_day(following))
         self.recompute_streaks_from(day)
-        return self.daily(day) or s
+        return self.daily(day) or summary
 
     def daily(self, day: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
@@ -318,40 +379,10 @@ class Store:
         with self._connect() as conn:
             return list(conn.execute("SELECT * FROM daily ORDER BY day ASC"))
 
-    def set_streak_rule(self, rule: str) -> None:
-        """设置项即时生效，重新计算已保存历史中的连续天数。"""
-        if rule not in ("all_done", "any_points"):
-            raise ValueError("不支持的连续天数规则")
-        self.streak_rule = rule
-        days = self.all_days()
-        if days:
-            self.recompute_streaks_from(days[0]["day"], rule)
-
     # -------------------------------------------------------------- 连续天数
 
-    def compute_streak(self, day: str, rule: Optional[str] = None) -> int:
-        """从 day 往前追溯，返回连续达标天数。"""
-        rule = rule or self.streak_rule
-        d = datetime.strptime(day, "%Y-%m-%d").date()
-        streak = 0
-        for _ in range(3650):
-            row = self.daily(d.isoformat())
-            if row is None:
-                break
-            ok = (
-                bool(row["all_done"])
-                if rule == "all_done"
-                else int(row["points_earned"]) > 0
-            )
-            if not ok:
-                break
-            streak += 1
-            d -= timedelta(days=1)
-        return streak
-
-    def recompute_streaks_from(self, day: str, rule: Optional[str] = None) -> None:
-        """一次遍历重算连续天数，避免按天执行上百次 SQL 查询。"""
-        rule = rule or self.streak_rule
+    def recompute_streaks_from(self, day: str) -> None:
+        """固定规则：当日积分净变化或任务回退积分大于零，算一天。"""
         start = datetime.strptime(day, "%Y-%m-%d").date()
         rows = self.all_days()
         updates = []
@@ -361,8 +392,7 @@ class Store:
             current = datetime.strptime(row["day"], "%Y-%m-%d").date()
             if previous is None or (current - previous).days != 1:
                 streak = 0
-            passed = (bool(row["all_done"]) if rule == "all_done"
-                      else int(row["points_earned"] or 0) > 0)
+            passed = int(row["points_earned"] or 0) > 0
             streak = streak + 1 if passed else 0
             if current >= start:
                 updates.append((streak, row["day"]))
@@ -371,15 +401,14 @@ class Store:
             with self.tx() as conn:
                 conn.executemany("UPDATE daily SET streak=? WHERE day=?", updates)
 
-    def best_streak(self) -> int:
+    def best_streak(self, rows=None) -> int:
         best = current = 0
         previous = None
-        for row in self.all_days():
+        for row in rows if rows is not None else self.all_days():
             day = datetime.strptime(row["day"], "%Y-%m-%d").date()
             if previous is None or (day - previous).days != 1:
                 current = 0
-            passed = (bool(row["all_done"]) if self.streak_rule == "all_done"
-                      else int(row["points_earned"] or 0) > 0)
+            passed = int(row["points_earned"] or 0) > 0
             current = current + 1 if passed else 0
             best = max(best, current)
             previous = day
@@ -389,14 +418,16 @@ class Store:
 
     def stats(self) -> dict:
         with self._connect() as conn:
-            total = conn.execute(
-                "SELECT SUM(CASE WHEN points_source='earn' THEN points_earned ELSE 0 END) e, "
-                "COUNT(*) c FROM daily"
-            ).fetchone()
+            total = conn.execute("SELECT SUM(points_earned) e, COUNT(*) c FROM daily").fetchone()
             month = date.today().strftime("%Y-%m")
             m = conn.execute(
-                "SELECT SUM(points_earned) e FROM daily "
-                "WHERE substr(day,1,7)=? AND points_source='earn'", (month,)
+                "SELECT SUM(points_earned) e FROM daily WHERE substr(day,1,7)=?",
+                (month,),
+            ).fetchone()
+            sources = conn.execute(
+                "SELECT SUM(CASE WHEN points_source=? THEN 1 ELSE 0 END) n "
+                "FROM daily WHERE substr(day,1,7)=?",
+                (TASK_FALLBACK, month),
             ).fetchone()
         all_days = self.all_days()
         today = self.daily(date.today().isoformat())
@@ -404,8 +435,9 @@ class Store:
             "total_points": int(total["e"] or 0),
             "tracked_days": int(total["c"] or 0),
             "month_points": int(m["e"] or 0),
+            "month_fallback_days": int(sources["n"] or 0),
             "current_streak": int(today["streak"]) if today else 0,
-            "best_streak": self.best_streak(),
+            "best_streak": self.best_streak(all_days),
             "full_days": sum(1 for r in all_days if r["all_done"]),
         }
 
@@ -495,7 +527,7 @@ class Store:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT available_points, level, official_streak FROM daily "
-                "WHERE available_points > 0 ORDER BY day DESC LIMIT 1"
+                "WHERE available_synced_at IS NOT NULL ORDER BY day DESC LIMIT 1"
             ).fetchone()
         if row is None:
             return (0, 0, None)
@@ -503,12 +535,17 @@ class Store:
                 row["official_streak"] if row["official_streak"] else None)
 
     def upsert_available(self, day: str, available_points: int, level: int) -> None:
+        """只有拿到 API 有效余额才调用；保留 0 元余额并标记快照有效。"""
+        if isinstance(available_points, bool) or int(available_points) < 0:
+            raise ValueError("账户余额无效")
+        now = datetime.now().isoformat(timespec="seconds")
         with self.tx() as conn:
             conn.execute(
-                "INSERT INTO daily (day, available_points, level) VALUES (?,?,?) "
-                "ON CONFLICT(day) DO UPDATE SET available_points=excluded.available_points, "
-                "level=excluded.level",
-                (day, int(available_points), int(level)),
+                "INSERT INTO daily (day, available_points, level, available_synced_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(day) DO UPDATE SET "
+                "available_points=excluded.available_points, level=excluded.level, "
+                "available_synced_at=excluded.available_synced_at",
+                (day, int(available_points), int(level), now),
             )
 
 

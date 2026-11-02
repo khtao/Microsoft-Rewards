@@ -75,15 +75,13 @@ def test_search_panel_autosaves(qapp, settings, monkeypatch):
     monkeypatch.setattr(main_window, "find_edge_binary", lambda: None)
     panel = SearchPanel(settings=settings, save_settings=settings.update)
     panel.spin_repeat.setValue(23)
-    panel.chk_copy.setChecked(True)
     panel.edt_keywords.setText("旅行, 美食")
     data = Settings().get("search_panel")
     assert data["repeat"] == 23
-    assert data["copy_profile"] is True
+    assert "copy_profile" not in data
     assert data["keywords"] == "旅行, 美食"
     other = SearchPanel(settings=settings, save_settings=settings.update)
     assert other.spin_repeat.value() == 23
-    assert other.chk_copy.isChecked()
     assert other.edt_keywords.text() == "旅行, 美食"
 
 

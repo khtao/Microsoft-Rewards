@@ -145,15 +145,13 @@ def test_scheduler_once_per_slot_and_skip_if_disabled():
             self._fired = set()
             self._next_sync = None
             self.settings = SimpleNamespace(get=lambda key, default=None: {
-                "sync_interval_minutes": 0, "auto_open_time": "09:00",
+                "sync_interval_minutes": 0,
                 "auto_run_enabled": True, "auto_run_times": ["09:00", "12:00"],
                 "remind_time": "08:30", "evening_remind_time": "20:00",
             }.get(key, default))
             self.calls = []
         def _remember_run_day(self, _now):
             pass
-        def _auto_open_morning(self):
-            self.calls.append("open")
         def _request_run_pending(self, **kwargs):
             self.calls.append(("run", kwargs["scheduled"]))
         def _remind(self, key):
@@ -162,11 +160,11 @@ def test_scheduler_once_per_slot_and_skip_if_disabled():
     obj = ScheduleStub()
     tick(obj)
     tick(obj)
-    assert obj.calls == ["open", ("run", True)]
+    assert obj.calls == [("run", True)]
     clock.value = datetime(2026, 10, 19, 12, 0)
     tick(obj)
     tick(obj)
-    assert obj.calls == ["open", ("run", True), ("run", True)]
+    assert obj.calls == [("run", True), ("run", True)]
 
 
 def test_scheduled_run_does_nothing_if_all_completed_or_search_running():
@@ -403,7 +401,7 @@ def test_fast_sync_refreshes_authoritative_progress_and_keeps_same_offer_title(t
                       10, 0, False, title_source='page', offer_id='offer-abc')
     store.upsert_task('2026-10-21', 'pc_search', '电脑搜索', '搜索',
                       90, 0, False)
-    snapshot = Snapshot(day='2026-10-21', available_points=998, level=2,
+    snapshot = Snapshot(day='2026-10-21', available_points=998, balance_valid=True, level=2,
                         tasks=[TaskItem('more:0', '活动ID', '更多活动', 10, 10, True,
                                         offer_id='offer-abc', title_source='guess'),
                                TaskItem('pc_search', '电脑搜索', '搜索', 90, 30, False,

@@ -17,7 +17,7 @@ from typing import Literal, Optional, Union
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分活动管理助手"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 REWARDS_HOME = "https://rewards.bing.com/"
 REWARDS_DASHBOARD = "https://rewards.bing.com/"
@@ -85,20 +85,12 @@ DEFAULT_SETTINGS = {
     "evening_remind_time_value": "20:30",
     # 当天全部任务完成时是否静默（不再提醒）
     "silent_when_all_done": True,
-    # 连续天数的判定方式：all_done=当日任务全部完成；any_points=当日有积分进账
-    "streak_rule": "any_points",
-    # 每天定时自动打开未完成任务页（HH:MM），空字符串=关闭
-    "auto_open_time": "09:00",
-    "auto_open_time_value": "09:00",
     # 独立的“自动完成未完成任务”时间表，0~10 个且互不重复。
     # 旧版 auto_run_pending/auto_open_time 会在加载时迁移。
     "auto_run_enabled": False,
     "auto_run_times": ["09:00"],
     "auto_run_fired_day": "",
     "auto_run_fired_times": [],
-    # 逐个打开时的随机间隔区间（秒），模拟人的操作节奏
-    "auto_open_gap_min": 5,
-    "auto_open_gap_max": 10,
     # 是否随系统启动（Windows 写注册表 / macOS 写 LaunchAgent / Linux 写 autostart）
     "launch_at_login": False,
     # 同步后是否弹出通知
@@ -108,8 +100,6 @@ DEFAULT_SETTINGS = {
     # 在官方任务全部完成后低内存休眠：进程仍运行，次日自动恢复托盘。
     "sleep_when_all_done": False,
     "sleep_until_day": "",
-    # Earn 页面纯 HTML 未包含积分时，允许临时启动无头 Edge 读取卡片；结束后必关。
-    "earn_browser_fallback": True,
     # 趋势图显示天数
     "chart_days": 30,
     "chart_metric": "earned",
@@ -191,12 +181,23 @@ class Settings:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     # 已取消浏览器选择，下次保存时自动丢弃旧版字段。
-                    loaded.pop("browser_name", None)
+                    for obsolete in ("browser_name", "earn_browser_fallback", "streak_rule",
+                                     "auto_open_gap_min", "auto_open_gap_max"):
+                        loaded.pop(obsolete, None)
+                    if isinstance(loaded.get("search_panel"), dict):
+                        # 老版本高级选项已取消，不再默默影响浏览器行为。
+                        allowed = ("repeat", "level", "keywords", "keyword_sources")
+                        loaded["search_panel"] = {k: v for k, v in loaded["search_panel"].items()
+                                                  if k in allowed}
                     # 从旧版“到点自动运行”开关迁移，保留原有时间。
                     if "auto_run_times" not in loaded:
                         old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
                         loaded["auto_run_times"] = [old_time] if _TIME_RE.fullmatch(str(old_time)) else ["09:00"]
                         loaded["auto_run_enabled"] = bool(loaded.get("auto_run_pending", False))
+                    # 单时刻的自动打开与多时刻任务计划重复，取消旧自动打开计划。
+                    # 不擅自迁移为自动搜索（可能造成意外自动操作）。
+                    loaded.pop("auto_open_time", None)
+                    loaded.pop("auto_open_time_value", None)
                     loaded.pop("auto_run_pending", None)
                     try:
                         loaded["auto_run_times"] = normalize_run_times(loaded["auto_run_times"])
@@ -236,7 +237,14 @@ class Settings:
         if "auto_run_times" in changes:
             changes["auto_run_times"] = normalize_run_times(changes["auto_run_times"])
         # 不再往设置文件回写已废弃的开关。
-        changes.pop("auto_run_pending", None)
+        for obsolete in ("auto_run_pending", "earn_browser_fallback", "streak_rule",
+                         "auto_open_gap_min", "auto_open_gap_max", "browser_name",
+                         "auto_open_time", "auto_open_time_value"):
+            changes.pop(obsolete, None)
+        if isinstance(changes.get("search_panel"), dict):
+            allowed = ("repeat", "level", "keywords", "keyword_sources")
+            changes["search_panel"] = {k: v for k, v in changes["search_panel"].items()
+                                       if k in allowed}
         changed = {k: v for k, v in changes.items()
                    if k not in self._data or self._data[k] != v}
         if not changed:

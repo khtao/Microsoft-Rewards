@@ -18,8 +18,8 @@ from ..storage import Store
 from .controls import NoWheelComboBox
 
 METRICS = [
-    ("earned", "每日获得积分"),
-    ("available", "累计可用积分"),
+    ("earned", "每日积分变化"),
+    ("available", "账户可用积分"),
     ("streak", "连续完成天数"),
     ("rate", "任务完成率"),
 ]
@@ -55,6 +55,7 @@ class ChartCanvas(QWidget):
         self.unit = ""
         self._hover = -1
         self._rects: List[Tuple[QRectF, int]] = []
+        self._plot_min = 0.0  # 支持余额差值为负（兑换积分时净变化可能小于零）
 
     # ------------------------------------------------------------------ 数据
 
@@ -105,9 +106,11 @@ class ChartCanvas(QWidget):
             p.end()
             return
 
-        vmax = self._nice_max(max(self.values) if max(self.values) > 0 else 10)
+        low, high = min(self.values), max(self.values)
+        self._plot_min = -self._nice_max(abs(low)) if low < 0 else 0.0
+        vmax = self._nice_max(high) if high > 0 else (0.0 if low < 0 else 10.0)
         if self.kind == "rate":
-            vmax = 100.0
+            self._plot_min, vmax = 0.0, 100.0
 
         self._draw_grid(p, rect, vmax)
 
@@ -121,7 +124,8 @@ class ChartCanvas(QWidget):
         p.end()
 
     def _y_of(self, rect: QRectF, v: float, vmax: float) -> float:
-        ratio = 0.0 if vmax <= 0 else max(0.0, min(1.0, v / vmax))
+        span = vmax - self._plot_min
+        ratio = 0.0 if span <= 0 else max(0.0, min(1.0, (v - self._plot_min) / span))
         return rect.bottom() - ratio * rect.height()
 
     def _x_of(self, rect: QRectF, i: int, n: int) -> float:
@@ -136,7 +140,7 @@ class ChartCanvas(QWidget):
         fm = QFontMetrics(f)
 
         for i in range(5):
-            v = vmax * i / 4
+            v = self._plot_min + (vmax - self._plot_min) * i / 4
             y = self._y_of(rect, v, vmax)
             p.setPen(QPen(C_GRID if i else C_AXIS, 1))
             p.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
@@ -169,8 +173,9 @@ class ChartCanvas(QWidget):
         # 面积
         from PySide6.QtGui import QPolygonF
 
-        poly = QPolygonF(pts + [QPointF(pts[-1].x(), rect.bottom()),
-                                QPointF(pts[0].x(), rect.bottom())])
+        zero_y = self._y_of(rect, 0, vmax)
+        poly = QPolygonF(pts + [QPointF(pts[-1].x(), zero_y),
+                                QPointF(pts[0].x(), zero_y)])
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C_FILL)
         p.drawPolygon(poly)
@@ -212,8 +217,8 @@ class ChartCanvas(QWidget):
             cx = rect.left() + slot * (i + 0.5)
             x = cx - bw / 2
             y = self._y_of(rect, v, vmax)
-            h = rect.bottom() - y
-            r = QRectF(x, y, bw, max(1.0, h))
+            zero_y = self._y_of(rect, 0, vmax)
+            r = QRectF(x, min(y, zero_y), bw, max(1.0, abs(zero_y - y)))
             self._rects.append((r, i))
             done = self.kind == "rate" and v >= 100
             p.setPen(Qt.PenStyle.NoPen)
@@ -348,15 +353,18 @@ class ChartView(QWidget):
     def refresh(self) -> None:
         rows = self._rows()
         key = self.metric.currentData() or "earned"
-        # 官方 Earn 未核验的日子不参加今日积分趋势，否则历史会继续沿用任务积分之和。
-        if key == "earned":
-            rows = [row for row in rows if row["points_source"] == "earn"]
+        # 与历史表使用完全相同的每日 points_earned；来源由数据库统一决定。
+        if key == "available":
+            rows = [row for row in rows if row["available_synced_at"] is not None]
         labels: List[str] = []
         values: List[float] = []
 
         for r in rows:
             d = r["day"]
-            labels.append(d[5:] if len(d) >= 10 else d)  # 只看 月-日
+            label = d[5:] if len(d) >= 10 else d
+            if key == "earned" and r["points_source"] != "balance_delta":
+                label += "*"  # * 表示昨日余额缺失，按任务积分回退
+            labels.append(label)
             if key == "earned":
                 values.append(float(r["points_earned"] or 0))
             elif key == "available":
@@ -381,8 +389,9 @@ class ChartView(QWidget):
         avg = total / len(vals) if vals else 0
         best = max(vals) if vals else 0
         if key == "earned":
-            return (f"已核验 {len(rows)} 天 · 官方 Earn 记录累计 {total:,.0f} 分 · "
-                    f"日均 {avg:,.0f} 分 · 单日最高 {best:,.0f} 分")
+            fallback = sum(1 for row in rows if row["points_source"] != "balance_delta")
+            return (f"共 {len(rows)} 天 · 累计 {total:,.0f} 分 · 日均 {avg:,.0f} 分 · "
+                    f"任务回退 {fallback} 天（*）；余额差值为净变化，兑换可能为负")
         if key == "available":
             return f"共 {len(rows)} 天 · 最新 {vals[-1]:,.0f} 分 · 区间最高 {best:,.0f} 分"
         if key == "streak":

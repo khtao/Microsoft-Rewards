@@ -15,14 +15,14 @@ def home(tmp_path, monkeypatch):
 
 def test_defaults_and_batch_roundtrip(home):
     settings = Settings()
-    assert settings.get("auto_open_time") == "09:00"
+    assert settings.get("auto_open_time") is None
     assert settings.update({"auto_open_time": "14:35", "auto_run_pending": True,
                             "search_panel": {"repeat": 17, "keyword_sources": []},
                             "chart_days": 90, "chart_metric": "streak"})
     saved = home / "settings.json"
     assert saved.is_file()
     assert Settings().get("search_panel") == {"repeat": 17, "keyword_sources": []}
-    assert Settings().get("auto_open_time") == "14:35"
+    assert Settings().get("auto_open_time") is None
     assert Settings().get("chart_days") == 90
     assert not settings.update({"auto_run_pending": True})
     assert json.loads(saved.read_text(encoding="utf-8"))["chart_metric"] == "streak"
@@ -32,12 +32,12 @@ def test_disabled_settings_keep_editable_values(home):
     settings = Settings()
     settings.update({"sync_interval_minutes": 0, "sync_interval_value_minutes": 37,
                      "remind_time": "", "remind_time_value": "11:25",
-                     "auto_open_time": "", "auto_open_time_value": "08:15"})
+                     "evening_remind_time": "", "evening_remind_time_value": "18:15"})
     again = Settings()
     assert again.get("sync_interval_minutes") == 0
     assert again.get("sync_interval_value_minutes") == 37
     assert again.get("remind_time_value") == "11:25"
-    assert again.get("auto_open_time_value") == "08:15"
+    assert again.get("evening_remind_time_value") == "18:15"
 
 
 def test_atomic_replace_does_not_corrupt_saved_file(home, monkeypatch):

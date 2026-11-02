@@ -34,6 +34,7 @@ class Snapshot:
     day: str
     level: int = 0
     available_points: int = 0
+    balance_valid: bool = False  # API 是否真的返回余额，不能把缺失当作 0
     pc_search: Tuple[int, int] = (0, 0)
     mobile_search: Tuple[int, int] = (0, 0)
     tasks: List[TaskItem] = field(default_factory=list)
@@ -220,10 +221,22 @@ def parse_dashboard(data: Dict[str, Any], today: Optional[str] = None) -> Snapsh
     user = dash.get("userStatus") or {}
     counters = user.get("counters") or {}
 
+    # API 可能不返回 availablePoints；缺失时不应写入虚假的零余额快照。
+    raw_balance = user.get("availablePoints")
+    try:
+        if isinstance(raw_balance, bool) or raw_balance is None:
+            raise ValueError("余额缺失")
+        balance = int(str(raw_balance).replace(",", ""))
+        if balance < 0:
+            raise ValueError("余额为负")
+        balance_valid = True
+    except (ValueError, TypeError, OverflowError):
+        balance, balance_valid = 0, False
     snap = Snapshot(
         day=today,
         level=_level_to_int((user.get("levelInfo") or {}).get("activeLevel")),
-        available_points=int(user.get("availablePoints") or 0),
+        available_points=balance,
+        balance_valid=balance_valid,
     )
     snap.pc_search = _counter(counters, "pcSearch")
     snap.mobile_search = _counter(counters, "mobileSearch")

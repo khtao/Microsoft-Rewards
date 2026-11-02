@@ -1,32 +1,17 @@
-"""新增重点回归：Earn 真实来源、旧数据迁移、设置与低内存休眠。"""
+"""v1.3 余额日差、任务回退、旧库迁移和低内存休眠回归。"""
 from __future__ import annotations
 
 import ast
-from datetime import date, datetime
+import sqlite3
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from rewards_assistant.config import Settings
-from rewards_assistant.earn_points import parse_earn_today_points
+from rewards_assistant.points import BALANCE_DELTA, TASK_FALLBACK, calculate_daily_points
+from rewards_assistant.rewards_client import parse_dashboard
 from rewards_assistant.storage import Store
-
-
-@pytest.mark.parametrize("html,expected", [
-    ("<div>Today's points: 42</div>", 42),
-    ("<span>今日获得积分：0</span>", 0),
-    ("<script>{\"todayPointsEarned\":135}</script>", 135),
-    ("<script>{\"pointsEarnedToday\":46}</script>", 46),
-    ("<div data-testid='today-points'><b>Today's points</b><strong>66</strong></div>", 66),
-    ("<p>Today's points: 50 / 100</p>", 50),
-    ("<div>任务积分 999，可用积分 32881</div>", None),
-    ("<script>{\"pointsEarnedToday\":21,\"todayPointsEarned\":22}</script>", None),
-    ("Today's points: 25; Today's points: 28", None),
-    ("", None),
-    ("<div data-testid='today-points'>今日积分 45 和另一统计 90</div>", 45),
-])
-def test_earn_parser_only_accepts_unambiguous_daily_point_value(html, expected):
-    assert parse_earn_today_points(html) == expected
 
 
 def _task(store, day, pts, complete=False):
@@ -34,86 +19,160 @@ def _task(store, day, pts, complete=False):
                       points_max=100, points_earned=pts, complete=complete)
 
 
-def test_earn_total_overrides_tasks_and_remains_after_subsequent_unverified_sync(tmp_path):
-    store = Store(str(tmp_path / "rewards.sqlite"))
-    day = "2026-11-02"
-    _task(store, day, 35)
-    initial = store.refresh_day(day)
-    assert initial["points_earned"] == 35
-    assert initial["points_source"] == "estimated"
-    assert initial["official_points_earned"] is None
-
-    actual = store.refresh_day(day, official_points=155)
-    assert actual["points_earned"] == 155
-    assert actual["official_points_earned"] == 155
-    assert actual["points_source"] == "earn"
-    assert actual["points_max"] == 100  # 上限属于任务，不与 Earn 今日积分混为一谈。
-
-    _task(store, day, 85)
-    again = store.refresh_day(day)  # 页面暂时不可访问时不回退成求和。
-    assert again["points_earned"] == 155
-    assert again["points_source"] == "earn"
-    assert store.tasks_of_day(day)[0]["points_earned"] == 85
+def test_calculate_points_requires_both_balances_and_accepts_zero():
+    assert calculate_daily_points(1080, 1000, 12) == (80, BALANCE_DELTA, 1000)
+    assert calculate_daily_points(0, 0, 12) == (0, BALANCE_DELTA, 0)
+    assert calculate_daily_points(990, 1000, 12) == (-10, BALANCE_DELTA, 1000)
+    assert calculate_daily_points(1000, None, 12) == (12, TASK_FALLBACK, None)
+    assert calculate_daily_points(None, 1000, 12) == (12, TASK_FALLBACK, None)
 
 
-def test_zero_earn_today_is_verified_not_missing(tmp_path):
-    store = Store(str(tmp_path / "r.db"))
+def test_yesterday_missing_uses_task_sum_and_today_snapshot_not_fake_baseline(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    _task(store, "2026-11-02", 35)
+    store.upsert_available("2026-11-02", 1250, 2)
+    row = store.refresh_day("2026-11-02")
+    assert row["points_earned"] == 35
+    assert row["points_source"] == TASK_FALLBACK
+    assert row["baseline_points"] is None
+    assert row["available_synced_at"]
+    _task(store, "2026-11-02", 50)
+    assert store.refresh_day("2026-11-02")["points_earned"] == 50
+
+
+def test_balance_delta_overrides_task_sum_and_refresh_does_not_change_it(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    store.upsert_available("2026-11-01", 1000, 2)
+    _task(store, "2026-11-02", 35)
+    store.upsert_available("2026-11-02", 1155, 2)
+    row = store.refresh_day("2026-11-02")
+    assert row["points_earned"] == 155
+    assert row["points_source"] == BALANCE_DELTA
+    assert row["baseline_points"] == 1000
+    assert row["points_max"] == 100
+    _task(store, "2026-11-02", 85)
+    assert store.refresh_day("2026-11-02")["points_earned"] == 155
+
+
+def test_zero_balance_is_valid_and_negative_delta_is_preserved(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    store.upsert_available("2026-11-01", 0, 2)
+    store.upsert_available("2026-11-02", 0, 2)
+    _task(store, "2026-11-02", 35)
+    assert store.refresh_day("2026-11-02")["points_earned"] == 0
+    store.upsert_available("2026-11-01", 200, 2)
+    row = store.refresh_day("2026-11-02")
+    assert row["points_earned"] == -200
+    assert row["points_source"] == BALANCE_DELTA
+    assert row["baseline_points"] == 200
+
+
+def test_nonconsecutive_previous_snapshot_does_not_count(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    store.upsert_available("2026-10-30", 500, 2)
+    store.upsert_available("2026-11-02", 900, 2)
+    _task(store, "2026-11-02", 45)
+    assert store.refresh_day("2026-11-02")["points_earned"] == 45
+
+
+def test_missing_current_balance_does_not_use_default_zero(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    store.upsert_available("2026-11-01", 1000, 2)
     _task(store, "2026-11-02", 30)
-    row = store.refresh_day("2026-11-02", official_points=0)
-    assert row["points_earned"] == 0
-    assert row["points_source"] == "earn"
+    row = store.refresh_day("2026-11-02")
+    assert row["points_earned"] == 30
+    assert row["points_source"] == TASK_FALLBACK
+    assert row["available_synced_at"] is None
 
 
-def test_negative_earn_points_rejected_without_overwriting(tmp_path):
-    store = Store(str(tmp_path / "r.db"))
-    day = "2026-11-02"
-    _task(store, day, 15)
-    store.refresh_day(day)
-    with pytest.raises(ValueError):
-        store.refresh_day(day, official_points=-2)
-    assert store.daily(day)["points_source"] == "estimated"
+@pytest.mark.parametrize("value,valid,expected", [
+    (None, False, 0), ("1,234", True, 1234), (0, True, 0),
+    (False, False, 0), (-1, False, 0), ("not a number", False, 0),
+])
+def test_dashboard_balance_validity(value, valid, expected):
+    user = {} if value is None else {"availablePoints": value}
+    snap = parse_dashboard({"dashboard": {"userStatus": user}}, "2026-11-02")
+    assert snap.balance_valid is valid
+    assert snap.available_points == expected
 
 
-def test_old_database_points_are_retained_but_not_claimed_official(tmp_path):
-    store = Store(str(tmp_path / "r.db"))
-    day = "2024-05-02"
-    _task(store, day, 65)
-    store.refresh_day(day)
-    after_reopen = Store(str(tmp_path / "r.db"))
-    old = after_reopen.daily(day)
-    assert old["points_earned"] == 65
-    assert old["points_source"] == "estimated"
+def test_backfill_yesterday_recalculates_tomorrow(tmp_path):
+    store = Store(str(tmp_path / "r.sqlite"))
+    _task(store, "2026-11-02", 40)
+    store.upsert_available("2026-11-02", 1500, 2)
+    assert store.refresh_day("2026-11-02")["points_earned"] == 40
+    store.upsert_available("2026-11-01", 1430, 2)
+    store.refresh_day("2026-11-01")
+    row = store.daily("2026-11-02")
+    assert row["points_earned"] == 70
+    assert row["points_source"] == BALANCE_DELTA
 
 
-def test_streak_setting_recomputes_many_days_and_best_streak(tmp_path):
-    store = Store(str(tmp_path / "r.db"))
-    # 450天历史，覆盖旧 400 天重算上限。
-    from datetime import timedelta
-    start = date(2025, 1, 1)
-    for i in range(450):
-        day = (start + timedelta(days=i)).isoformat()
-        _task(store, day, 10, complete=False)
+def test_legacy_earn_records_migrated_without_earn_calculation(tmp_path):
+    path = tmp_path / "old.sqlite"
+    store = Store(str(path))
+    for day, bal, task in [("2026-11-01", 1000, 30), ("2026-11-02", 1100, 15)]:
+        _task(store, day, task)
+        store.upsert_available(day, bal, 2)
         store.refresh_day(day)
-    assert store.best_streak() == 450
-    store.set_streak_rule("all_done")
-    assert store.best_streak() == 0
-    assert store.daily((start + timedelta(days=449)).isoformat())["streak"] == 0
-    store.set_streak_rule("any_points")
-    assert store.best_streak() == 450
-    assert store.daily((start + timedelta(days=449)).isoformat())["streak"] == 450
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE daily SET points_source='earn', points_earned=999, "
+                     "official_points_earned=999 WHERE day='2026-11-02'")
+        conn.commit()
+    reopened = Store(str(path))
+    row = reopened.daily("2026-11-02")
+    assert row["points_earned"] == 100
+    assert row["points_source"] == BALANCE_DELTA
+    assert row["official_points_earned"] is None
 
 
-def test_sleep_and_streak_preferences_persist(tmp_path, monkeypatch):
+def test_old_db_zero_balance_not_assumed_to_be_valid(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript("""CREATE TABLE daily (
+        day TEXT PRIMARY KEY, points_earned INTEGER DEFAULT 0, points_max INTEGER DEFAULT 0,
+        tasks_done INTEGER DEFAULT 0, tasks_total INTEGER DEFAULT 0,
+        available_points INTEGER DEFAULT 0, level INTEGER DEFAULT 0,
+        streak INTEGER DEFAULT 0, all_done INTEGER DEFAULT 0, synced_at TEXT);
+        INSERT INTO daily VALUES ('2026-11-01', 500, 100, 1, 1, 0, 2, 1, 1, '2026-11-01T12:00:00');
+        """)
+    conn.close()
+    store = Store(str(path))
+    assert store.daily("2026-11-01")["available_synced_at"] is None
+
+
+def test_stats_include_both_sources_and_net_negative(tmp_path):
+    store = Store(str(tmp_path / "stats.sqlite"))
+    month = date.today().replace(day=1)
+    day1 = month.isoformat()
+    day2 = (month + timedelta(days=1)).isoformat()
+    _task(store, day1, 25)
+    store.upsert_available(day1, 500, 2)
+    store.refresh_day(day1)
+    _task(store, day2, 20)
+    store.upsert_available(day2, 480, 2)
+    store.refresh_day(day2)
+    stats = store.stats()
+    assert stats["total_points"] == 5
+    assert stats["month_points"] == 5
+    assert stats["month_fallback_days"] == 1
+
+
+def test_simplified_settings_drop_obsolete_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
     settings = Settings()
-    assert settings.get("sleep_when_all_done") is False
-    settings.update({"sleep_when_all_done": True, "sleep_until_day": "2026-11-02",
-                     "streak_rule": "all_done", "close_to_tray": False})
-    again = Settings()
-    assert again.get("sleep_until_day") == "2026-11-02"
-    assert again.get("sleep_when_all_done") is True
-    assert again.get("streak_rule") == "all_done"
-    assert again.get("close_to_tray") is False
+    assert settings.update({"sleep_when_all_done": True,
+                            "earn_browser_fallback": True,
+                            "streak_rule": "all_done",
+                            "auto_open_gap_min": 1,
+                            "search_panel": {"repeat": 20, "level": 3, "headless": True,
+                                             "copy_profile": True, "keep_open_seconds": 900}})
+    loaded = Settings()
+    assert loaded.get("sleep_when_all_done") is True
+    assert loaded.get("earn_browser_fallback") is None
+    assert loaded.get("streak_rule") is None
+    assert loaded.get("auto_open_gap_min") is None
+    assert loaded.get("search_panel") == {"repeat": 20, "level": 3}
 
 
 def _get_method(name):
@@ -144,7 +203,6 @@ def test_suspended_tick_wakes_after_next_calendar_day():
     method, _ = _get_method("_tick")
     scope = {"datetime": datetime}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), "<ast>", "exec"), scope)
-    from datetime import timedelta
 
     class Stub:
         def __init__(self):
@@ -173,6 +231,8 @@ def test_memory_safe_ui_and_menu_contract_static():
     assert "setMaximumBlockCount(350)" in ui
     assert "_refresh_active_detail" in ui
     assert "bar.addAction(act_login)" not in ui
+    assert "self.chk_headless" not in ui
+    assert "self.chk_copy" not in ui
 
 
 def test_browser_cleanup_on_normal_run_and_launch_failure_source_contract():
@@ -184,27 +244,52 @@ def test_browser_cleanup_on_normal_run_and_launch_failure_source_contract():
     assert source.count('pw.stop()') >= 2
 
 
-def test_store_stats_exclude_old_estimates(tmp_path):
-    store = Store(str(tmp_path / 'stats.sqlite'))
-    old, new = '2026-08-01', date.today().isoformat()
-    _task(store, old, 400)
-    store.refresh_day(old)  # 旧数据不应算作已验证历史积分。
-    _task(store, new, 25)
-    store.refresh_day(new, official_points=10)
-    stats = store.stats()
-    assert stats['total_points'] == 10
-    assert stats['month_points'] == 10
-
-
-def test_earn_breakdown_parser_accepts_day_not_month_or_balance():
-    from rewards_assistant.earn_points import parse_earn_breakdown_text
-    assert parse_earn_breakdown_text('Today: 65\nThis month: 160\nThis year: 2010') == 65
-    assert parse_earn_breakdown_text('This month: 160\nThis year: 2010') is None
-    assert parse_earn_breakdown_text('Today\'s points: 0\nBalance: 10000') == 0
-    assert parse_earn_breakdown_text('Today: 100') is None  # 无月份/明细上下文，不猜。
-
-
-def test_task_remaining_does_not_subtract_official_earn_from_task_limit():
+def test_task_remaining_does_not_subtract_daily_net_from_task_limit():
     source = (Path(__file__).parents[1] / 'rewards_assistant' / 'app.py').read_text('utf8')
     assert 'left_points = sum(max(0, int(t["points_max"]) - int(t["points_earned"]))' in source
     assert 'left_points = int(row["points_max"]) - int(row["points_earned"])' not in source
+
+
+def test_chart_handles_negative_balance_delta_static():
+    source = (Path(__file__).parents[1] / 'rewards_assistant' / 'ui' / 'chart_view.py').read_text('utf8')
+    assert 'self._plot_min = -self._nice_max(abs(low)) if low < 0 else 0.0' in source
+    assert 'max(1.0, abs(zero_y - y))' in source
+    assert 'points_source"] == "earn"' not in source
+
+
+def test_sqlite_thread_connection_can_be_closed_and_reopened(tmp_path):
+    store = Store(str(tmp_path / "connections.sqlite"))
+    store.upsert_available("2026-11-01", 100, 2)
+    conn = store._connect()
+    store.close_thread_connection()
+    assert store._connect() is not conn
+    assert store.daily("2026-11-01")["available_points"] == 100
+
+
+def test_earn_scraping_is_removed_from_sync_pipeline():
+    root = Path(__file__).parents[1] / "rewards_assistant"
+    sync = (root / "sync.py").read_text(encoding="utf8")
+    app = (root / "app.py").read_text(encoding="utf8")
+    assert not (root / "earn_points.py").exists()
+    assert "fetch_today_points_in_edge" not in sync
+    assert "parse_earn_today_points" not in sync
+    assert "earn_browser_fallback" not in app
+    assert "finally:\n            self.store.close_thread_connection()" in sync
+
+
+def test_source_labels_for_chart_and_history_are_consistent():
+    from rewards_assistant.points import points_source_label, points_display
+    assert points_source_label(BALANCE_DELTA) == "账户余额日差"
+    assert points_source_label(TASK_FALLBACK) == "任务积分合计（回退）"
+    assert "-20" in points_display(BALANCE_DELTA, -20)
+    assert "无昨日余额" in points_display(TASK_FALLBACK, 10)
+
+
+def test_single_schedule_and_manual_open_entry_not_duplicated():
+    root = Path(__file__).parents[1] / "rewards_assistant"
+    app = (root / "app.py").read_text(encoding="utf8")
+    panel = (root / "ui" / "panels.py").read_text(encoding="utf8")
+    assert 'self.settings.get("auto_open_time")' not in app
+    assert 'self.auto_open_time' not in panel
+    assert '"仅打开未完成任务页（手动完成）"' in app
+    assert 'self._after_sync.add("open")' in app

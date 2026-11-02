@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from ..config import APP_TITLE, APP_VERSION
 from .chart_view import ChartView
-from .controls import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
+from .controls import NoWheelComboBox, NoWheelSpinBox
 from .icons import app_icon
 from .panels import AccountPanel, HistoryPanel, QuickPanel, StatsRow
 from .task_panel import TaskPanel
@@ -107,7 +107,7 @@ class SearchRunner(QObject):
             keywords=None,
             keyword_sources=ALL_SOURCES,
             headless=False,
-            copy_profile=True,
+            copy_profile=False,
             keep_open=0.0,
             log_file=str(DEFAULT_LOG),
         )
@@ -320,9 +320,8 @@ class MainWindow(QMainWindow):
         if row is None:
             self.status_left.setText("今天还没有记录 —— 点\"立即同步\"拉取官方数据")
             return
-        today = (f"今日 {row['points_earned']} 分（Earn 官方）"
-                 if row["points_source"] == "earn" else
-                 f"今日积分待核验（任务估算 {row['points_earned']} 分）")
+        from ..points import points_display
+        today = points_display(row["points_source"], int(row["points_earned"]))
         self.status_left.setText(
             f"{today} · 任务 {row['tasks_done']}/{row['tasks_total']} · "
             f"连续 {row['streak']} 天 · "
@@ -416,86 +415,25 @@ class SearchPanel(QWidget):
 
     # ---------- 参数区
     def _build_params(self) -> QGroupBox:
-        box = QGroupBox("拟人搜索设置（电脑端搜索共用）")
+        """只保留日常确有必要调整的参数；浏览器安全/时序参数固定。"""
+        box = QGroupBox("电脑端搜索（简洁设置）")
         g = QGridLayout(box)
         g.setVerticalSpacing(8)
-        g.setHorizontalSpacing(10)
-
         self.spin_repeat = NoWheelSpinBox()
         self.spin_repeat.setRange(1, 200)
         self.spin_repeat.setValue(5)
         self.spin_repeat.setSuffix(" 轮")
-
         self.cmb_level = NoWheelComboBox()
         self.cmb_level.addItems([LEVEL_TIP[i] for i in (1, 2, 3)])
         self.cmb_level.setCurrentIndex(1)
-
-        self.spin_min = NoWheelDoubleSpinBox()
-        self.spin_min.setRange(3, 600)
-        self.spin_min.setValue(16.0)
-        self.spin_min.setSuffix(" s")
-        self.spin_max = NoWheelDoubleSpinBox()
-        self.spin_max.setRange(3, 600)
-        self.spin_max.setValue(29.0)
-        self.spin_max.setSuffix(" s")
-
-        self.spin_click = NoWheelDoubleSpinBox()
-        self.spin_click.setRange(0.0, 1.0)
-        self.spin_click.setSingleStep(0.05)
-        self.spin_click.setValue(0.35)
-
-        self.spin_gap_min = NoWheelDoubleSpinBox()
-        self.spin_gap_min.setRange(0, 600)
-        self.spin_gap_min.setValue(3.0)
-        self.spin_gap_max = NoWheelDoubleSpinBox()
-        self.spin_gap_max.setRange(0, 600)
-        self.spin_gap_max.setValue(12.0)
-
-        self.spin_seed = NoWheelSpinBox()
-        self.spin_seed.setRange(-1, 2_000_000_000)
-        self.spin_seed.setValue(-1)
-        self.spin_seed.setSpecialValueText("随机")
-
         self.edt_keywords = QLineEdit()
-        self.edt_keywords.setPlaceholderText("可选：额外关键词，用逗号分隔，留空则用实时热搜")
-
-        self.edt_log = QLineEdit(str(DEFAULT_LOG))
-        self.edt_log.setPlaceholderText("行为日志（JSONL）")
-
-        self.chk_headless = QCheckBox("无头模式（不建议，特征明显）")
-        self.chk_copy = QCheckBox("复制 profile 快照")
-        self.chk_open = QCheckBox("跑完保持窗口")
-        self.spin_keep = NoWheelDoubleSpinBox()
-        self.spin_keep.setRange(0, 3600)
-        self.spin_keep.setValue(30.0)
-        self.spin_keep.setSuffix(" s")
-        self.spin_keep.setEnabled(self.chk_open.isChecked())
-        self.chk_open.toggled.connect(self.spin_keep.setEnabled)
-
-        rows = [
-            ("搜索轮数", self.spin_repeat, "拟人等级", self.cmb_level),
-            ("每轮时长", self._pair(self.spin_min, self.spin_max), "点击结果概率", self.spin_click),
-            ("轮间隔", self._pair(self.spin_gap_min, self.spin_gap_max), "随机种子", self.spin_seed),
-        ]
-        for r, (l1, w1, l2, w2) in enumerate(rows):
-            g.addWidget(QLabel(l1), r, 0)
-            g.addWidget(w1, r, 1)
-            g.addWidget(QLabel(l2), r, 2)
-            g.addWidget(w2, r, 3)
-
-        g.addWidget(QLabel("额外关键词"), 3, 0)
-        g.addWidget(self.edt_keywords, 3, 1, 1, 3)
-        g.addWidget(QLabel("日志文件"), 4, 0)
-        g.addWidget(self.edt_log, 4, 1, 1, 3)
-
-        opts = QHBoxLayout()
-        opts.addWidget(self.chk_headless)
-        opts.addWidget(self.chk_copy)
-        opts.addWidget(self.chk_open)
-        opts.addWidget(self.spin_keep)
-        opts.addStretch(1)
-        g.addLayout(opts, 5, 0, 1, 4)
-
+        self.edt_keywords.setPlaceholderText("可选：额外关键词，用逗号分隔；留空则使用热搜")
+        g.addWidget(QLabel("搜索轮数"), 0, 0)
+        g.addWidget(self.spin_repeat, 0, 1)
+        g.addWidget(QLabel("搜索节奏"), 0, 2)
+        g.addWidget(self.cmb_level, 0, 3)
+        g.addWidget(QLabel("额外关键词"), 1, 0)
+        g.addWidget(self.edt_keywords, 1, 1, 1, 3)
         src = QHBoxLayout()
         src.addWidget(QLabel("热搜来源"))
         self.chk_sources = {}
@@ -505,36 +443,17 @@ class SearchPanel(QWidget):
             self.chk_sources[name] = cb
             src.addWidget(cb)
         src.addStretch(1)
-        g.addLayout(src, 6, 0, 1, 4)
+        g.addLayout(src, 2, 0, 1, 4)
+        note = QLabel("浏览器在运行结束后自动关闭；其余高级参数采用固定默认值，避免误操作。")
+        note.setWordWrap(True)
+        g.addWidget(note, 3, 0, 1, 4)
         return box
 
-    @staticmethod
-    def _pair(a: QWidget, b: QWidget) -> QWidget:
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(a)
-        h.addWidget(QLabel("~"))
-        h.addWidget(b)
-        return w
-
     def _view_state(self) -> dict:
-        """完整表单状态（与最终运行参数区分，以保存已禁用控件中的值）。"""
         return {
             "repeat": self.spin_repeat.value(),
             "level": self.cmb_level.currentIndex() + 1,
-            "round_min": self.spin_min.value(),
-            "round_max": self.spin_max.value(),
-            "gap_min": self.spin_gap_min.value(),
-            "gap_max": self.spin_gap_max.value(),
-            "click_prob": self.spin_click.value(),
-            "seed": self.spin_seed.value(),
             "keywords": self.edt_keywords.text(),
-            "log_file": self.edt_log.text(),
-            "headless": self.chk_headless.isChecked(),
-            "copy_profile": self.chk_copy.isChecked(),
-            "keep_open_enabled": self.chk_open.isChecked(),
-            "keep_open_seconds": self.spin_keep.value(),
             "keyword_sources": [name for name, cb in self.chk_sources.items() if cb.isChecked()],
         }
 
@@ -542,48 +461,25 @@ class SearchPanel(QWidget):
         values = self.settings.get("search_panel", {}) if self.settings else {}
         if not isinstance(values, dict):
             return
-        number_controls = {
-            "repeat": self.spin_repeat, "round_min": self.spin_min,
-            "round_max": self.spin_max, "gap_min": self.spin_gap_min,
-            "gap_max": self.spin_gap_max, "click_prob": self.spin_click,
-            "seed": self.spin_seed, "keep_open_seconds": self.spin_keep,
-        }
-        for key, control in number_controls.items():
-            if key in values:
-                try:
-                    control.setValue(float(values[key]) if isinstance(control, NoWheelDoubleSpinBox)
-                                     else int(values[key]))
-                except (TypeError, ValueError, OverflowError):
-                    pass
         try:
+            self.spin_repeat.setValue(int(values.get("repeat", 5)))
             level = int(values.get("level", 2))
-        except (ValueError, TypeError):
+        except (TypeError, ValueError, OverflowError):
             level = 2
         self.cmb_level.setCurrentIndex(max(0, min(2, level - 1)))
-        for key, control in (("keywords", self.edt_keywords), ("log_file", self.edt_log)):
-            if isinstance(values.get(key), str):
-                control.setText(values[key])
-        for key, control in (("headless", self.chk_headless),
-                             ("copy_profile", self.chk_copy),
-                             ("keep_open_enabled", self.chk_open)):
-            if key in values:
-                control.setChecked(bool(values[key]))
+        if isinstance(values.get("keywords"), str):
+            self.edt_keywords.setText(values["keywords"])
         sources = values.get("keyword_sources")
         if isinstance(sources, (list, tuple)):
             for name, cb in self.chk_sources.items():
                 cb.setChecked(name in sources)
 
     def _wire_settings(self) -> None:
-        for spin in (self.spin_repeat, self.spin_min, self.spin_max, self.spin_click,
-                     self.spin_gap_min, self.spin_gap_max, self.spin_seed, self.spin_keep):
-            spin.valueChanged.connect(self._save_settings)
-        for control in (self.cmb_level,):
-            control.currentIndexChanged.connect(self._save_settings)
-        for edit in (self.edt_keywords, self.edt_log):
-            edit.textChanged.connect(self._save_settings)
-        for checkbox in (self.chk_headless, self.chk_copy, self.chk_open,
-                         *self.chk_sources.values()):
-            checkbox.toggled.connect(self._save_settings)
+        self.spin_repeat.valueChanged.connect(self._save_settings)
+        self.cmb_level.currentIndexChanged.connect(self._save_settings)
+        self.edt_keywords.textChanged.connect(self._save_settings)
+        for cb in self.chk_sources.values():
+            cb.toggled.connect(self._save_settings)
 
     def _save_settings(self, *_args) -> None:
         if self.settings is not None:
@@ -658,30 +554,16 @@ class SearchPanel(QWidget):
         self.btn_run.setEnabled(True)
 
     def _collect(self) -> dict:
+        """与定时任务共用一套固定默认参数，不再从旧设置继承危险选项。"""
         kws = [k.strip() for k in self.edt_keywords.text().split(",") if k.strip()]
-        sources = tuple(n for n, cb in self.chk_sources.items() if cb.isChecked())
-        seed = self.spin_seed.value()
-        lo, hi = self.spin_min.value(), self.spin_max.value()
-        if lo > hi:
-            lo, hi = hi, lo
-        gmin, gmax = self.spin_gap_min.value(), self.spin_gap_max.value()
-        if gmin > gmax:
-            gmin, gmax = gmax, gmin
-        return dict(
+        params = SearchRunner.defaults()
+        params.update(
             repeat=self.spin_repeat.value(),
             level=self.cmb_level.currentIndex() + 1,
-            round_seconds=(lo, hi),
-            max_round_seconds=hi,
-            gap_seconds=(gmin, gmax),
-            click_prob=self.spin_click.value(),
-            seed=None if seed < 0 else seed,
             keywords=kws or None,
-            keyword_sources=sources,
-            headless=self.chk_headless.isChecked(),
-            copy_profile=self.chk_copy.isChecked(),
-            keep_open=self.spin_keep.value() if self.chk_open.isChecked() else 0.0,
-            log_file=self.edt_log.text().strip() or None,
+            keyword_sources=tuple(n for n, cb in self.chk_sources.items() if cb.isChecked()),
         )
+        return params
 
     # ---------- 运行 / 停止
     def _on_run_clicked(self):
