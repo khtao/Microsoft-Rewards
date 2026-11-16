@@ -12,7 +12,8 @@ flowchart TD
     APP --> RUN["run_pending_tasks · 经典执行链路"]
     SYNC --> AUTH["auth.AuthManager"]
     AUTH --> SESSION["session · 五态探测 / 只读抓取"]
-    SESSION --> HTML["GET /dashboard + /earn"]
+    SESSION --> CS["credentials.CookieStore · 加密凭证"]
+    SESSION --> HTML["HttpFetcher · 并发 GET /dashboard + /earn"]
     HTML --> REPORT["readonly_report · 纯函数解析"]
     REPORT --> STORE["storage · SQLite"]
     STORE --> UI
@@ -20,13 +21,13 @@ flowchart TD
     LEGACY --> API["api.run_human_search · 实验性浏览器链路"]
 ```
 
-- **数据与解析层**（不依赖 Qt）：`session` / `auth` / `readonly_report` / `rewards_client` / `storage` / `points`。
+- **数据与解析层**（不依赖 Qt）：`credentials` / `session` / `auth` / `readonly_report` / `rewards_client` / `storage` / `points`。
 - **桌面集成**：`sync` / `notifier` / `autostart`。
 - **界面与控制器**：`ui/modern/` + `app.py`。`--widgets` / `--classic` 只是入口别名，不存在第二套窗口。
 
 ## 只读同步
 
-`session.probe()` 用两页 HTML 与 HTTP 状态给出五态：`SIGNED_IN` / `SIGNED_OUT` / `DEGRADED` / `TRANSIENT_ERROR` / `UNKNOWN`。网络错误不会被翻译成「凭证失效」。
+`session.probe()` 用两页 HTML 与 HTTP 状态给出五态：`SIGNED_IN` / `SIGNED_OUT` / `DEGRADED` / `TRANSIENT_ERROR` / `UNKNOWN`。两页由 `HttpFetcher.fetch_many()` 用纯 HTTP **并发** GET（凭证来自加密的 `CookieStore`），同步路径不启动浏览器；网络错误不会被翻译成「凭证失效」。
 
 `readonly_report.build_report()` 是零第三方依赖的纯函数：
 
@@ -35,7 +36,7 @@ flowchart TD
 3. `pointsCounters` 读不到返回 `None`（官方每日搜索上限按等级为 15 / 30 / 60 分，不硬编码 60/60）。
 4. 识别登录页 / 公开「关于」页直接返回 `signed_out`。
 
-落库时「今日积分」优先取页面显示值；失败保留上次快照并标记 stale，不覆盖、不清空任务。`to_legacy_dashboard()` 把结果转成 `rewards_client.parse_dashboard()` 能读的兼容结构，供经典链路复用。
+落库时「今日积分」优先取页面显示值；失败保留上次快照并标记 stale，不覆盖、不清空任务。整段写入（批量 UPSERT 任务、余额、页面真值、刷新汇总）由可重入的 `Store.tx()` 包成一次 SQLite 事务。`to_legacy_dashboard()` 把结果转成 `rewards_client.parse_dashboard()` 能读的兼容结构，供经典链路复用。
 
 ## 设置映射
 
@@ -52,6 +53,39 @@ flowchart TD
 隐藏项由 `defaults_patch()` 一次性写成推荐默认值（带迁移标记，不覆盖用户后续选择）；旧配置由 `intensity_upgrade_patch()` / `repeat_upgrade_patch()` 平滑升级。`config.SEARCH_PANEL_KEYS` 是持久化白名单，`SearchPanel._collect()` 负责把参数透传给 `api.run_human_search()`。
 
 纯界面偏好只有 `ui_language` / `ui_theme` / `ui_calendar_view`。
+
+## 同步性能：凭证与浏览器解耦
+
+慢的根源不是解析或 SQLite，而是「登录态」曾被绑在浏览器进程上：为了发两个 GET，每次都要启动 Playwright 驱动、加载 Edge 持久化 profile、并发取数、关闭 context、停止驱动。常驻 headless context 只能摊薄这笔开销，还会带来锁与后台进程。现在**同步链路完全不启动 Chromium**。
+
+```mermaid
+flowchart LR
+    LOGIN["LoginDialog · 可见 Edge（仅登录一次）"] -->|context.cookies| CS["credentials.CookieStore · 加密落盘"]
+    CS --> HF["session.HttpFetcher · requests.Session × 2"]
+    HF -->|并发 GET| PAGES["/dashboard + /earn"]
+    PAGES --> PROBE["probe · 五态"]
+    PROBE --> REPORT["readonly_report.build_report"]
+    REPORT --> STORE["storage · 单次事务"]
+```
+
+- `CookieStore` 加密保存会话 Cookie：Windows 用 DPAPI（`CryptProtectData`，绑定当前用户），其他平台用机器绑定种子 + PBKDF2-SHA256 派生密钥 + SHAKE256 流加密 + HMAC-SHA256 认证（encrypt-then-MAC），文件权限 0600、原子替换。损坏、篡改或换机器一律当作「尚未保存会话」，重新登录即可。**不读取日常 Edge 的 Cookie 数据库**（新版 app-bound encryption 且运行中 DB 被独占）。
+- 只保留 `RELEVANT_SUFFIXES` 里的 Microsoft 相关域；无关站点 Cookie 不落盘、不随请求带出。旧版明文 `cookies.txt` 由 `migrate_legacy()` 一次性导入后删除。
+- `HttpFetcher.fetch_many()` 实现与 `BrowserSessionFetcher` 相同的 `ReadOnlyFetcher` 接口：每页一个独立 `requests.Session`（Session 不保证线程安全），线程池并发两个白名单 GET；单页异常只返回 `transient`，不误判登录失效。无凭证时直接返回 `signed_out`，连网络往返都省掉。
+- `default_fetcher()` 恒返回 `HttpFetcher`。`probe()` / `sync_once()` / `readonly_report` / `storage` / UI 全部不变；`BrowserSessionFetcher` 只保留给登录窗口与「退出登录」清理 profile 使用，不在同步热路径上。
+- 因此 `profile_guard` 只保护登录 / 清理这两类低频浏览器操作，同步与登录窗口不再抢锁；上一版为常驻会话加的四个释放点、回退分支整套删除。
+
+按模拟冷启动 1.5 秒、单页 0.35 秒跑真实代码路径：
+
+| 同步次数 | 每次启停浏览器 | 常驻 context（已移除） | 纯 HTTP |
+| --- | --- | --- | --- |
+| 1 次 | 1.86s | 1.86s | **0.38s** |
+| 3 次 | 5.56s | 2.56s | **1.14s** |
+
+### 其余性能约束
+
+- `readonly_report.build_report()` 每页只 `decode_payload()` 一次；`_heading_sections()` 一次扫描全页 `<h2>`，`visible_cards_from()` 用二分查找取最近分组，替代原先每张卡都从头扫 HTML 的 O(n²) 逻辑。
+- `sync_once()` 把任务批量 UPSERT、余额、页面真值与刷新汇总包进一个可重入事务，只提交一次；首屏同步在窗口显示的同时启动（0 延迟）。
+- 这些优化不改变「读不到不写 0、失败保留快照、运行期不同步、只 GET 两个白名单页面」的口径。
 
 ## 积分赚取日历
 

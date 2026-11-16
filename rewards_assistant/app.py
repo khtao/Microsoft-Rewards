@@ -125,9 +125,11 @@ class Application(QObject):
         self._migrate_labels()
         self._prune_zero_tasks()
         if self.settings.get("sync_interval_minutes", 0):
-            # 初次自动同步本身就会校验 Cookie，避免再发一次重复 API 请求。
+            # 初次自动同步本身就会校验登录态，避免再发一次重复请求；
+            # 两页并发下载后首屏可更快拿到真值，无需再等 3 秒。
             self.set_login_status("等待首次同步验证…", None)
-            QTimer.singleShot(3000, lambda: self.sync_now(auto=True))
+            # 纯 HTTP 同步没有冷启动，窗口一显示就立即取数。
+            QTimer.singleShot(0, lambda: self.sync_now(auto=True))
         else:
             self.check_login_status()
         if self.settings.get("sleep_when_all_done", False) and self._all_done():
@@ -585,8 +587,8 @@ class Application(QObject):
             return
         self._syncing = True
         self.window.set_busy(True, "正在同步 Rewards 数据…")
-        # 仅活动标题和连续天数每 45 分钟按需补充页面信息；
-        # 积分余额只读取 dashboard API，不再抓取 Earn 页面。
+        # 兼容旧版「页面补充」冷却字段；两页 HTML 现在每次同步都会并发读取，
+        # 该开关不再触发任何额外网络请求。
         now = datetime.now()
         last = getattr(self, "_last_page_enrichment", None)
         enrich = last is None or (now - last) >= timedelta(minutes=45)

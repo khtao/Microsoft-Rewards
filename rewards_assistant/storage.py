@@ -180,13 +180,25 @@ class Store:
 
     @contextmanager
     def tx(self):
+        """可重入事务：外层统一提交，内层调用只借用同一个连接。
+
+        同步一次会写任务明细、余额、页面真值并刷新汇总；旧版每一步都单独
+        commit，Windows 上每笔都要 fsync。外层 ``with store.tx():`` 包住
+        整段写入后只提交一次，嵌套的 ``tx()`` 不再重复提交。
+        """
         conn = self._connect()
+        if getattr(self._local, "in_tx", False):
+            yield conn
+            return
+        self._local.in_tx = True
         try:
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+        finally:
+            self._local.in_tx = False
 
     # ------------------------------------------------------------------ 任务
 
@@ -242,6 +254,47 @@ class Store:
                 ),
             )
 
+    def upsert_tasks(self, day: str, rows) -> int:
+        """一次事务批量写入当日任务；与 ``upsert_task`` 的 UPSERT 语义完全一致。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = [(
+            day,
+            str(r["key"]),
+            str(r["name"]),
+            str(r["category"]),
+            int(r["points_max"]),
+            int(r["points_earned"]),
+            1 if r["complete"] else 0,
+            r.get("link") or "",
+            1 if r.get("manual", False) else 0,
+            r.get("title_source", "guess"),
+            r.get("offer_id") or "",
+            r.get("raw_name") or "",
+            now,
+        ) for r in rows]
+        if not payload:
+            return 0
+        with self.tx() as conn:
+            conn.executemany(
+                """
+                INSERT INTO tasks (day, key, name, category, points_max, points_earned,
+                                   complete, link, manual, title_source, offer_id, raw_name, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(day, key) DO UPDATE SET
+                    name=excluded.name,
+                    category=excluded.category,
+                    points_max=excluded.points_max,
+                    points_earned=excluded.points_earned,
+                    complete=excluded.complete,
+                    link=COALESCE(NULLIF(excluded.link, ''), tasks.link),
+                    manual=excluded.manual,
+                    title_source=excluded.title_source,
+                    offer_id=excluded.offer_id,
+                    raw_name=excluded.raw_name,
+                    updated_at=excluded.updated_at
+                """, payload)
+        return len(payload)
+
     def remove_missing_official_tasks(self, day: str, current_keys) -> int:
         """同步后移除本日已不在官方接口内的旧任务，防止误判未完成。"""
         keys = set(current_keys)
@@ -280,15 +333,15 @@ class Store:
             conn.execute("DELETE FROM tasks WHERE day=? AND key=?", (day, key))
 
     def tasks_of_day(self, day: str) -> List[sqlite3.Row]:
-        with self._connect() as conn:
-            return list(
-                conn.execute(
-                    "SELECT * FROM tasks WHERE day=? "
-                    "ORDER BY CASE category WHEN '搜索' THEN 0 WHEN '每日任务' THEN 1 "
-                    "WHEN '更多活动' THEN 2 ELSE 3 END, id",
-                    (day,),
-                )
+        conn = self._connect()
+        return list(
+            conn.execute(
+                "SELECT * FROM tasks WHERE day=? "
+                "ORDER BY CASE category WHEN '搜索' THEN 0 WHEN '每日任务' THEN 1 "
+                "WHEN '更多活动' THEN 2 ELSE 3 END, id",
+                (day,),
             )
+        )
 
     # ------------------------------------------------------------------ 汇总
 
@@ -296,22 +349,22 @@ class Store:
         """唯一积分算法：账户今日余额减昨日余额；缺快照则用任务积分和。"""
         yesterday = (datetime.strptime(day, "%Y-%m-%d").date()
                      - timedelta(days=1)).isoformat()
-        with self._connect() as conn:
-            rows = list(conn.execute("SELECT * FROM tasks WHERE day=?", (day,)))
-            current = conn.execute(
-                "SELECT available_points, available_synced_at, level, "
-                "today_points, claimable_points, page_points_synced_at "
-                "FROM daily WHERE day=?",
-                (day,),
-            ).fetchone()
-            previous = conn.execute(
-                "SELECT available_points, available_synced_at FROM daily WHERE day=?",
-                (yesterday,),
-            ).fetchone()
-            totals = conn.execute(
-                "SELECT SUM(points_earned) e, SUM(points_max) m FROM tasks WHERE day=?",
-                (day,),
-            ).fetchone()
+        conn = self._connect()
+        rows = list(conn.execute("SELECT * FROM tasks WHERE day=?", (day,)))
+        current = conn.execute(
+            "SELECT available_points, available_synced_at, level, "
+            "today_points, claimable_points, page_points_synced_at "
+            "FROM daily WHERE day=?",
+            (day,),
+        ).fetchone()
+        previous = conn.execute(
+            "SELECT available_points, available_synced_at FROM daily WHERE day=?",
+            (yesterday,),
+        ).fetchone()
+        totals = conn.execute(
+            "SELECT SUM(points_earned) e, SUM(points_max) m FROM tasks WHERE day=?",
+            (day,),
+        ).fetchone()
 
         task_earned = int(totals["e"] or 0)
         today_balance = (int(current["available_points"])
@@ -394,18 +447,18 @@ class Store:
         return self.daily(day) or summary
 
     def daily(self, day: str) -> Optional[sqlite3.Row]:
-        with self._connect() as conn:
-            return conn.execute("SELECT * FROM daily WHERE day=?", (day,)).fetchone()
+        conn = self._connect()
+        return conn.execute("SELECT * FROM daily WHERE day=?", (day,)).fetchone()
 
     def recent_days(self, limit: int = 30) -> List[sqlite3.Row]:
-        with self._connect() as conn:
-            return list(
-                conn.execute("SELECT * FROM daily ORDER BY day DESC LIMIT ?", (limit,))
-            )
+        conn = self._connect()
+        return list(
+            conn.execute("SELECT * FROM daily ORDER BY day DESC LIMIT ?", (limit,))
+        )
 
     def all_days(self) -> List[sqlite3.Row]:
-        with self._connect() as conn:
-            return list(conn.execute("SELECT * FROM daily ORDER BY day ASC"))
+        conn = self._connect()
+        return list(conn.execute("SELECT * FROM daily ORDER BY day ASC"))
 
     # -------------------------------------------------------------- 连续天数
 

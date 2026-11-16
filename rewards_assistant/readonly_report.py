@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -177,9 +178,12 @@ _RSC_CARD_RE = re.compile(
 )
 
 
-def cards_points(html: str) -> Dict[str, int]:
-    """积分卡：标签 → 相邻数值（DOM 与 RSC 两种形态）。"""
-    clean = decode_payload(html)
+def cards_points(html: str, clean: Optional[str] = None) -> Dict[str, int]:
+    """积分卡：标签 → 相邻数值（DOM 与 RSC 两种形态）。
+
+    ``clean`` 可由 ``build_report`` 传入，避免同一页重复做 ``decode_payload``。
+    """
+    clean = decode_payload(html) if clean is None else clean
     out: Dict[str, int] = {}
 
     def put(label, value) -> None:
@@ -207,10 +211,10 @@ _FIELD_PATTERNS: Dict[str, Tuple[re.Pattern, ...]] = {
 }
 
 
-def parse_points_trio(html: str) -> Dict[str, Optional[int]]:
+def parse_points_trio(html: str, clean: Optional[str] = None) -> Dict[str, Optional[int]]:
     """卡片值优先，字段兜底；绝不用任务合计推算。"""
-    clean = decode_payload(html)
-    cards = cards_points(html)
+    clean = decode_payload(html) if clean is None else clean
+    cards = cards_points(html, clean)
     out: Dict[str, Optional[int]] = {}
     for key in ("available", "today", "claimable"):
         out[key] = cards[key] if key in cards else pick_number(clean, _FIELD_PATTERNS[key])
@@ -235,17 +239,37 @@ _DAILY_H2_RE = re.compile(r"每日活动|Daily activities|Daily set", re.I)
 _EXCLUDE_H2_RE = re.compile(r"升级活动|连续打卡|任务集|punch card|streak|monthly", re.I)
 
 
-def section_before_heading(html: str, index: int) -> str:
+def _heading_sections(html: str) -> Tuple[List[int], List[str]]:
+    """一次扫描出所有 <h2> 的结束位置与分组；供卡片二分查找。
+
+    旧实现对每张卡都执行 ``_H2_RE.finditer(html[:index])``，卡片多时是
+    O(卡片数 × HTML 长度)。现在整页只扫一次，单卡查找 O(log 标题数)。
+    """
+    ends: List[int] = []
+    sections: List[str] = []
+    for m in _H2_RE.finditer(html):
+        near = strip_tags(m.group(1))
+        if _EXCLUDE_H2_RE.search(near):
+            section = "other"
+        elif _PROMO_H2_RE.search(near):
+            section = "promo"
+        elif _DAILY_H2_RE.search(near):
+            section = "daily"
+        else:
+            section = "other"
+        ends.append(m.end())
+        sections.append(section)
+    return ends, sections
+
+
+def section_before_heading(html: str, index: int,
+                           headings: Optional[Tuple[List[int], List[str]]] = None) -> str:
     """卡片前面最近的 <h2> 决定分组；升级活动 / 连续打卡等区块显式排除。"""
-    heads = list(_H2_RE.finditer(html[:index]))
-    near = strip_tags(heads[-1].group(1)) if heads else ""
-    if _EXCLUDE_H2_RE.search(near):
-        return "other"
-    if _PROMO_H2_RE.search(near):
-        return "promo"
-    if _DAILY_H2_RE.search(near):
-        return "daily"
-    return "other"
+    if headings is None:
+        headings = _heading_sections(html[:index])
+    ends, sections = headings
+    i = bisect.bisect_right(ends, index) - 1
+    return sections[i] if i >= 0 else "other"
 
 
 def json_array_objects(clean: str, key: str) -> List[str]:
@@ -311,9 +335,10 @@ def json_array_objects(clean: str, key: str) -> List[str]:
 
 def structured_items_from(html: str,
                           keys: Sequence[str] = ("dailySetItems",),
-                          section: str = "daily") -> List[Card]:
+                          section: str = "daily",
+                          clean: Optional[str] = None) -> List[Card]:
     """RSC：每日活动卡（标题 / 分值 / 完成态 / 落地页）。"""
-    clean = decode_payload(html)
+    clean = decode_payload(html) if clean is None else clean
     out: List[Card] = []
     seen = set()
     for key in keys:
@@ -354,6 +379,7 @@ def visible_cards_from(html: str) -> Tuple[List[Card], Dict[str, int]]:
     """可见 DOM：只认带绿色数字徽章的 <a> 卡片。"""
     out: List[Card] = []
     no_badge = other_seen = 0
+    headings = _heading_sections(html)
     for m in _ANCHOR_RE.finditer(html):
         chunk = m.group(0)
         badge = _BADGE_RE.search(chunk)
@@ -364,7 +390,7 @@ def visible_cards_from(html: str) -> Tuple[List[Card], Dict[str, int]]:
         if points <= 0:
             no_badge += 1
             continue
-        section = section_before_heading(html, m.start())
+        section = section_before_heading(html, m.start(), headings)
         if section == "other":
             other_seen += 1
             continue
@@ -382,8 +408,9 @@ def visible_cards_from(html: str) -> Tuple[List[Card], Dict[str, int]]:
     return out, {"noBadge": no_badge, "otherSeen": other_seen, "domCards": len(out)}
 
 
-def cards_from_rewards_html(html: str) -> Tuple[List[Card], Dict[str, int]]:
-    rsc = structured_items_from(html)
+def cards_from_rewards_html(html: str, clean: Optional[str] = None
+                            ) -> Tuple[List[Card], Dict[str, int]]:
+    rsc = structured_items_from(html, clean=clean)
     dom, stats = visible_cards_from(html)
     out: List[Card] = []
     seen = set()
@@ -405,9 +432,10 @@ _COUNTER_RE = re.compile(
     r'"(?:pc|pcSearch|combined|combinedSearch|search)"\s*:\s*\{([^{}]*)\}')
 
 
-def parse_search_counter(html: str) -> Optional[SearchCounter]:
+def parse_search_counter(html: str, clean: Optional[str] = None
+                         ) -> Optional[SearchCounter]:
     """页面 pointsCounters；读不到返回 None，绝不伪造「60/60 已满」。"""
-    clean = decode_payload(html)
+    clean = decode_payload(html) if clean is None else clean
     block = _COUNTER_RE.search(clean)
     if not block:
         return None
@@ -441,24 +469,27 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
     if degraded:
         warnings.append("仅部分页面可用：只采用能读到的字段，其余保留上次快照")
 
-    # 登录页不能参与积分解析
+    # 登录页不能参与积分解析；整页只解码一次，后续解析全部复用。
     d_html = "" if dash_signin else dash
     e_html = "" if earn_signin else earn
+    d_clean = decode_payload(d_html) if d_html else ""
+    e_clean = decode_payload(e_html) if e_html else ""
 
     trio = merge_trio(
-        parse_points_trio(d_html) if d_html else None,
-        parse_points_trio(e_html) if e_html else None,
+        parse_points_trio(d_html, d_clean) if d_html else None,
+        parse_points_trio(e_html, e_clean) if e_html else None,
     )
     logs.append("三项积分：卡片「标签→数值」解析 /dashboard + /earn → 合并取值")
 
     seen = set()
     items: List[Card] = []
     rsc_hits = dom_hits = 0
-    for page_name, page_html in (("/dashboard", d_html), ("/earn", e_html)):
+    for page_name, page_html, page_clean in (("/dashboard", d_html, d_clean),
+                                             ("/earn", e_html, e_clean)):
         if not page_html:
             logs.append(page_name + "：本次不可用，跳过")
             continue
-        page_items, stats = cards_from_rewards_html(page_html)
+        page_items, stats = cards_from_rewards_html(page_html, page_clean)
         rsc_hits += sum(1 for x in page_items if x.source == "rsc")
         dom_hits += sum(1 for x in page_items if x.source == "dom")
         logs.append(
@@ -473,8 +504,8 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
     logs.append(f"RSC 命中 {rsc_hits} 张（两页相加、去重前）；可见 DOM 徽章卡命中 {dom_hits} 张")
     logs.append(f"两页去重后保留 {len(items)} 张有积分任务卡")
 
-    counter = (parse_search_counter(e_html) if e_html else None) or (
-        parse_search_counter(d_html) if d_html else None)
+    counter = (parse_search_counter(e_html, e_clean) if e_html else None) or (
+        parse_search_counter(d_html, d_clean) if d_html else None)
     if counter and counter.known:
         logs.append(f"搜索进度 pointsCounters {counter.progress}/{counter.max}"
                     + ("（已满）" if counter.completed else ""))

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""登录对话框：由用户本人在浏览器里登录，应用不接触任何 Cookie 文本。
+"""登录对话框：由用户本人在浏览器里登录，凭证只加密保存在本机。
 
 旧版让用户在 F12 里复制整行 Cookie 粘贴到文本框，凭证经过剪贴板 / 文本框 /
-磁盘 / 日志；本版改成：
+明文磁盘 / 日志；本版改成：
 
 * 「打开浏览器登录」→ 应用用独立持久化 profile 打开可见 Edge 窗口；
-* 账号、密码、MFA 全部由用户本人完成，应用不代填、不读取、不保存凭证；
+* 账号、密码、MFA 全部由用户本人完成，应用不代填、不读取账号密码；
+* 窗口关闭前把 Microsoft 相关域的 Cookie 交给 ``CookieStore`` 加密落盘，
+  之后同步走纯 HTTP，不再启动浏览器；应用不上传、不打印、不写明文；
 * **窗口不会自动关闭**：用户点「我已完成登录」才结束并复查会话，
   避免页面刚加载 / MFA 中间页被误判成「已登录」而一闪即过；
 * 所有使用同一 profile 的动作（登录窗口 / 检测会话 / 清除会话）经
@@ -27,9 +29,10 @@ from PySide6.QtWidgets import (
 
 from ..auth import AuthManager
 from ..config import LOGIN_WINDOW_SECONDS
+from ..credentials import CookieStore
 from ..session import (
     DEGRADED, SIGNED_IN, SIGNED_OUT, TRANSIENT_ERROR, ProfileBusyError,
-    legacy_cookie_notice, login_poll_state, profile_guard, short_error,
+    login_poll_state, profile_guard, short_error,
 )
 
 BASE = "https://rewards.bing.com"
@@ -119,7 +122,15 @@ class LoginWorker(QThread):
                         self.done.emit(self._detected,
                                        "登录窗口已关闭，请点「检测会话」复查。")
                     finally:
-                        ctx.close()  # 释放 profile，之后才能跑只读探测
+                        # 登录窗口是唯一接触浏览器的地方：在关闭前把会话导出为
+                        # 本机加密凭证。之后同步走纯 HTTP，不再碰浏览器 profile。
+                        try:
+                            cookies = ctx.cookies()
+                            if cookies:
+                                CookieStore().save(cookies)
+                        except Exception:
+                            pass
+                        ctx.close()
         except ProfileBusyError as exc:
             self.done.emit(False, str(exc))
         except Exception as exc:
@@ -164,8 +175,8 @@ class LoginDialog(QDialog):
             "<li>在该窗口里<b>由你本人</b>完成账号登录（含短信 / MFA 验证）</li>"
             "<li>回到本对话框点「<b>我已完成登录</b>」，窗口才会关闭并自动检测</li>"
             "</ol>"
-            "<p>登录窗口<b>不会自动关闭</b>；应用不代填密码、不读取、不导出、"
-            "不打印 Cookie，会话由浏览器保存在本机独立配置目录。</p>"
+            "<p>登录窗口<b>不会自动关闭</b>；应用不代填密码，会话 Cookie 只"
+            "<b>加密保存在本机</b>，不上传、不打印、不写成明文。</p>"
             "<p style='color:#c92a2a'>同步只读取 /dashboard 与 /earn 两个页面，"
             "不搜索、不点击活动卡、不代领积分；奖励搜索与领取请在官网手动完成。</p>"
         )
@@ -178,10 +189,10 @@ class LoginDialog(QDialog):
 
         self.notice = QLabel("")
         self.notice.setWordWrap(True)
-        self.notice.setStyleSheet("color:#c92a2a;font-size:12px;")
-        note = legacy_cookie_notice()
-        if note:
-            self.notice.setText(note)
+        self.notice.setStyleSheet("color:#6b7280;font-size:12px;")
+        self.notice.setText(
+            "登录完成后，会话 Cookie 会加密保存在本机数据目录；"
+            "同步只发两个只读 GET，不上传、不打印凭证。")
 
         self.login_btn = QPushButton("打开浏览器登录")
         self.login_btn.setDefault(True)
@@ -369,6 +380,7 @@ class LoginDialog(QDialog):
             self.status.setStyleSheet("color:#e67700;font-size:12px;")
 
     def clear_session(self) -> None:
+        CookieStore().clear()
         self._set_busy(True, "正在清除本地会话…")
         worker = LogoutWorker(self)
         self._logout = worker

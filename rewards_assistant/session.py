@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""登录态管理：借用用户本人已登录的 Edge 会话，只读探测两个白名单页面。
+"""登录态管理：用本机加密凭证，纯 HTTP 只读探测两个白名单页面。
 
-会话只存在于应用独立的浏览器持久化 profile 中，由浏览器管理加密与过期；
-应用不读取、不导出、不打印 Cookie 文本。只 GET ``/dashboard`` 与 ``/earn``，
-不 POST、不点击、不搜索、不领取、不注入脚本。两页内容与 HTTP 状态用于
-五态判定：已登录 / 未登录 / 部分可用 / 暂时性网络错误 / 未知；网络错误
-绝不会被当成「凭证失效」。
+``/dashboard`` 与 ``/earn`` 是服务端渲染的 HTML，需要的只是带 Cookie 的两个
+GET。凭证由 ``credentials.CookieStore`` 加密保存（Windows DPAPI / 其余平台
+机器绑定密钥），**同步链路完全不启动浏览器**；浏览器只在用户本人于登录窗口
+完成一次登录（含 MFA）、以及「退出登录」清理 profile 时出现。应用不上传、
+不打印、不把 Cookie 写成明文文件，也不读取日常 Edge 的 Cookie 数据库。
+
+``HttpFetcher`` 并发 GET 两页，不 POST、不点击、不搜索、不领取、不注入脚本。
+两页内容与 HTTP 状态用于五态判定：已登录 / 未登录 / 部分可用 / 暂时性网络
+错误 / 未知；网络错误绝不会被当成「凭证失效」。
 
 奖励搜索须由用户本人手动进行，可领取积分须在 rewards.bing.com 手动领取。
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import os
 import re
@@ -21,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from .credentials import CookieStore
 from .readonly_report import is_sign_in_page
 
 BASE = "https://rewards.bing.com"
@@ -249,11 +256,75 @@ class ReadOnlyFetcher:
         raise NotImplementedError
 
 
-class BrowserSessionFetcher(ReadOnlyFetcher):
-    """Playwright 持久化 Edge profile：会话由浏览器保管，应用不接触 Cookie 文本。
+class HttpFetcher(ReadOnlyFetcher):
+    """纯 HTTP 只读抓取器：不启动浏览器，只用加密凭证并发 GET 两页。
 
-    与 browser.py 的自动化通道刻意保持距离：不注入反检测脚本、不携带任何
-    ``--no-sandbox`` 类标志、不点击页面元素，只用 ``context.request`` 发 GET。
+    ``rewards.bing.com/dashboard`` 与 ``/earn`` 是服务端渲染的 HTML，不需要 JS
+    执行；要的只是带 Cookie 的两个 GET。凭证由 :class:`CookieStore` 提供，
+    ``probe()`` / ``sync_once()`` / ``readonly_report`` 一行都不用改。
+
+    每页用独立的 ``requests.Session``（Session 本身不保证线程安全），两页在
+    线程池里并发；单页异常只影响自己，返回 transient 而不会误判登录失效。
+    """
+
+    def __init__(self, store: Optional[CookieStore] = None,
+                 timeout=(4, 12), max_workers: int = 2) -> None:
+        self.store = store or CookieStore()
+        self.timeout = timeout
+        self.max_workers = max(1, int(max_workers))
+
+    def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
+        import requests
+
+        paths = list(paths)
+        for p in paths:
+            assert_readonly(p)
+        cookies = self.store.load()
+        if not cookies:
+            # 不发起无意义的网络往返；probe() 会据此判 SIGNED_OUT。
+            return {p: PageResult(
+                path=p, kind="signed_out", signin_page=True,
+                error="尚未保存登录会话：请在「登录」里由本人完成一次 Microsoft "
+                      "Rewards 登录（含 MFA），会话会加密保存在本机。")
+                for p in paths}
+
+        def one(path: str) -> PageResult:
+            with requests.Session() as s:
+                for c in cookies:
+                    try:
+                        s.cookies.set(c["name"], c["value"],
+                                      domain=c.get("domain") or "",
+                                      path=c.get("path") or "/",
+                                      secure=bool(c.get("secure")))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                try:
+                    resp = s.get(BASE + path, headers=_NO_STORE_HEADERS,
+                                 timeout=self.timeout, allow_redirects=True)
+                    return PageResult(
+                        path=path, ok=200 <= resp.status_code < 300,
+                        status=resp.status_code, html=resp.text,
+                        kind=classify_status(resp.status_code),
+                        signin_page=is_sign_in_page(resp.text),
+                    )
+                except Exception as exc:
+                    return PageResult(path=path, error=redact(str(exc)),
+                                      kind="transient")
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(self.max_workers, len(paths))) as ex:
+            return {r.path: r for r in ex.map(one, paths)}
+
+    def fetch(self, path: str) -> PageResult:
+        return self.fetch_many([path])[path]
+
+
+class BrowserSessionFetcher(ReadOnlyFetcher):
+    """仅用于登录窗口 / 退出登录清理的 Playwright 持久化 profile 接口。
+
+    **默认同步路径不经过这里**（见 ``HttpFetcher``）。保留 ``fetch_many`` 作为
+    兼容接口，供诊断与回归测试使用；``clear_session`` 用于清空 profile 登录态。
+    不注入反检测脚本、不携带 ``--no-sandbox`` 类标志、不点击页面元素。
     """
 
     def __init__(self, profile_dir: Optional[str] = None, channel: str = "msedge",
@@ -264,77 +335,140 @@ class BrowserSessionFetcher(ReadOnlyFetcher):
         self.timeout_ms = timeout_ms
 
     def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
-        paths = list(paths)
-        for p in paths:
-            assert_readonly(p)
+        """兼容接口：仅在测试 / 特殊诊断里使用，默认同步路径不再经过浏览器。"""
+        return self._fetch_once(list(paths))
+
+    def _fetch_once(self, paths: Sequence[str]) -> Dict[str, PageResult]:
+        """一次性启动的兼容路径：常驻会话不可用 / ``reuse=False`` 时使用。"""
         try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            return {p: PageResult(path=p, error=redact(str(exc)), kind="transient")
-                    for p in paths}
+            from playwright.async_api import async_playwright
+        except ImportError:
+            async_playwright = None
+        loop_running = False
+        try:
+            # 在某个已有 asyncio 事件循环的线程里不能直接用 asyncio.run；
+            # 改在一次性辅助线程里跑，既不阻塞当前循环，也不退回同步 Playwright。
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                loop_running = True
+        except Exception:
+            loop_running = False
 
         out: Dict[str, PageResult] = {}
         try:
             # 登录窗口最多持有锁 5 分钟；自动同步不应在后台线程里干等，
             # 快速返回「配置目录被占用」并保留上次快照即可。
             with profile_guard(self.profile_dir, timeout=3.0):
-                with sync_playwright() as pw:
-                    try:
-                        ctx = pw.chromium.launch_persistent_context(
-                            user_data_dir=str(self.profile_dir),
-                            channel=self.channel,
-                            headless=self.headless,
-                        )
-                    except Exception as exc:
-                        # 内核缺失 / Edge 未安装 / profile 被占用：环境问题，不是登录失效。
-                        return {p: PageResult(path=p, error=short_error(exc),
-                                              kind="transient") for p in paths}
-                    try:
-                        for p in paths:
-                            try:
-                                resp = ctx.request.get(
-                                    BASE + p, headers=_NO_STORE_HEADERS,
-                                    timeout=self.timeout_ms)
-                                status, html = resp.status, resp.text()
-                                out[p] = PageResult(
-                                    path=p, ok=200 <= status < 300, status=status,
-                                    html=html, kind=classify_status(status),
-                                    signin_page=is_sign_in_page(html),
-                                )
-                            except Exception as exc:
-                                out[p] = PageResult(
-                                    path=p, error=short_error(exc), kind="transient")
-                    finally:
-                        ctx.close()
+                if async_playwright is None:
+                    out = self._fetch_serial(paths)
+                elif loop_running:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        out = ex.submit(
+                            lambda: asyncio.run(
+                                self._fetch_async(paths, async_playwright))).result()
+                else:
+                    out = asyncio.run(self._fetch_async(paths, async_playwright))
         except ProfileBusyError as exc:
             return {p: PageResult(path=p, error=str(exc), kind="transient")
                     for p in paths}
         return out
 
-    def fetch(self, path: str) -> PageResult:
-        return self.fetch_many([path])[path]
-
-    def open_for_login(self, wait_seconds: int = 300) -> None:
-        """打开可见窗口让用户自己登录；不代填凭据、不读取任何 Cookie。
-
-        窗口按固定时长保持，不根据页面内容自动关闭；调用方结束前需保证
-        同一 profile 上没有别的 Playwright 实例（profile_guard 负责串行）。
-        """
-        from playwright.sync_api import sync_playwright
-
-        with profile_guard(self.profile_dir):
+    def _fetch_serial(self, paths: Sequence[str]) -> Dict[str, PageResult]:
+        """无异步 API / 已有事件循环时的兼容路径：保持旧版逐页 GET 行为。"""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            return {p: PageResult(path=p, error=redact(str(exc)), kind="transient")
+                    for p in paths}
+        out: Dict[str, PageResult] = {}
+        try:
             with sync_playwright() as pw:
-                ctx = pw.chromium.launch_persistent_context(
-                    user_data_dir=str(self.profile_dir),
-                    channel=self.channel, headless=False,
-                )
                 try:
-                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                    page.goto(BASE + "/", wait_until="domcontentloaded")
-                    # 登录动作完全由用户完成；这里只保持窗口，不做任何自动判定。
-                    page.wait_for_timeout(wait_seconds * 1000)
+                    ctx = pw.chromium.launch_persistent_context(
+                        user_data_dir=str(self.profile_dir),
+                        channel=self.channel,
+                        headless=self.headless,
+                    )
+                except Exception as exc:
+                    return {p: PageResult(path=p, error=short_error(exc),
+                                          kind="transient") for p in paths}
+                try:
+                    for p in paths:
+                        try:
+                            resp = ctx.request.get(
+                                BASE + p, headers=_NO_STORE_HEADERS,
+                                timeout=self.timeout_ms)
+                            status, html = resp.status, resp.text()
+                            out[p] = PageResult(
+                                path=p, ok=200 <= status < 300, status=status,
+                                html=html, kind=classify_status(status),
+                                signin_page=is_sign_in_page(html),
+                            )
+                        except Exception as exc:
+                            out[p] = PageResult(
+                                path=p, error=short_error(exc), kind="transient")
                 finally:
                     ctx.close()
+        except Exception as exc:
+            return {p: PageResult(path=p, error=short_error(exc), kind="transient")
+                    for p in paths}
+        return out
+
+    @staticmethod
+    def _page_result(path: str, status: int, html: str) -> PageResult:
+        return PageResult(
+            path=path, ok=200 <= status < 300, status=status, html=html,
+            kind=classify_status(status), signin_page=is_sign_in_page(html))
+
+    async def _fetch_async(self, paths: Sequence[str], async_playwright) -> Dict[str, PageResult]:
+        """在一次性浏览器 context 内并发请求；单页失败不影响另一页。
+
+        ``ctx.close()`` 必须发生在 ``async_playwright`` 退出（驱动停止）之前，
+        否则会留下活着的 Edge 进程，下一次同步会被 profile 锁判为「占用」。
+        """
+        try:
+            async with async_playwright() as pw:
+                ctx = None
+                try:
+                    try:
+                        ctx = await pw.chromium.launch_persistent_context(
+                            user_data_dir=str(self.profile_dir),
+                            channel=self.channel,
+                            headless=self.headless,
+                        )
+                    except Exception as exc:
+                        return {p: PageResult(path=p, error=short_error(exc),
+                                              kind="transient") for p in paths}
+
+                    async def one(path: str) -> PageResult:
+                        try:
+                            resp = await ctx.request.get(
+                                BASE + path, headers=_NO_STORE_HEADERS,
+                                timeout=self.timeout_ms)
+                            html = await resp.text()
+                            return self._page_result(path, resp.status, html)
+                        except Exception as exc:
+                            return PageResult(path=path, error=short_error(exc),
+                                              kind="transient")
+
+                    # 两页同时下载：整轮耗时 ≈ 较慢的一页，而不是两页之和。
+                    results = await asyncio.gather(*(one(p) for p in paths))
+                    return {r.path: r for r in results}
+                finally:
+                    if ctx is not None:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+        except Exception as exc:
+            return {p: PageResult(path=p, error=short_error(exc), kind="transient")
+                    for p in paths}
+
+    def fetch(self, path: str) -> PageResult:
+        return self.fetch_many([path])[path]
 
     def clear_session(self) -> None:
         """清除**本应用独立 profile** 内的登录态，不动用户日常 Edge 配置。
@@ -371,70 +505,6 @@ class BrowserSessionFetcher(ReadOnlyFetcher):
             pass
 
 
-class LegacyCookieFetcher(ReadOnlyFetcher):
-    """兼容旧版 cookies.txt 的过渡实现（不推荐，仅用于平滑升级）。
-
-    仍只读两页；但 Cookie 明文落盘的风险不变，UI 应引导用户迁移到
-    BrowserSessionFetcher 并删除旧文件。
-    """
-
-    def __init__(self, cookie_path: Optional[str] = None,
-                 timeout=(4, 12)) -> None:
-        self.cookie_path = Path(cookie_path) if cookie_path else _default_data_dir() / "cookies.txt"
-        self.timeout = timeout
-
-    @staticmethod
-    def parse(raw: str) -> Dict[str, str]:
-        raw = (raw or "").strip()
-        if raw.lower().startswith("cookie:"):
-            raw = raw.split(":", 1)[1]
-        jar = {}
-        for part in raw.split(";"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                jar[k.strip()] = v.strip()
-        return jar
-
-    def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
-        import requests
-
-        paths = list(paths)
-        for p in paths:
-            assert_readonly(p)
-        override = getattr(self, "_raw_override", None)
-        if override:
-            jar = self.parse(override)          # 一次性校验，不落盘
-        else:
-            try:
-                jar = self.parse(self.cookie_path.read_text(encoding="utf-8"))
-            except OSError:
-                jar = {}
-        out: Dict[str, PageResult] = {}
-        if not jar:
-            for p in paths:
-                out[p] = PageResult(path=p, error="未找到可用的本地会话", kind="signed_out")
-            return out
-        with requests.Session() as s:
-            s.cookies.update(jar)
-            for p in paths:
-                try:
-                    resp = s.get(BASE + p, headers=_NO_STORE_HEADERS,
-                                 timeout=self.timeout, allow_redirects=True)
-                    html = resp.text
-                    out[p] = PageResult(
-                        path=p, ok=200 <= resp.status_code < 300,
-                        status=resp.status_code, html=html,
-                        kind=classify_status(resp.status_code),
-                        signin_page=is_sign_in_page(html),
-                    )
-                except Exception as exc:
-                    out[p] = PageResult(path=p, error=redact(str(exc)), kind="transient")
-        return out
-
-    def fetch(self, path: str) -> PageResult:
-        return self.fetch_many([path])[path]
-
-
 # ---------------------------------------------------------------- 状态判定
 
 def probe(fetcher: ReadOnlyFetcher) -> SessionStatus:
@@ -462,26 +532,17 @@ def probe(fetcher: ReadOnlyFetcher) -> SessionStatus:
                 TRANSIENT_ERROR,
                 "页面返回空内容（可能是结构变化或临时异常），不是登录失效；"
                 "保留上次快照稍后重试。", pages, warnings)
+        hint = next((r.error for r in pages.values()
+                     if "尚未保存登录会话" in r.error), "")
         return SessionStatus(
             SIGNED_OUT,
-            "识别为登录页 / 公开「关于」页：请先在浏览器中登录 Microsoft Rewards。",
+            hint or "识别为登录页 / 公开「关于」页：请先在浏览器中登录 Microsoft Rewards。",
             pages, warnings)
 
     if signed_out or transient or len(usable) < len(ALLOWED_PATHS):
         warnings.append("仅部分页面可用：只采用能读到的字段，缺失项保留上次快照")
         return SessionStatus(DEGRADED, "会话可用但部分页面未读到，采用降级同步", pages, warnings)
     return SessionStatus(SIGNED_IN, "会话有效，可只读同步", pages, warnings)
-
-
-def legacy_cookie_notice() -> Optional[str]:
-    """检测到旧版明文 Cookie 文件时给出迁移提示（不自动删除，避免破坏用户数据）。"""
-    path = _default_data_dir() / "cookies.txt"
-    if not path.exists():
-        return None
-    return (
-        "检测到旧版明文 cookies.txt。建议改用「浏览器会话登录」，然后删除该文件；"
-        "如曾分享过 Cookie，请在 rewards.bing.com 退出会话或重新登录使旧凭证失效。"
-    )
 
 
 MIN_LOGIN_CONFIRM_SEC = 9     # 至少观察这么久，避免页面刚加载就误判
@@ -553,44 +614,22 @@ def _default_profile_dir() -> Path:
 
 # ---------------------------------------------------------------- 默认装配
 
-class UnavailableFetcher(ReadOnlyFetcher):
-    """运行环境未就绪（缺 Playwright / 未装 Edge / 未登录）时的兜底。"""
-
-    def __init__(self, reason: str = "浏览器会话环境未就绪") -> None:
-        self.reason = reason
-
-    def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
-        return {p: PageResult(path=p, error=self.reason, kind="transient")
-                for p in paths}
-
-
-def playwright_available() -> bool:
-    from importlib.util import find_spec
-    try:
-        return find_spec("playwright.sync_api") is not None
-    except Exception:
-        return False
-
-
 def default_fetcher() -> ReadOnlyFetcher:
-    """默认抓取器：浏览器会话优先，旧版明文 Cookie 仅作无 Playwright 时的过渡。
+    """同步链路默认装配：纯 HTTP + 本机加密凭证，**不启动浏览器**。
 
-    应用主路径不再调用它写 Cookie；仅当检测到旧文件且新通道不可用时才回退，
-    保证老用户升级后仍能只读同步，同时在 UI 提示迁移。
+    登录窗口是唯一还会打开 Edge 的地方（本人登录 / MFA / 导出凭证）。因此
+    同步、登录态复查、HTML 导出都不再受浏览器冷启动、profile 锁、Edge 版本
+    和安装路径影响。旧版明文 ``cookies.txt`` 在这里一次性迁移为加密文件后删除。
     """
-    if playwright_available():
-        # 只读同步在后台无头运行；可见登录窗口由 LoginDialog 单独启动
-        return BrowserSessionFetcher(headless=True)
-    legacy = _default_data_dir() / "cookies.txt"
-    if legacy.exists():
-        return LegacyCookieFetcher()
-    return UnavailableFetcher(
-        "未检测到可用的浏览器会话环境：请安装 Microsoft Edge 与 Playwright，"
-        "并在「账户与设置 → 登录」里由本人完成一次登录。")
-
-
+    store = CookieStore()
+    try:
+        store.migrate_legacy()
+    except Exception:
+        pass                     # 迁移失败不应阻断「尚未登录」的正常判定
+    return HttpFetcher(store)
 
 
 def clear_local_session() -> None:
-    """供「退出登录」调用：清除独立 profile 登录态与旧明文 Cookie 文件。"""
+    """供「退出登录」调用：删除加密凭证、明文遗留文件与 profile 登录态。"""
+    CookieStore().clear()
     BrowserSessionFetcher().clear_session()

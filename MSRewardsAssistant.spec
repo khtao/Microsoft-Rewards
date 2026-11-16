@@ -46,6 +46,9 @@ datas += d
 binaries += b
 hiddenimports += h
 hiddenimports += [
+    # 同步层用 async_api 并发抓两页，sync_api 作为无异步环境兜底；
+    # 显式列出，避免打包后因动态导入缺失而退化成串行。
+    'playwright.async_api', 'playwright.sync_api',
     'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore',
     'PySide6.QtSvg', 'PySide6.QtNetwork',
     'rewards_assistant.ui.modern.main_window',

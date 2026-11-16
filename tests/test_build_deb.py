@@ -115,7 +115,7 @@ def test_deb_packaging_guards_against_incomplete_dist():
 
 def test_gitignore_and_no_personal_log_sample_in_repo():
     ignore = (ROOT / ".gitignore").read_text(encoding="utf8")
-    for token in ("cookies.txt", "browser_profile/", "*.db", "*.log",
+    for token in ("cookies.txt", "session_cookies.bin", "browser_profile/", "*.db", "*.log",
                   "search_actions.jsonl", "dist/", "deb-dist/", "*.deb"):
         assert token in ignore, token
     # 那份历史日志含真实公网 IP 与会话 ID，且包内无人读取，已删除

@@ -19,7 +19,8 @@
 * 网络错误、页面改版、部分页面不可用时保留上次快照并标记 stale，
   不覆盖、不清空任务、不弹「积分归零」提醒；
 * 只有两页都完整可用且解析正常时才替换当日任务集合；
-* ``可领取`` 只生成提醒，不自动领取；全程不搜索、不点击活动卡、不 POST。
+* ``可领取`` 只生成提醒，不自动领取；全程不搜索、不点击活动卡、不 POST；
+* 两页并发下载、HTML 只解码一次、h2 分组一次扫描、整段落库一次提交。
 
 对外契约保持：``StatusWorker`` / ``SyncWorker`` 的类名、构造签名与
 ``progress`` / ``succeeded`` / ``failed`` 信号不变，``app.py`` 无需改动。
@@ -38,7 +39,7 @@ from .readonly_report import CATEGORY_MAP, Report, build_report, to_legacy_dashb
 from .rewards_client import parse_dashboard
 from .session import (
     ALLOWED_PATHS, DEGRADED, SIGNED_IN, SIGNED_OUT,
-    ReadOnlyFetcher, default_fetcher, legacy_cookie_notice, probe, redact,
+    ReadOnlyFetcher, default_fetcher, probe, redact,
 )
 from .storage import Store, day_str
 
@@ -131,9 +132,6 @@ def sync_once(
         message = status.reason
         if status.state == SIGNED_OUT:
             message = "未登录或会话不可用：" + message
-            note = legacy_cookie_notice()
-            if note:
-                message += " " + note
         return {"ok": False, "state": status.state, "message": message,
                 "summary": _last_snapshot(store, day), "stale": True,
                 "logs": list(status.warnings)}
@@ -143,7 +141,7 @@ def sync_once(
     earn = pages.get(ALLOWED_PATHS[1])
     dash_html = dash.html if dash and dash.usable else ""
     earn_html = earn.html if earn and earn.usable else ""
-    emit("正在只读读取 /dashboard 与 /earn …")
+    emit("正在解析页面数据…")
     report = build_report(dash_html, earn_html)
     if report.signed_out:
         return {"ok": False, "state": SIGNED_OUT,
@@ -165,44 +163,42 @@ def sync_once(
         if old is not None and not row["name"]:
             row["name"] = _col(old, "name", row["key"])
     emit(f"解析到 {len(rows)} 项任务，正在保存…")
-    for r in rows:
-        store.upsert_task(
-            day=day, key=r["key"], name=r["name"], category=r["category"],
-            points_max=r["points_max"], points_earned=r["points_earned"],
-            complete=r["complete"], manual=False, link=r["link"],
-            title_source=r["title_source"], offer_id=r["offer_id"],
-            raw_name=r["raw_name"],
-        )
-
     structure_changed = any("结构可能已变化" in w for w in report.warnings)
     complete_read = status.state == SIGNED_IN and not report.degraded
-    if rows and complete_read and not structure_changed:
-        # 两页都完整可用才替换；搜索进度未读到时保留上次搜索行
-        keep = [r["key"] for r in rows]
-        keep += [k for k in previous if k in ("pc_search", "mobile_search")]
-        store.remove_missing_official_tasks(day, keep)
-    else:
-        msg = "本次未替换当日任务集合：页面读取不完整，保留上次记录"
-        logs.append(msg)
-        emit(msg)
 
-    available = report.points.get("available")
-    if available is not None:
-        store.upsert_available(day, int(available), int(level))
-    else:
-        msg = "本次未读到可用积分，保留上次余额快照（不写 0）"
-        logs.append(msg)
-        emit(msg)
+    # 旧版每一步单独 commit（任务逐条 UPSERT、余额、页面真值、刷新汇总），
+    # Windows 上每笔都要 fsync。现在整段写入包在一个可重入事务里，只提交一次；
+    # 语义完全不变：读不到仍保留上次快照、不写 0、不完整读取不替换任务集合。
+    with store.tx():
+        store.upsert_tasks(day, rows)
 
-    # 必须先写真值列，再 refresh_day：汇总会把它作为「今日积分」第一优先级
-    wrote_page = store.save_page_points(day, report.points)
-    if not wrote_page:
-        msg = "本次未读到页面「今日积分 / 可领取」，保留上次快照（不推算、不写 0）"
-        logs.append(msg)
-        emit(msg)
+        if rows and complete_read and not structure_changed:
+            # 两页都完整可用才替换；搜索进度未读到时保留上次搜索行
+            keep = [r["key"] for r in rows]
+            keep += [k for k in previous if k in ("pc_search", "mobile_search")]
+            store.remove_missing_official_tasks(day, keep)
+        else:
+            msg = "本次未替换当日任务集合：页面读取不完整，保留上次记录"
+            logs.append(msg)
+            emit(msg)
 
-    summary = store.refresh_day(day)
-    summary = dict(summary) if summary is not None else None
+        available = report.points.get("available")
+        if available is not None:
+            store.upsert_available(day, int(available), int(level))
+        else:
+            msg = "本次未读到可用积分，保留上次余额快照（不写 0）"
+            logs.append(msg)
+            emit(msg)
+
+        # 必须先写真值列，再 refresh_day：汇总会把它作为「今日积分」第一优先级
+        wrote_page = store.save_page_points(day, report.points)
+        if not wrote_page:
+            msg = "本次未读到页面「今日积分 / 可领取」，保留上次快照（不推算、不写 0）"
+            logs.append(msg)
+            emit(msg)
+
+        summary = store.refresh_day(day)
+        summary = dict(summary) if summary is not None else None
 
     claimable = report.points.get("claimable")
     messages: List[str] = []

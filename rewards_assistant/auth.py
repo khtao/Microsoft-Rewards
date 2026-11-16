@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""登录态门面：会话保存在浏览器 profile，应用只做两页只读读取。
+"""登录态门面：会话凭证加密保存在本机，同步只发两页纯 HTTP GET。
 
-应用不读取、不导出、不写入 Cookie 文本。``AuthManager`` 提供给控制器、
+浏览器仅在「登录」窗口里由用户本人完成一次登录（含 MFA）；凭证随后加密
+写入本机数据目录，同步链路不再启动 Chromium。``AuthManager`` 提供给控制器、
 同步层与兼容层共用的三个动作：``status()`` / ``fetch_dashboard()`` /
 ``logout()``。``fetch_dashboard()`` 由 ``/dashboard`` 与 ``/earn`` 的 HTML
 合成兼容 dashboard JSON，供 ``rewards_client.parse_dashboard()`` 解析。
@@ -61,6 +62,6 @@ class AuthManager:
         return to_legacy_dashboard(report, date.today().isoformat(), 0)
 
     def logout(self) -> None:
-        """清除本机登录态（独立 profile 与旧版遗留文件），不动积分历史。"""
+        """删除加密凭证、明文遗留文件与 profile 登录态，不动积分历史。"""
         clear_local_session()
         self.log("已清除本地登录态；历史积分数据不受影响")
