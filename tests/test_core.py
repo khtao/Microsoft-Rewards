@@ -108,7 +108,7 @@ def test_search_runner_uses_only_pc_remaining():
             return {"repeat": 5, "level": 2}
 
     scope = dict(date=date, SearchRunner=FakeRunner, pending_desktop_rounds=pending_desktop_rounds)
-    exec(_read_method("rewards_assistant/ui/main_window.py", "for_pending", "SearchRunner"), scope)
+    exec(_read_method("rewards_assistant/ui/legacy.py", "for_pending", "SearchRunner"), scope)
     run_config = scope["for_pending"]
 
     class StoreStub:
@@ -175,11 +175,14 @@ def test_scheduled_run_does_nothing_if_all_completed_or_search_running():
     class FakeApp:
         def __init__(self, done=False, running=False):
             self.done = done
+            self.running = running
             self.events = []
             self._after_sync = set()
             self._syncing = False
             self.window = SimpleNamespace(runner=SimpleNamespace(is_running=lambda: running),
                                               update_running_state=lambda: None)
+        def auto_running(self):
+            return self.running
         def _all_done(self):
             return self.done
         def activity_running(self):
@@ -217,20 +220,19 @@ def test_activity_selection_includes_tasks_without_links():
     assert [t.key for t in pending_activity_items(tasks)] == ['more:0', 'dailyset:0']
 
 
-def test_official_confirmation_never_counts_click_as_success():
-    from rewards_assistant.activity_click import confirmed_completed
-    original = SimpleNamespace(key='more:0', raw_name='秋日', offer_id='offer-123')
-    snapshot = lambda tasks: SimpleNamespace(tasks=tasks)
-    item = lambda key, raw, offer, points, complete=False: SimpleNamespace(
-        key=key, raw_name=raw, offer_id=offer, points_max=10,
-        points_earned=points, complete=complete)
-    assert not confirmed_completed(original, snapshot([]))
-    assert not confirmed_completed(original, snapshot([item('more:0', '秋日', 'offer-123', 0)]))
-    assert confirmed_completed(original, snapshot([item('more:3', '秋日', 'offer-123', 10)]))
-    assert not confirmed_completed(original, snapshot([item('more:0', '秋日', 'different', 10)]))
-    old_no_id = SimpleNamespace(key='dailyset:0', raw_name='卡片', offer_id='')
-    assert confirmed_completed(old_no_id, snapshot([item('dailyset:0', '卡片', '', 10)]))
-    assert not confirmed_completed(old_no_id, snapshot([item('dailyset:0', '别的卡片', '', 10)]))
+def test_activity_run_never_does_official_verification():
+    """运行期间不做逐项核验；整轮结束后由控制器统一同步一次。"""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    worker = (root / "rewards_assistant" / "activity_worker.py").read_text("utf-8")
+    click = (root / "rewards_assistant" / "activity_click.py").read_text("utf-8")
+    app = (root / "rewards_assistant" / "app.py").read_text("utf-8")
+    assert "confirmed_completed" not in worker and "confirmed_completed" not in click
+    assert "fetch_dashboard" not in worker
+    assert "核验失败" not in worker
+    assert "官方已确认完成" not in worker
+    assert "官方确认" not in app
+    assert "运行结束后统一同步" in app
 
 
 def test_card_click_uses_mouse_not_direct_url(monkeypatch):
@@ -323,6 +325,7 @@ def test_activity_completion_cancels_followup_when_stopped():
             self.window = SimpleNamespace(update_running_state=lambda: None)
         def _log(self, msg): pass
         def _set_open_progress(self, msg): self.calls.append(msg)
+        def _start_pc_search(self): self.calls.append('search')
         def sync_now(self, auto): self.calls.append(('sync', auto))
     stats = {'total': 1, 'clicked': 1, 'verified': 0,
              'unconfirmed': ['task'], 'missing': [], 'stopped': True, 'error': ''}
@@ -334,143 +337,120 @@ def test_activity_completion_cancels_followup_when_stopped():
     stats['stopped'] = False
     obj._activity_then_search = True
     finish(obj, stats)
-    assert obj._after_sync == {'search'}
-    assert ('sync', True) in obj.calls
+    # 运行期间禁止同步：不再插入 sync_now，直接续跑搜索并登记「结束后统一同步」。
+    assert obj._after_sync == set()
+    assert ('sync', True) not in obj.calls
+    assert 'search' in obj.calls
+    assert obj._after_sync == set()
+    assert ('sync', True) not in obj.calls
 
 
-def test_parallel_optional_html_fetch_and_dashboard_reuse(monkeypatch):
-    """两个页面确实并发；读取 dashboard HTML 后无需另发签到天数请求。"""
-    import threading
-    from rewards_assistant import page_titles
-    barrier = threading.Barrier(2)
-    seen = []
-
-    def fake_fetch(url, _cookies, _timeout):
-        seen.append(url)
-        barrier.wait(timeout=2)
-        return '{"dailySetItems":[{"offerId":"foo","title":"每日活动"}]}'
-
-    monkeypatch.setattr(page_titles, 'fetch_html', fake_fetch)
-    result = page_titles.fetch_real_titles({'token': 'fake'}, timeout=(2, 3),
-                                            with_dashboard_html=True)
-    assert len(seen) == 2
-    assert len(result['daily']) == 1
-    assert len(result['routine']) == 1
-    assert 'dailySetItems' in result['dashboard_html']
 
 
-def test_optional_html_failure_never_aborts_other_page(monkeypatch):
-    from rewards_assistant import page_titles
-    seen = []
-
-    def fake_fetch(url, _cookies, _timeout):
-        seen.append(url)
-        if url.endswith('/earn'):
-            raise TimeoutError('页面不可用')
-        return '{"activityCards":[{"offerId":"foo","title":"任务标题"}]}'
-
-    monkeypatch.setattr(page_titles, 'fetch_html', fake_fetch)
-    result = page_titles.fetch_real_titles({}, include=('routine', 'daily'))
-    assert len(result['daily']) == 1
-    assert result['routine'] == []
-    result = page_titles.fetch_real_titles({}, include=('daily',), with_dashboard_html=True)
-    assert len(seen) == 3  # 只按需拉取页面
-    assert result['dashboard_html']
 
 
-def _sync_runner(scope, store, *, enrich_pages):
-    """只运行后台线程的业务逻辑，测试机不需要安装 PySide6。"""
-    scope = dict(scope)
-    scope.setdefault('AuthError', RuntimeError)
-    scope.setdefault('Snapshot', object)
-    exec(_read_method('rewards_assistant/sync.py', 'run', 'SyncWorker'), scope)
-    sent = SimpleNamespace(progress=[], succeeded=[], failed=[])
-    obj = SimpleNamespace(store=store, day='2026-10-21', enrich_pages=enrich_pages,
-                          progress=SimpleNamespace(emit=sent.progress.append),
-                          succeeded=SimpleNamespace(emit=sent.succeeded.append),
-                          failed=SimpleNamespace(emit=sent.failed.append))
-    scope['run'](obj)
-    return sent
+def _page_result(html, path='/dashboard', *, kind='ok', status=200, ok=True,
+                 signin=False):
+    from rewards_assistant.session import PageResult
+    return PageResult(path=path, ok=ok, status=status, html=html,
+                      kind=kind, signin_page=signin)
 
 
-def test_fast_sync_refreshes_authoritative_progress_and_keeps_same_offer_title(tmp_path):
-    """快速同步不拉 HTML；同一 offerId 的旧中文标题可以继续显示，但积分必更新。"""
-    from rewards_assistant.rewards_client import TaskItem, Snapshot
-    store = Store(str(tmp_path / 'fast_sync.db'))
-    store.upsert_task('2026-10-21', 'more:0', '活动真实名称', '更多活动',
-                      10, 0, False, title_source='page', offer_id='offer-abc')
-    store.upsert_task('2026-10-21', 'pc_search', '电脑搜索', '搜索',
-                      90, 0, False)
-    snapshot = Snapshot(day='2026-10-21', available_points=998, balance_valid=True, level=2,
-                        tasks=[TaskItem('more:0', '活动ID', '更多活动', 10, 10, True,
-                                        offer_id='offer-abc', title_source='guess'),
-                               TaskItem('pc_search', '电脑搜索', '搜索', 90, 30, False,
-                                        title_source='api')])
-    calls = []
-
-    class Auth:
-        def __init__(self, logger):
-            pass
-        def fetch_dashboard(self, timeout):
-            calls.append(('api', timeout))
-            return {'test': 1}
-
-    scope = dict(AuthManager=Auth, parse_dashboard=lambda data, day: snapshot,
-                 fetch_real_titles=lambda *args, **kw: pytest.fail('不应抓取页面'),
-                 extract_streak=lambda html: pytest.fail('不应额外抓取签到'),)
-    result = _sync_runner(scope, store, enrich_pages=False)
-    assert not result.failed and len(result.succeeded) == 1
-    assert calls == [('api', (4, 12))]
-    rows = {r['key']: r for r in store.tasks_of_day('2026-10-21')}
-    assert rows['more:0']['name'] == '活动真实名称'
-    assert rows['more:0']['complete'] == 1 and rows['more:0']['points_earned'] == 10
-    assert rows['pc_search']['points_earned'] == 30
-    assert store.daily('2026-10-21')['available_points'] == 998
+def _two_page_fetcher(dash_html, earn_html):
+    """新链路只依赖 ReadOnlyFetcher.fetch_many，测试无需浏览器与网络。"""
+    class Fetcher:
+        def fetch_many(self, paths):
+            return {
+                '/dashboard': _page_result(dash_html, '/dashboard'),
+                '/earn': _page_result(earn_html, '/earn'),
+            }
+        def fetch(self, path):
+            return self.fetch_many([path])[path]
+    return Fetcher()
 
 
-def test_fast_sync_does_not_reuse_other_offers_title(tmp_path):
-    from rewards_assistant.rewards_client import TaskItem, Snapshot
-    store = Store(str(tmp_path / 'new_offer.db'))
-    store.upsert_task('2026-10-21', 'more:0', '旧任务标题', '更多活动',
-                      10, 0, False, title_source='page', offer_id='old-offer')
-    snap = Snapshot(day='2026-10-21', tasks=[
-        TaskItem('more:0', '新活动', '更多活动', 10, 0, False,
-                 offer_id='new-offer', title_source='guess')])
-    class Auth:
-        def __init__(self, logger): pass
-        def fetch_dashboard(self, timeout): return {}
-    result = _sync_runner(dict(AuthManager=Auth, parse_dashboard=lambda *_: snap),
-                          store, enrich_pages=False)
-    assert not result.failed
-    row = store.tasks_of_day('2026-10-21')[0]
-    assert row['name'] == '新活动'
-    assert row['offer_id'] == 'new-offer'
+def _rsc_points(available='1,234', today='45', claimable='60'):
+    q = '\\"'
+    def card(label, value):
+        return (f'{q}className{q}:{q}text-labelControl{q},{q}children{q}:{q}{label}{q}'
+                f'<i></i>{q}className{q}:{q}text-pageHeader{q},'
+                f'{q}children{q}:{q}{value}{q}')
+    return (card('可用积分', available) + card('今日积分', today)
+            + card('可领取', claimable))
 
 
-def test_optional_enrichment_uses_one_dashboard_html_for_streak(tmp_path):
-    from rewards_assistant.rewards_client import TaskItem, Snapshot
-    store = Store(str(tmp_path / 'enrich.db'))
-    snap = Snapshot(day='2026-10-21', tasks=[
-        TaskItem('more:0', '活动ID', '更多活动', 10, 0, False, offer_id='x')])
-    pages = []
-    class Auth:
-        def __init__(self, logger): pass
-        def fetch_dashboard(self, timeout): return {}
-        def jar(self): return {'x': 'y'}
-        def fetch_page_html(self, *a, **kw): pytest.fail('不得再次读取 dashboard 页面')
+def _dom_card(title, points=10, done=False):
+    return (f'<h2>每日活动</h2><a href="#">'
+            f'<div class="bg-statusSuccessRewardsBg">'
+            f'<p class="text-metadata text-fgCtrlOnImage">{points}</p></div>'
+            f'<p class="line-clamp-3 text-globalBody2Strong">{title}</p>'
+            f'<p class="line-clamp-3 text-fgCtrlNeutralSecondaryRest">说明</p>'
+            f'{"<span>已完成</span>" if done else ""}</a>')
 
-    def fetch_titles(cookies, timeout, *, include, with_dashboard_html):
-        pages.append((include, with_dashboard_html))
-        return {'daily': [], 'routine': [], 'dashboard_html': '连续签到 5 天'}
 
-    result = _sync_runner(dict(AuthManager=Auth, parse_dashboard=lambda *_: snap,
-                               fetch_real_titles=fetch_titles,
-                               merge_titles=lambda *args, **kw: 0,
-                               extract_streak=lambda html: 5),
-                          store, enrich_pages=True)
-    assert not result.failed
-    assert pages == [({'routine', 'daily'}, True)]
-    assert store.daily('2026-10-21')['official_streak'] == 5
+def _sync_readonly(store, dash_html, earn_html, **kw):
+    from rewards_assistant import sync as sync_mod
+    return sync_mod.sync_once(store, _two_page_fetcher(dash_html, earn_html),
+                              day='2026-10-21', force=True, **kw)
+
+
+def test_sync_uses_page_trio_and_reuses_saved_title(tmp_path):
+    """三项积分取页面真值；重复同步更新进度但不覆盖中文标题。"""
+    store = Store(str(tmp_path / 'page_sync.db'))
+    html = _rsc_points() + _dom_card('必应首页测验')
+    first = _sync_readonly(store, html, html)
+    assert first['ok'] and first['points'] == {
+        'available': 1234, 'today': 45, 'claimable': 60}
+    row = store.daily('2026-10-21')
+    assert row['today_points'] == 45 and row['claimable_points'] == 60
+    assert row['points_earned'] == 45 and row['points_source'] == 'page_today'
+    keys_before = {r['key'] for r in store.tasks_of_day('2026-10-21')}
+
+    second = _sync_readonly(store, _rsc_points(today='55') + _dom_card(
+        '必应首页测验', done=True), html)
+    assert second['ok'] and second['points']['today'] == 55
+    assert {r['key'] for r in store.tasks_of_day('2026-10-21')} == keys_before
+    assert store.daily('2026-10-21')['points_earned'] == 55
+
+
+def test_sync_does_not_reuse_other_cards_title(tmp_path):
+    """不同卡片生成不同稳定 key，不会把上一张的标题安到新卡上。"""
+    store = Store(str(tmp_path / 'new_card.db'))
+    _sync_readonly(store, _rsc_points() + _dom_card('旧活动'), '')
+    _sync_readonly(store, _rsc_points() + _dom_card('新活动'), '')
+    names = {r['name'] for r in store.tasks_of_day('2026-10-21')}
+    assert '新活动' in names
+
+
+def test_sync_missing_points_never_writes_zero(tmp_path):
+    """页面没给「今日 / 可领取」就留 NULL，UI 显示 --，绝不写 0。"""
+    store = Store(str(tmp_path / 'missing.db'))
+    html = '<script>{"availablePoints":"777"}</script>' + _dom_card('一个小测验')
+    out = _sync_readonly(store, html, html)
+    assert out['points']['today'] is None and out['points']['claimable'] is None
+    row = store.daily('2026-10-21')
+    assert row['today_points'] is None and row['claimable_points'] is None
+    assert row['available_points'] == 777
+
+
+def test_sync_transient_keeps_snapshot_and_never_blames_login(tmp_path):
+    """429 / 超时是服务问题，不是登录失效；不写库、不诱导重新登录。"""
+    from rewards_assistant import sync as sync_mod
+    from rewards_assistant.session import TRANSIENT_ERROR
+    store = Store(str(tmp_path / 'transient.db'))
+    store.upsert_available('2026-10-21', 999, 2)
+
+    class Fetcher:
+        def fetch_many(self, paths):
+            return {p: _page_result('', p, kind='transient', ok=False, status=503)
+                    for p in paths}
+        def fetch(self, path):
+            return self.fetch_many([path])[path]
+
+    out = sync_mod.sync_once(store, Fetcher(), day='2026-10-21', force=True)
+    assert out['ok'] is False and out['state'] == TRANSIENT_ERROR
+    assert out['stale'] is True and '无需重新登录' in out['message']
+    assert store.daily('2026-10-21')['available_points'] == 999
 
 
 def test_store_migrates_legacy_title_match_fields(tmp_path):
@@ -511,6 +491,7 @@ def test_sync_page_enrichment_cooldown_and_failure_retry():
     exec(_read_method('rewards_assistant/app.py', 'sync_now', 'Application'), scope)
     start = scope['sync_now']
     obj = SimpleNamespace(store=object(), _syncing=False, _workers=[],
+                          auto_running=lambda: False,
                           _last_page_enrichment=None, _sync_enrich_current=False,
                           window=SimpleNamespace(set_busy=lambda *a: None),
                           _on_sync_ok=lambda *_: None, _on_sync_fail=lambda *_: None,
@@ -555,10 +536,14 @@ def test_application_icon_assets():
 
 
 def test_app_icon_is_bundled_in_build_and_desktop_file():
-    pyinstaller = (ROOT / "build_ubuntu.sh").read_text("utf-8")
+    # 图标资源由统一的 MSRewardsAssistant.spec 收集（构建脚本不再重复 --add-data）
+    build = (ROOT / "build_ubuntu.sh").read_text("utf-8")
+    spec = (ROOT / "MSRewardsAssistant.spec").read_text("utf-8")
     deb = (ROOT / "build_deb.sh").read_text("utf-8")
     main = (ROOT / "rewards_assistant/app.py").read_text("utf-8")
-    assert "assets/icons:assets/icons" in pyinstaller
+    assert "MSRewardsAssistant.spec" in build
+    assert "assets" in spec and "icons" in spec
+    assert "assets/icons" in spec
     assert "Icon=ms-rewards-assistant" in deb
     assert "ms-rewards-assistant.desktop" in deb
     assert "icons/hicolor/scalable/apps/ms-rewards-assistant.svg" in deb
@@ -567,13 +552,19 @@ def test_app_icon_is_bundled_in_build_and_desktop_file():
 
 
 def test_main_toolbar_hides_manual_refresh_but_preserves_tray_actions():
-    s = (ROOT / "rewards_assistant/ui/main_window.py").read_text("utf-8")
-    start = s.index("    def _build_toolbar(self)")
-    end = s.index("    def _build_statusbar(self)", start)
-    toolbar = s[start:end]
-    assert "bar.addAction(act_sync)" not in toolbar
-    assert "bar.addAction(act_refresh)" not in toolbar
-    assert "self.addAction(act_sync)" in toolbar
-    assert "self.addAction(act_refresh)" in toolbar
-    assert "self.act_sync = act_sync" in toolbar
-    assert "self.act_refresh = act_refresh" in toolbar
+    """唯一界面用隐藏 QAction 保留 F5 / 托盘入口，不在顶部栏加按钮。"""
+    s = (ROOT / "rewards_assistant/ui/modern/main_window.py").read_text("utf-8")
+    assert 'self.act_sync = QAction("立即同步", self)' in s
+    assert 'self.act_refresh = QAction("刷新界面", self)' in s
+    assert "self.addAction(self.act_sync)" in s
+    assert "self.addAction(self.act_refresh)" in s
+    assert "bar.addAction(act_sync)" not in s
+    tray = (ROOT / "rewards_assistant/app.py").read_text("utf-8")
+    # 托盘按需求只保留 4 项；隐藏 QAction 仍供 F5 / 快捷键使用，不进托盘菜单
+    assert "self.window.act_sync.trigger" in tray
+    assert "self.window.act_refresh.trigger" not in tray
+    for label in ("显示主页面", "立即同步", "自动完成任务", "退出"):
+        assert f'"{label}"' in tray
+    for gone in ("刷新界面", "仅打开未完成任务页", "今日完成后休眠至明天",
+                 "真正退出程序", '"停止"'):
+        assert f'"{gone}"' not in tray, gone

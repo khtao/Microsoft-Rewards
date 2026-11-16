@@ -1,25 +1,27 @@
 # -*- coding: utf-8 -*-
-"""启动真实 Microsoft Edge（headed），复用用户数据目录里的 Cookie / 登录态。
+"""启动真实 Microsoft Edge（headed）跑实验性自动化链路。
 
-要点：
-1. launch_persistent_context + channel="msedge" —— 直接用系统安装的 Edge，
-   指纹（字体、WebGL、UA、插件）都是本机真实值，不是 Playwright 自带的 Chromium。
-2. 复用 user-data-dir，Cookie / localStorage / 历史记录全部沿用，省掉登录与养号。
-3. 打掉最常被反作弊读取的 navigator.webdriver。
-4. 沙箱：Playwright 默认 chromium_sandbox=False，它会自动注入 --no-sandbox，
-   于是 Edge 顶上那条「不受支持的命令行标志」警告就是这么来的。本模块默认
-   开回沙箱（chromium_sandbox=True）；root 下确实开不了沙箱时，用管理策略
-   CommandLineFlagSecurityWarningsEnabled=false 关掉这条警告。
+登录态来源默认是**应用自己的独立 profile**（``config.profile_dir()``，与只读
+同步、登录窗口共用），并且自动化一律在它的快照副本里运行：
+
+* 不碰用户日常打开的 Edge User Data，不会因为 Edge 正在运行就报
+  ``ProcessSingleton`` / ``shutil.Error: [('...Permission denied...')]``；
+* 不需要用户关闭浏览器，也不与后台只读同步抢同一份 Singleton 锁；
+* 复制时跳过 Chromium 正在占用的锁文件 / WAL / 会话文件，单文件失败不中断。
+
+经典链路之外，本模块仍提供真实 Edge 的启动参数与沙箱/警告横幅处理。
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
+from .config import data_dir, profile_dir as _app_profile_dir
 from .fingerprint import STEALTH_MIN_JS, STEALTH_PLUGINS_JS
 
 # Edge on Linux 的管理策略目录（Chromium 是 /etc/chromium/policies/managed）
@@ -28,17 +30,23 @@ EDGE_POLICY_DIRS = (Path("/etc/opt/edge/policies/managed"),
 # 这条策略专门用来关掉「不受支持的命令行标志」的安全警告横幅
 FLAG_WARNING_POLICY = {"CommandLineFlagSecurityWarningsEnabled": False}
 
-# 指纹注入原则：一致性 > 伪装。
-# 这里**不硬编码** hardwareConcurrency / deviceMemory / languages —— 真机上这些值
-# 与自己写死的值不一致，反而变成强特征；只有 headless 缺失对象时才补齐。
-STEALTH_JS = STEALTH_MIN_JS          # 兼容旧引用名
 
 IGNORE_DIRS = {
     "Cache", "Code Cache", "GPUCache", "ShaderCache", "Service Worker",
     "Crashpad", "logs", "blob_storage", "File System", "IndexedDB",
-    "Session Storage", "VideoDecodeStats", "BudgetDatabase", "blob_storage",
+    "Session Storage", "Sessions", "VideoDecodeStats", "BudgetDatabase",
+    "BrowserMetrics", "CrashpadMetrics",
 }
-IGNORE_FILES = {"SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK", ".DS_Store"}
+
+# Chromium 运行时会独占这些文件；复制时失败是常态，跳过即可，不影响登录态。
+SKIP_FILE_NAMES = {
+    "Current Session", "Current Tabs", "Last Session", "Last Tabs",
+    "DevToolsActivePort", "LOCK", "SingletonLock", "SingletonCookie",
+    "SingletonSocket", ".DS_Store",
+}
+SKIP_SUFFIXES = ("-journal", "-wal", "-shm", ".tmp", ".log")
+
+AUTOMATION_PROFILE_DIRNAME = "automation_edge_profile"
 
 
 def default_profile_dir() -> Path:
@@ -62,6 +70,59 @@ def default_profile_dir() -> Path:
     return cands[0]
 
 
+def app_profile_dir() -> Path:
+    """应用独立的登录 profile（登录窗口与只读同步共用，不碰日常 Edge）。"""
+    return _app_profile_dir()
+
+
+def automation_source_profile() -> Path:
+    """自动化链路默认读取哪份登录态：应用独立 profile 优先。
+
+    独立 profile 里已有 ``Default/`` 或 ``Local State`` 说明用户已完成应用内
+    登录；否则退回系统 Edge 配置目录（仍会被复制成快照，不直接占用）。
+    """
+    p = app_profile_dir()
+    if (p / "Default").is_dir() or (p / "Local State").is_file():
+        return p
+    return default_profile_dir()
+
+
+def prune_automation_profiles(keep: int = 3) -> None:
+    """清理历史快照目录；正在被进程占用的删不掉就留着，不报错。"""
+    base = data_dir()
+    try:
+        cands = sorted(
+            (d for d in base.iterdir()
+             if d.is_dir() and d.name.startswith(AUTOMATION_PROFILE_DIRNAME + "_")),
+            key=lambda d: d.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for d in cands[keep:]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def new_automation_profile_dir() -> Path:
+    """每次自动化运行都用**全新且唯一**的配置目录。
+
+    固定复用同一个 ``automation_edge_profile`` 会让上一次残留的 Edge 进程
+    （或它重建的 SingletonLock）把新启动 handoff 给自己后退出，Playwright
+    于是报 ``Target page, context or browser has been closed`` —— 截图里那句
+    「浏览器窗口被提前关闭」就是这么来的。唯一目录彻底断开这个 handoff 链。
+    """
+    prune_automation_profiles(keep=3)
+    p = data_dir() / (f"{AUTOMATION_PROFILE_DIRNAME}_{os.getpid()}_"
+                      f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:4]}")
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def cleanup_automation_profile(path) -> None:
+    """运行结束后删除本次快照；删不掉（进程未完全退出）就留给下次 prune。"""
+    if path:
+        shutil.rmtree(Path(path), ignore_errors=True)
+    prune_automation_profiles(keep=3)
+
+
 def is_root() -> bool:
     try:
         return os.geteuid() == 0
@@ -69,88 +130,10 @@ def is_root() -> bool:
         return False
 
 
-# 会触发 Edge「不受支持的命令行标志」警告条的开关
-UNSAFE_FLAGS = (
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-web-security",
-    "--allow-running-insecure-content",
-    "--disable-site-isolation-trials",
-    "--single-process",
-    "--allow-file-access-from-files",
-)
 
 
-def scan_edge_processes() -> list:
-    """扫描当前正在运行的 Edge 进程，返回 (pid, 命中的不安全标志列表)。
-
-    这是诊断横幅的关键：Edge 启动时若发现同 profile 已有进程，会把命令行
-    **交给已存在的进程**（进程 handoff），新传的参数与刚写的策略都不会生效。
-    所以真正决定有没有横幅的，往往是**早就开着那个 Edge 进程**的命令行。
-    """
-    hits = []
-    try:
-        pids = [d for d in os.listdir("/proc") if d.isdigit()]
-    except Exception:
-        return hits
-    for pid in pids:
-        try:
-            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "ignore")
-        except Exception:
-            continue
-        if not cmd:
-            continue
-        exe = cmd.split("\x00")[0]
-        if not ("/msedge" in exe or exe.endswith("msedge") or "microsoft-edge" in exe):
-            continue
-        flags = [f for f in cmd.split("\x00") if f in UNSAFE_FLAGS]
-        hits.append((int(pid), flags))
-    return hits
 
 
-def diagnose_flag_warning(verbose: bool = True) -> dict:
-    """诊断「不受支持的命令行标志」警告条会不会出现、根因是什么。"""
-    root = is_root()
-    procs = scan_edge_processes()
-    running = [p for p in procs if p[1]]           # 真正带了不安全标志的进程
-    info = {
-        "root": root,
-        "sandbox_on": resolve_sandbox(None),
-        "edge_running": bool(procs),
-        "unsafe_procs": running,
-        "policy_installed": any((d / "human_search_policy.json").exists()
-                                for d in EDGE_POLICY_DIRS),
-    }
-    if not verbose:
-        return info
-
-    print("── 「不受支持的命令行标志」诊断 " + "─" * 30)
-    print(f"  运行身份      : {'root（沙箱不可用）' if root else '普通用户（可开沙箱）'}")
-    print(f"  沙箱决策      : {'开 —— 不会出现 --no-sandbox' if info['sandbox_on'] else '关 —— 会带 --no-sandbox'}")
-    print(f"  抑制策略      : {'已安装' if info['policy_installed'] else '未安装'}")
-    if procs:
-        print(f"  运行中的 Edge : {len(procs)} 个进程")
-        for pid, flags in procs:
-            print(f"      pid {pid}: {' '.join(flags) if flags else '（无不安全标志）'}")
-    else:
-        print("  运行中的 Edge : 无")
-
-    print()
-    if running:
-        print("  >>> 根因：已有 Edge 进程带着不安全标志在跑。")
-        print("      Edge 的进程 handoff 会让新启动的窗口复用这个进程，")
-        print("      新传的参数和刚写入的策略都不会被重新读取 —— 横幅就是这么残留的。")
-        print("      解决：完全退出 Edge 再运行脚本")
-        print("        pkill -f msedge && sleep 2 && python3 main.py ...")
-    elif root and not info["sandbox_on"]:
-        print("  >>> 根因：root 下沙箱不可用，脚本被迫带 --no-sandbox。")
-        print("      已自动写策略 + --test-type 兜底；若仍提示，先 pkill -f msedge 再跑。")
-        print("      想彻底消除：改用普通用户运行（不要 sudo）。")
-    elif not procs:
-        print("  >>> 当前没有 Edge 进程，且参数干净：直接跑脚本不应出现横幅。")
-    else:
-        print("  >>> 现有 Edge 进程参数正常；若仍提示，pkill -f msedge 后重试一次。")
-    return info
 
 
 def install_flag_warning_policy(policy_dir: Path | None = None, verbose: bool = True) -> bool:
@@ -239,38 +222,79 @@ def find_edge_binary() -> str | None:
     return next((p for p in candidates if os.path.isfile(p)), None)
 
 
-def edge_is_running() -> bool:
-    try:
-        if sys.platform == "win32":
-            result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
-                                    capture_output=True, text=True, timeout=5)
-            return any(line.lstrip().lower().startswith("msedge.exe ")
-                       for line in result.stdout.splitlines())
-        name = "Microsoft Edge" if sys.platform == "darwin" else "msedge"
-        cmd = ["pgrep", "-f", name]
-        if sys.platform != "darwin":
-            cmd[1:1] = ["-u", str(os.getuid())]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return bool(result.stdout.strip())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return False
-
-
-def profile_locked(d: Path) -> bool:
-    return any((d / f).exists() for f in ("SingletonLock", "SingletonSocket"))
-
-
 def copy_profile(src: Path, dst: Path) -> Path:
-    """复制一份 profile 快照：带上 Cookie，又不锁住正在运行的 Edge。"""
+    """复制 profile 快照：带登录态，且单文件被占用时**只跳过、不整体失败**。
+
+    Windows 上 Edge 正在运行时 ``shutil.copytree`` 会对 SQLite / 会话文件抛
+    ``PermissionError`` 并汇总成 ``shutil.Error: [('C:\\Users\\...')]``，
+    旧版因此把整条自动化链路判为「运行失败」。这里改为逐文件复制：缓存目录、
+    锁文件、WAL 直接跳过，其余失败重试两次后跳过，保证快照始终可用。
+    """
+    src, dst = Path(src), Path(dst)
+    if src.resolve() == dst.resolve():
+        raise ValueError("快照目录不能作为源用户目录")
     if dst.exists():
-        shutil.rmtree(dst)
-    dst.parent.mkdir(parents=True, exist_ok=True)
+        # 上次异常退出可能残留文件；删不掉的（被占用）留着，下面逐文件覆盖。
+        shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir(parents=True, exist_ok=True)
+    # 关键：残留的 Singleton 锁会让 Chromium 直接报 Failed to create a
+    # ProcessSingleton，即使快照本身是新的也一样。
+    for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket",
+                 "DevToolsActivePort", "LOCK"):
+        try:
+            (dst / lock).unlink()
+        except OSError:
+            pass
+    dst_resolved = dst.resolve()
 
-    def _ignore(path, names):
-        return {n for n in names if n in IGNORE_DIRS or n in IGNORE_FILES}
-
-    shutil.copytree(src, dst, ignore=_ignore, symlinks=True, dirs_exist_ok=True)
+    for root, dirs, files in os.walk(src, topdown=True, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS
+                   and (Path(root) / d).resolve() != dst_resolved]
+        rel = Path(root).relative_to(src)
+        out = dst / rel
+        out.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name in SKIP_FILE_NAMES or name.endswith(SKIP_SUFFIXES):
+                continue
+            src_file, dst_file = Path(root) / name, out / name
+            for attempt in range(3):
+                try:
+                    if src_file.is_symlink():
+                        if not dst_file.exists():
+                            dst_file.symlink_to(os.readlink(src_file))
+                    else:
+                        shutil.copy2(src_file, dst_file)
+                    break
+                except (OSError, shutil.Error):
+                    if attempt < 2:
+                        time.sleep(0.2)
+                    # 仍失败：只是少一个非关键文件，绝不抛 shutil.Error
     return dst
+
+
+def browser_error_hint(text: str, limit: int = 90) -> str:
+    """把 Playwright / shutil 的原始异常压成一句可操作提示，不泄漏本地路径。"""
+    raw = str(text or "").strip()
+    first = raw.splitlines()[0] if raw else ""
+    low = first.lower()
+    if ("error: [(" in low or "shutil" in low or "errno 13" in low
+            or "permission denied" in low or "winerror 32" in low
+            or "being used by another process" in low):
+        return "复制浏览器配置时部分文件被占用，已自动跳过；若仍未登录，请在应用内重新登录一次"
+    if ("processsingleton" in low or "singletonlock" in low
+            or "singletoncookie" in low or "failed to create a" in low
+            or ("profile" in low and ("in use" in low or "already running" in low))):
+        return "浏览器配置目录被占用：关闭应用自己打开的浏览器窗口后重试（日常 Edge 无需关闭）"
+    if ("executable doesn't exist" in low or "browser executable" in low
+            or "msedge" in low and ("not found" in low or "not exist" in low)):
+        return "未找到 Microsoft Edge，请先安装 Edge 后重试"
+    if ("target page, context or browser has been closed" in low
+            or "browser has been closed" in low):
+        return ("浏览器进程意外退出（配置目录被残留进程占用或窗口被关闭）；"
+                "已自动换用全新配置重试，若仍失败请重启应用")
+    if "timed out" in low or "timeout" in low:
+        return "浏览器启动超时，请稍后重试"
+    return first[:limit] or "浏览器启动失败，请重试"
 
 
 def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
@@ -297,11 +321,6 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
         suppress_flag_warning = True
     elif suppress_flag_warning is None:
         suppress_flag_warning = not use_sandbox
-
-    if verbose and edge_is_running():
-        print("[提示] 检测到已有 Edge 进程：新窗口可能被 handoff 给该进程，"
-              "此时启动参数与策略不会重新生效。"
-              "若警告条仍在，先 pkill -f msedge 再运行。")
 
     if suppress_flag_warning:
         install_flag_warning_policy(
@@ -362,3 +381,56 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
     if headless:
         ctx.add_init_script(STEALTH_PLUGINS_JS)
     return ctx
+
+
+_RETRYABLE_LAUNCH_ERRORS = (
+    "has been closed", "processsingleton", "singletonlock",
+    "failed to create a", "user data directory is already in use",
+    "profile in use", "being used by another process", "permission denied",
+)
+
+
+def is_profile_conflict_error(exc) -> bool:
+    """启动期因配置目录占用 / handoff 失败，值得换一个全新目录重试。"""
+    low = str(exc).lower()
+    return any(k in low for k in _RETRYABLE_LAUNCH_ERRORS)
+
+
+def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
+                           verbose: bool = False, **kwargs):
+    """复制一份唯一快照并启动 Edge；冲突时换全新目录自动重试一次。
+
+    返回 ``(context, snapshot_path)``。调用方在 ``context.close()`` /
+    ``pw.stop()`` 之后必须调用 ``cleanup_automation_profile(snapshot_path)``。
+    """
+    from playwright.sync_api import Error as PWError  # 延迟导入
+
+    src = (Path(user_data_dir).expanduser() if user_data_dir
+           else Path(source_profile or automation_source_profile()))
+    if not src.exists():
+        raise FileNotFoundError(
+            f"浏览器配置目录不存在：{src}。请在应用内完成一次登录，"
+            f"或用 --user-data-dir 指定 Edge 用户数据目录")
+
+    last = None
+    for attempt in (1, 2):
+        snap = new_automation_profile_dir()
+        if src.resolve() == snap.resolve():
+            raise ValueError("自动化快照目录不能作为源用户目录")
+        try:
+            copy_profile(src, snap)
+            ctx = launch_edge(pw, user_data_dir=str(snap),
+                              verbose=verbose, **kwargs)
+            return ctx, snap
+        except PWError as exc:
+            last = exc
+            cleanup_automation_profile(snap)
+            if attempt == 1 and is_profile_conflict_error(exc):
+                if verbose:
+                    print("[提示] 浏览器启动被占用，换用全新配置目录重试一次…")
+                continue
+            raise
+        except BaseException:
+            cleanup_automation_profile(snap)
+            raise
+    raise last

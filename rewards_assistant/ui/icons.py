@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 # 与 app.svg 保持一致的主色
 BRAND = "#FF8630"
@@ -157,29 +157,7 @@ def app_icon(size: int = 64) -> QIcon:
     return icon
 
 
-def badge_icon(text: str, color: str = "#2f6fed", size: int = 64) -> QIcon:
-    """用文字生成一个圆形徽标图标（用于任务分类）。"""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawEllipse(1, 1, size - 2, size - 2)
-    p.setPen(QColor("#ffffff"))
-    f = QFont("Segoe UI", int(size * 0.5), QFont.Weight.Bold)
-    p.setFont(f)
-    p.drawText(0, 0, size, size, Qt.AlignmentFlag.AlignCenter, text[:1])
-    p.end()
-    return QIcon(pm)
 
 
-CATEGORY_COLORS = {
-    "搜索": "#2f6fed",
-    "每日任务": "#12b3a8",
-    "更多活动": "#f59f00",
-}
 
 
-def category_color(category: str) -> str:
-    return CATEGORY_COLORS.get(category, "#868e96")

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
-    from zoneinfo import ZoneInfo, available_timezones
+    from zoneinfo import ZoneInfo
     _HAS_ZONEINFO = True
 except Exception:                                   # pragma: no cover
     _HAS_ZONEINFO = False
@@ -78,9 +78,6 @@ ACCEPT_LANGUAGE = {
     "en-CA": "en-CA,en;q=0.9",
 }
 
-# 中国主要城市（用于本地化查询与"当地感"）
-CN_CITIES = ("北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安",
-             "南京", "重庆", "苏州", "天津", "长沙", "郑州", "青岛", "东莞")
 
 
 @dataclass
@@ -231,7 +228,6 @@ def _system_fallback() -> GeoProfile:
         if loc.lower().startswith(k[0][:2].lower()):
             locale = k[0]
             break
-    prof = COUNTRY_PROFILE.get("CN", ("zh-CN", "zh-CN", tz))
     market = next((m for c, m, _ in COUNTRY_PROFILE.values() if c == locale), locale)
     return GeoProfile(timezone=tz, locale=locale, market=market,
                       accept_language=ACCEPT_LANGUAGE.get(locale, "zh-CN,zh;q=0.9"),
@@ -284,7 +280,7 @@ def detect(use_cache: bool = True, timeout: float = 5.0,
         detected=True, source=raw.get("source", "?"),
     )
     if verbose:
-        print(f"[信息] IP 归属：{p.city or p.region} / {p.country}（{p.ip}）"
+        print(f"[信息] IP 归属：{p.city or p.region} / {p.country}（{mask_ip(p.ip)}）"
               f" · 时区 {p.timezone} · 市场 {p.market} · 来源 {p.source}")
     return p
 
@@ -319,9 +315,18 @@ def consistency_checks(geo: GeoProfile, browser_tz: str | None = None,
     return out
 
 
+def mask_ip(value: str) -> str:
+    """日志/报告里只保留网段，不写完整公网 IP。"""
+    s = str(value or "")
+    if ":" in s:                                    # IPv6
+        return ":".join(s.split(":")[:2]) + ":*:*" if s else ""
+    parts = s.split(".")
+    return f"{parts[0]}.{parts[1]}.*.*" if len(parts) == 4 else ""
+
+
 def describe(geo: GeoProfile) -> str:
     bits = [f"{geo.city or geo.region or '未知'}/{geo.country or geo.country_code or '?'}",
             f"tz={geo.timezone}", f"locale={geo.locale}", f"mkt={geo.market}"]
     if geo.detected:
-        bits.append(f"ip={geo.ip}")
+        bits.append(f"ip={mask_ip(geo.ip)}")
     return " · ".join(bits)

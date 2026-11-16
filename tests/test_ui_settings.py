@@ -6,15 +6,13 @@ import pytest
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QPoint, QPointF, Qt, QCoreApplication
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 
 from rewards_assistant.config import Settings
 from rewards_assistant.ui.controls import (
     NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox, NoWheelTimeEdit,
 )
-from rewards_assistant.ui.main_window import SearchPanel
-from rewards_assistant.ui.panels import AccountPanel
-from rewards_assistant.ui.chart_view import ChartView
+from rewards_assistant.ui import legacy
 
 
 @pytest.fixture(scope="module")
@@ -46,60 +44,46 @@ def test_wheel_does_not_change_setting(qapp):
         assert before == after
 
 
-def test_account_autosaves_and_restores_values(qapp, settings, monkeypatch):
-    from rewards_assistant.ui import panels
-    monkeypatch.setattr(panels.autostart, "is_enabled", lambda: False)
-    class App:
-        store = object()
-        def __init__(self): self.settings = settings
-        def login(self): pass
-        def logout(self): pass
-        def sync_now(self): pass
-        def apply_settings(self): pass
-    app = App()
-    panel = AccountPanel(app)
-    panel.settings_changed.connect(settings.update)
-    panel.interval.setValue(37)
-    panel.auto_sync.setChecked(False)
-    panel.remind_time.setTime(panel._parse_time("13:47"))
-    panel.remind.setChecked(False)
-    assert Settings().get("sync_interval_value_minutes") == 37
-    assert Settings().get("remind_time_value") == "13:47"
-    restored = AccountPanel(app)
-    assert restored.interval.value() == 37
-    assert restored.remind_time.time().toString("HH:mm") == "13:47"
-
-
-def test_search_panel_autosaves(qapp, settings, monkeypatch):
-    from rewards_assistant.ui import main_window
-    monkeypatch.setattr(main_window, "find_edge_binary", lambda: None)
-    panel = SearchPanel(settings=settings, save_settings=settings.update)
+def test_search_panel_autosaves_real_settings(qapp, settings, monkeypatch):
+    """经典 SearchPanel 写 search_panel，控制器 _collect() 直接读它。"""
+    monkeypatch.setattr(legacy, "find_edge_binary", lambda: None)
+    panel = legacy.SearchPanel(settings=settings, save_settings=settings.update)
     panel.spin_repeat.setValue(23)
     panel.edt_keywords.setText("旅行, 美食")
     data = Settings().get("search_panel")
     assert data["repeat"] == 23
     assert "copy_profile" not in data
     assert data["keywords"] == "旅行, 美食"
-    other = SearchPanel(settings=settings, save_settings=settings.update)
+    other = legacy.SearchPanel(settings=settings, save_settings=settings.update)
     assert other.spin_repeat.value() == 23
     assert other.edt_keywords.text() == "旅行, 美食"
+    params = other._collect()
+    assert params["repeat"] == 23
+    assert params["keywords"] == ["旅行", "美食"]
 
 
-def test_chart_restores_view(qapp, settings):
-    class EmptyStore:
-        def all_days(self): return []
-    view = ChartView(EmptyStore(), settings=settings, save_settings=settings.update)
-    view.range_box.setCurrentIndex(view.range_box.findData(90))
-    view.metric.setCurrentIndex(view.metric.findData("streak"))
-    other = ChartView(EmptyStore(), settings=Settings(), save_settings=settings.update)
-    assert other.range_box.currentData() == 90
-    assert other.metric.currentData() == "streak"
+def test_search_runner_for_pending_uses_classic_logic(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
+    from datetime import date
+    from rewards_assistant.storage import Store
+
+    st = Store()
+    day = date.today().isoformat()
+    st.upsert_task(day, "pc_search", "今日 Bing 搜索", "搜索", 30, 12, False,
+                   False, "", "official", "", "")
+    # 经典 for_pending() 要求 daily 行存在且当日未完成；真实同步链路也是
+    # 「写任务 → refresh_day() 落汇总」这个顺序，测试构造必须一致。
+    st.refresh_day(day)
+    p = legacy.SearchRunner.for_pending(st, legacy.SearchRunner.defaults())
+    assert p is not None and p["repeat"] > 0
+    assert p["headless"] is False and p["keyword_sources"]
 
 
-def test_quick_panel_only_uses_default_browser(qapp):
-    from rewards_assistant.ui.panels import QuickPanel
-    from PySide6.QtWidgets import QComboBox, QPushButton
-    panel = QuickPanel()
+def test_quick_panel_is_the_classic_action_proxy(qapp):
+    panel = legacy.QuickPanel()
+    assert isinstance(panel.tasks_btn, QPushButton)
+    assert panel.tasks_btn.text() == "自动完成未完成任务"
     assert not panel.findChildren(QComboBox)
-    assert all("打开 Bing 搜索页" not in b.text()
-               for b in panel.findChildren(QPushButton))
+    assert panel.stop_btn.isEnabled() is False
+    panel.set_busy(True)
+    assert panel.tasks_btn.isEnabled() is False and panel.stop_btn.isEnabled() is True

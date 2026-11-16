@@ -1,7 +1,7 @@
-"""Microsoft Rewards 数据抓取与解析。
+"""把只读解析层合成的兼容 dashboard JSON 解析成统一的任务结构。
 
-数据全部来自微软自己的 dashboard 接口（rewards.bing.com 页面本身就在调用它），
-本模块只做**只读**拉取：不模拟搜索、不点击任何任务、不代用户赚分。
+本模块只做纯解析：不发起网络请求、不模拟搜索、不点击任务、不代领积分。
+页面 HTML 的读取由 ``session`` / ``auth`` 负责。
 """
 from __future__ import annotations
 
@@ -325,20 +325,5 @@ def keeps_task(task: "TaskItem") -> bool:
     return int(task.points_max) > 0 or int(task.points_earned) > 0
 
 
-STREAK_PATTERNS = (
-    r'"streakCount"\s*:\s*(\d+)',
-    r'"currentStreak"\s*:\s*(\d+)',
-    r'"streak"\s*:\s*\{\s*"[^"]+"\s*:\s*(\d+)',
-)
 
 
-def extract_streak(html: str) -> Optional[int]:
-    """尽力从 dashboard 页面里提取官方连续天数，抓不到返回 None。"""
-    for pat in STREAK_PATTERNS:
-        m = re.search(pat, html or "")
-        if m:
-            try:
-                return int(m.group(1))
-            except ValueError:
-                continue
-    return None

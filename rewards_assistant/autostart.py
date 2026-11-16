@@ -144,5 +144,3 @@ def is_enabled() -> bool:
     return _linux_desktop().exists()
 
 
-def supported() -> bool:
-    return True

@@ -1,6 +1,5 @@
 """可在没有 PySide6 的环境下执行的设置回归测试。"""
 import json
-from pathlib import Path
 
 import pytest
 

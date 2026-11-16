@@ -57,14 +57,6 @@ CONFIDENT_KEYWORDS = {
     "copilot": "Copilot", "xbox": "Xbox", "gamepass": "Xbox",
 }
 
-# promotionType 只用于极少数能确定的类型；其余不猜
-TYPE_MAP = {
-    "quiz": "趣味测验",
-    "poll": "投票",
-    "survey": "问卷",
-    "welcometour": "新手引导",
-    "punchcard": "打卡挑战",
-}
 
 # 修饰词：不抢主词位置，拼在合适的地方
 PREFIX_WORDS = {
@@ -160,19 +152,6 @@ def clean_id(raw: str, max_tokens: int = 4, drop_level: bool = False) -> str:
     return " ".join(out).strip()
 
 
-def _main_word(tokens: List[str]) -> Optional[str]:
-    """按优先级找主词。
-
-    既比对单个 token，也比对把所有 token 拼起来后的子串 ——
-    因为驼峰切分会把 'DailySet' 拆成 'daily'+'set'、'URLReward' 拆成 'url'+'reward'，
-    只按 token 比对必然漏掉。
-    """
-    joined = "".join(tokens)
-    for group, word in MAIN_WORDS:
-        for kw in group:
-            if kw in tokens or kw in joined:
-                return word
-    return None
 
 
 def humanize(raw: str, category: str = "", index: int = 0,
@@ -277,16 +256,6 @@ def _confident_word(tokens: List[str]) -> Optional[str]:
     return None
 
 
-def is_guess(name: str, raw: str = "") -> bool:
-    """这个名字是不是"没拿到官方名"的兜底结果。
-
-    判定：名字里没有中文，或者就是从原始 ID 清理来的。
-    """
-    if not name:
-        return True
-    if not _CJK_RE.search(name):
-        return True
-    return False
 
 
 def index_from_key(key: str, default: int = 0) -> int:

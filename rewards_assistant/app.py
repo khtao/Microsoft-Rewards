@@ -1,9 +1,17 @@
-"""应用控制器：托盘、调度器、同步线程与窗口生命周期。"""
+"""应用控制器：托盘、调度器、同步线程与窗口生命周期。
+
+唯一界面的控制器：``_ensure_window()`` 创建 ``ui.modern.ModernMainWindow``，
+托盘「自动完成未完成任务」与主界面主按钮都落到 ``run_pending_tasks()``，
+执行链路与 1.3.0 经典界面完全一致。
+"""
 from __future__ import annotations
 
 import sys
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .ui.modern import ModernMainWindow
 
 from PySide6.QtCore import QObject, QTimer, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -50,12 +58,19 @@ class Application(QObject):
         self._sleep_day = str(self.settings.get("sleep_until_day", "") or "")
         self._pending_sleep = False
         self.notifier: Optional[Notifier] = None
-        self.window: Optional[MainWindow] = None
+        self.window: Optional["ModernMainWindow"] = None
         self.tray: Optional[QSystemTrayIcon] = None
+        # run() 里才会设为真正的 QApplication；提前关闭窗口时 quit() 也能安全兜底。
+        self.app: Optional[QApplication] = None
         self._workers: list = []
+        # 窗口可能在调度器建好前就保存设置；先给安全默认值。
+        self._fired: set = set()
+        self._next_sync: Optional[datetime] = None
         self._last_points: Optional[int] = None
         self._last_done_notified_day = ""
         self._after_sync: set[str] = set()
+        # 整轮运行结束后无条件补一次同步；仅用此标志去重，避免连发两次。
+        self._post_run_sync_pending = False
         self._last_page_enrichment: Optional[datetime] = None
         self._sync_enrich_current = False
         self._activity_worker: Optional[ActivityWorker] = None
@@ -76,9 +91,11 @@ class Application(QObject):
     def run(self) -> int:
         app = QApplication(self.argv)
         app.setApplicationName(APP_TITLE)
-        # Wayland/X11 下用此 desktop id 将正在运行的窗口绑定到启动器/任务栏图标。
-        # 对应 /usr/share/applications/ms-rewards-assistant.desktop。
-        if sys.platform.startswith("linux"):
+        # X11 下用此 desktop id 把运行中的窗口绑定到启动器/任务栏图标。
+        # Wayland 由 compositor 按 app_id 自行注册，重复调用会让 xdg portal 报
+        # "Connection already associated with an application ID"，故跳过。
+        if (sys.platform.startswith("linux")
+                and str(app.platformName()).lower() != "wayland"):
             app.setDesktopFileName("ms-rewards-assistant")
         app.setApplicationVersion(APP_VERSION)
         app.setQuitOnLastWindowClosed(False)
@@ -120,10 +137,13 @@ class Application(QObject):
     def _ensure_window(self) -> None:
         if self.window is not None:
             return
-        from .ui.main_window import MainWindow
-        self.window = MainWindow(self)
+        # 唯一界面：截图复刻的单列窗口。它实现了 refresh_all / set_busy /
+        # quick / runner / search / account 等 MainWindow 的门面接口，
+        # 因此本控制器（含 run_pending_tasks 自动链路）逐字无需改动。
+        from .ui.modern import ModernMainWindow
+        self.window = ModernMainWindow(self)
         self.window.runner.finished.connect(
-            lambda _report: QTimer.singleShot(3000, lambda: self.sync_now(auto=True)))
+            lambda _report: self._on_auto_run_finished())
 
     def _setup_fonts(self, app) -> None:
         """打包后目标机可能没有中文字体，这里把内置字体注册上。"""
@@ -218,45 +238,73 @@ class Application(QObject):
         if hasattr(self, "_tray_retry"):
             self._tray_retry.stop()
         self.tray = QSystemTrayIcon(app_icon(), self)
-        self.tray.setToolTip(APP_TITLE)
         self.notifier.attach(self.tray)
 
         # 设定父窗口并保存引用，避免无父级 QMenu 在函数结束后被释放。
+        # 按需求只保留 4 项，且不再显示任何鼠标悬浮提示（托盘 tooltip 已移除）。
         self._tray_menu = QMenu(self.window)
         menu = self._tray_menu
-        menu.addAction("显示主窗口").triggered.connect(self.show_window)
-        menu.addSeparator()
+        menu.addAction("显示主页面").triggered.connect(self.show_window)
         self.act_tray_sync = menu.addAction("立即同步")
         self.act_tray_sync.triggered.connect(self.window.act_sync.trigger)
-        menu.addAction("刷新界面").triggered.connect(self.window.act_refresh.trigger)
-        menu.addSeparator()
-        self.act_tray_run = menu.addAction("自动完成未完成任务")
-        self.act_tray_run.triggered.connect(self.window.quick.tasks_btn.click)
-        self.act_tray_open = menu.addAction("仅打开未完成任务页（手动完成）")
-        self.act_tray_open.triggered.connect(self.open_pending_pages)
-        self.act_tray_stop = menu.addAction("停止")
-        self.act_tray_stop.triggered.connect(self.window.quick.stop_btn.click)
-        menu.addSeparator()
-        self.act_tray_sleep = menu.addAction("今日完成后休眠至明天")
-        self.act_tray_sleep.triggered.connect(self.sleep_today)
-        menu.addAction("真正退出程序").triggered.connect(self.quit)
+        self.act_tray_run = menu.addAction("自动完成任务")
+        self.act_tray_run.triggered.connect(self._on_tray_run)
+        menu.addAction("退出").triggered.connect(self.quit)
         menu.aboutToShow.connect(self.update_tray_actions)
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
-        self.update_tray_tooltip()
         self.update_tray_actions()
 
+    def auto_running(self) -> bool:
+        """自动运行期间：浏览器任务（搜索 / 活动点击 / 逐个打开）正在执行。"""
+        runner = getattr(getattr(self, "window", None), "runner", None)
+        if runner is not None and bool(runner.is_running()):
+            return True
+        activity = getattr(self, "activity_running", None)
+        if activity is not None and activity():
+            return True
+        if bool(getattr(getattr(self, "_opener", None), "running", False)):
+            return True
+        return False
+
+    def _on_tray_run(self) -> None:
+        """托盘同一入口：空闲启动、运行期停止，绝不误触发第二次运行。"""
+        if self.window is None:
+            return
+        if self.auto_running():
+            self.window.stop_running()
+        else:
+            self.window.quick.tasks_btn.click()
+
     def update_tray_actions(self) -> None:
-        """菜单可用状态与主窗口按钮一致（包括从搜索页启动的任务）。"""
+        """运行期：立即同步禁用，自动完成任务改「停止自动运行」。"""
         if self.tray is None or self.window is None:
             return
-        self.act_tray_sync.setEnabled(self.window.act_sync.isEnabled())
-        self.act_tray_run.setEnabled(self.window.quick.tasks_btn.isEnabled())
-        self.act_tray_open.setEnabled(not self._all_done() and not self._is_busy())
-        self.act_tray_stop.setEnabled(self.window.quick.stop_btn.isEnabled())
-        self.act_tray_sleep.setEnabled(self._all_done() and not self._is_busy())
+        running = self.auto_running()
+        self.act_tray_sync.setEnabled(self.window.act_sync.isEnabled() and not running)
+        self.act_tray_run.setText("停止自动运行" if running else "自动完成任务")
+        # 停止请求已发出但线程尚未收尾时禁用，防止连点；其余时刻始终可点。
+        self.act_tray_run.setEnabled(
+            not getattr(self.window, "_stopping", False)
+            and (running or self.window.act_sync.isEnabled()))
+
+    def _on_auto_run_finished(self) -> None:
+        """所有浏览器任务结束：解除同步限制并补一次同步。"""
+        self._log("自动运行已结束，解除同步限制")
+        self._request_post_run_sync()
+
+    def _request_post_run_sync(self) -> None:
+        """运行结束后统一同步一次；多处结束信号共用，去重避免连发两次。"""
+        if getattr(self, "_post_run_sync_pending", False):
+            return
+        self._post_run_sync_pending = True
+        QTimer.singleShot(2500, self._do_post_run_sync)
+
+    def _do_post_run_sync(self) -> None:
+        self._post_run_sync_pending = False
+        self.sync_now(auto=True)
 
     def _on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.DoubleClick,
@@ -277,20 +325,6 @@ class Application(QObject):
             self.window.show()
             self.window.raise_()
             self.window.activateWindow()
-
-    def update_tray_tooltip(self) -> None:
-        if self.tray is None:
-            return
-        row = self.store.daily(day_str())
-        if row is None:
-            self.tray.setToolTip(f"{APP_TITLE}\n今天还没有记录")
-            return
-        from .points import points_display
-        today_text = points_display(row["points_source"], int(row["points_earned"]))
-        self.tray.setToolTip(
-            f"{APP_TITLE}\n{today_text}"
-            f" · 任务 {row['tasks_done']}/{row['tasks_total']} · 连续 {row['streak']} 天"
-        )
 
     # ------------------------------------------------------------------ 调度
 
@@ -325,7 +359,6 @@ class Application(QObject):
             self._fired.clear()
             self._remember_run_day(now)
             self.window.refresh_all()
-            self.update_tray_tooltip()
             self.notifier.notify(APP_TITLE, "新的一天，今日任务已重置，加油 💪")
 
         # 自动同步
@@ -371,6 +404,9 @@ class Application(QObject):
 
     def open_pending_pages(self) -> None:
         """手动逐个打开未完成任务页；不再与定时自动运行重复调度。"""
+        if self.auto_running():
+            self._log("自动运行正在执行，忽略打开任务页请求")
+            return
         if self._all_done():
             self._log("任务已全部完成，无需再打开任务页")
             return
@@ -391,8 +427,10 @@ class Application(QObject):
             return
         if self.window is None:
             return
-        if self.window.runner.is_running() or self.activity_running():
-            self._log("已有电脑端搜索或活动点击任务在执行，跳过重复启动")
+        # 运行期一律忽略新的启动意图，且不排队 _after_sync —— 否则定时时间点
+        # 会在本轮结束后又拉起一轮，属于典型的误操作放大。
+        if self.auto_running():
+            self._log("自动运行正在执行，忽略本次启动请求")
             return
         # 同步期间不丢弃启动意图；同步成功后再次核对完成状态。
         self._after_sync.add("run")
@@ -419,7 +457,7 @@ class Application(QObject):
         return self._activity_worker is not None and self._activity_worker.isRunning()
 
     def _start_activity_clicks(self, tasks: list, *, then_search: bool = False) -> None:
-        """使用真实 Edge 鼠标点击侧栏卡片；搜索等活动核验、同步后再运行。"""
+        """使用真实 Edge 鼠标点击侧栏卡片；整轮结束后统一同步核验。"""
         if self.activity_running() or self.window.runner.is_running():
             self._log("活动点击或电脑端搜索正在执行，不重复启动")
             return
@@ -455,8 +493,8 @@ class Application(QObject):
 
     def _on_activity_completed(self, stats: dict) -> None:
         self._log(f"Rewards 活动点击结束：点击 {stats['clicked']}/{stats['total']}，"
-                  f"官方确认 {stats['verified']}；未确认 {len(stats['unconfirmed'])}，"
-                  f"未找到 {len(stats['missing'])}")
+                  f"操作失败 {len(stats['unconfirmed'])}，未找到 {len(stats['missing'])}；"
+                  f"状态将在运行结束后统一同步核验")
         if stats.get("error"):
             self._log("活动点击错误：" + stats["error"])
         if stats.get("stopped"):
@@ -464,12 +502,12 @@ class Application(QObject):
             self._set_open_progress("已停止活动自动点击")
         else:
             self._set_open_progress(
-                f"活动点击 {stats['clicked']}/{stats['total']}；官方确认 "
-                f"{stats['verified']}。正在同步核对最终状态…")
+                f"活动点击 {stats['clicked']}/{stats['total']}；"
+                f"运行结束后统一同步核验")
             if self._activity_then_search:
-                self._after_sync.add("search")
-            self._activity_then_search = False
-            self.sync_now(auto=True)
+                # 不再插一次同步：直接续跑电脑端搜索，整轮结束才同步。
+                self._activity_then_search = False
+                self._start_pc_search()
         self.window.update_running_state()
 
     def _on_activity_worker_exited(self, worker) -> None:
@@ -539,6 +577,12 @@ class Application(QObject):
             if not auto:
                 self._toast("同步正在进行中，请稍候…")
             return
+        # 自动运行期间禁止同步：手动入口给明确提示，定时/后台入口静默跳过，
+        # 等本轮运行结束后由 _request_post_run_sync() 统一补一次。
+        if self.auto_running():
+            if not auto:
+                self._toast("自动运行期间禁止同步，结束后会自动同步一次")
+            return
         self._syncing = True
         self.window.set_busy(True, "正在同步 Rewards 数据…")
         # 仅活动标题和连续天数每 45 分钟按需补充页面信息；
@@ -566,7 +610,6 @@ class Application(QObject):
         snap = payload["snapshot"]
         self.window.set_busy(False)
         self.window.refresh_all()
-        self.update_tray_tooltip()
 
         earned = int(summary.get("points_earned") or 0)
         from .points import points_display
@@ -577,6 +620,10 @@ class Application(QObject):
         if snap.balance_valid:
             text += f" · 账户可用 {available:,}"
         self._log(text)
+        # 页面「可领取」只提醒、不代领；降级 / 结构变化提示如实展示
+        extra = payload.get("message") or ""
+        if extra and extra != "同步完成（只读，进度以官网为准）":
+            self._log(extra)
 
         if self.settings.get("notify_after_sync", True):
             if summary.get("all_done"):
@@ -637,7 +684,7 @@ class Application(QObject):
         dlg = LoginDialog(self.window)
 
         def on_login_changed(ok):
-            # 用户更换 Cookie 后，下次同步应允许重新读取页面标题。
+            # 会话更新后，下次同步应重新完整读取两页。
             if ok:
                 self._last_page_enrichment = None
             self.set_login_status("已登录，可直接同步" if ok else "未登录", ok)
@@ -648,7 +695,9 @@ class Application(QObject):
     def logout(self) -> None:
         ret = QMessageBox.question(
             self.window, "退出登录",
-            "将清除本机保存的微软会话 Cookie。\n历史记录与统计数据不受影响。",
+            "将清除本应用独立浏览器配置中的登录会话（Cookie 与本地存储），"
+            "并删除旧版明文 Cookie 文件。\n"
+            "不会改动你日常使用的 Edge 配置，历史记录与统计数据不受影响。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -848,6 +897,8 @@ class Application(QObject):
 
     def quit(self) -> None:
         """等待正在运行的线程完成，避免退出时销毁运行中的 QThread。"""
+        if self.auto_running():
+            self._log("退出前先停止自动运行，等待线程安全收尾…")
         self._opener.stop()
         if self.activity_running():
             self._activity_worker.request_stop()
@@ -861,7 +912,9 @@ class Application(QObject):
             return
         if self.tray is not None:
             self.tray.hide()
-        self.app.quit()
+        app = self.app or QApplication.instance()
+        if app is not None:
+            app.quit()
 
 
 def main(argv: Optional[list] = None) -> int:

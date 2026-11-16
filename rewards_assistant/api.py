@@ -23,16 +23,10 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-try:                                   # 作为包导入
-    from .engines import ENGINES, resolve_engine, run_search, home_url
-    from .human import Budget, Human
-    from .trends import Keyword, get_keyword_pool
-    from .config import data_dir
-except ImportError:                     # 直接把目录加入 sys.path 后导入
-    from engines import ENGINES, resolve_engine, run_search, home_url
-    from human import Budget, Human
-    from trends import Keyword, get_keyword_pool
-    from config import data_dir
+from .engines import ENGINES, resolve_engine, run_search
+from .human import Budget, Human
+from .trends import Keyword, get_keyword_pool
+from .config import data_dir
 
 # 不在启动目录写日志；系统登录后自启动时 CWD 常常不可写。
 DEFAULT_LOG = str(data_dir() / "search_actions.jsonl")
@@ -154,7 +148,7 @@ def fetch_keywords(sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "sina"
 # ------------------------------------------------------------------ 主接口
 def run_human_search(
         *,
-        repeat: int = 5,
+        repeat: int = 12,
         keywords: list | None = None,
         keyword_sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "sina"),
         keyword_limit: int = 40,
@@ -172,7 +166,7 @@ def run_human_search(
         scroll_screens: float = 1.2,
         on_captcha: str = "wait",
         user_data_dir: str | None = None,
-        copy_profile: bool = False,
+        copy_profile: bool = False,   # 兼容旧设置键；自动化始终使用唯一快照
         edge_path: str | None = None,
         headless: bool = False,
         window_size: str | None = None,
@@ -253,43 +247,32 @@ def run_human_search(
         report.geo = getattr(geo, "to_dict", lambda: {})()
         logger("geo", _describe_geo(geo))
         if verbose:
-            from entropy import Circadian
+            from .entropy import Circadian
             circ = Circadian(geo.tz_offset_hours)
             print(f"[信息] 当地作息：{circ.describe()}")
 
     # ---- 浏览器：用外部的，或自己启动
     own_context = False
     pw = None  # Playwright 驱动也必须退出；只关闭 Edge context 可能残留子进程。
+    automation_snapshot = None
     ctx = context
     if ctx is None and page is not None:
         ctx = page.context
     if ctx is None:
-        from .browser import (copy_profile as _copy, default_profile_dir, edge_is_running,
-                             launch_edge, find_edge_binary, profile_locked)
+        from .browser import (cleanup_automation_profile, find_edge_binary,
+                              launch_automation_edge)
         from playwright.sync_api import sync_playwright
 
-        profile = Path(user_data_dir).expanduser() if user_data_dir else default_profile_dir()
-        if not profile.exists():
-            raise FileNotFoundError(
-                f"用户数据目录不存在：{profile}。用 --user-data-dir 指定，"
-                f"或在 Edge 里打开 chrome://version 查看『配置文件路径』的上一层")
-        if not copy_profile and (edge_is_running() or profile_locked(profile)):
-            if verbose:
-                print("[提示] Edge 正在运行 / profile 被锁，自动改用 profile 快照")
-            copy_profile = True
-        if copy_profile:
-            snapshot = Path.home() / ".cache/human_search_edge_profile"
-            if verbose:
-                print(f"[提示] 复制 profile -> {snapshot}")
-            profile = _copy(profile, snapshot)
-
+        # 每次运行一份全新的唯一快照：不与日常 Edge、登录 profile、以及上一轮
+        # 残留的 Edge 进程共用目录；启动若因目录占用退出，内部自动换目录重试。
         pw = sync_playwright().start()
         try:
-            ctx = launch_edge(pw, user_data_dir=profile, headless=headless,
-                              window_size=window_size, proxy=proxy,
-                              edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
-                              sandbox=sandbox, flag_warning=flag_warning,
-                              policy_dir=policy_dir, verbose=verbose, geo=geo)
+            ctx, automation_snapshot = launch_automation_edge(
+                pw, user_data_dir=user_data_dir,
+                headless=headless, window_size=window_size, proxy=proxy,
+                edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
+                sandbox=sandbox, flag_warning=flag_warning,
+                policy_dir=policy_dir, verbose=verbose, geo=geo)
         except BaseException:
             # 浏览器启动失败时尚未进入主运行循环，也必须释放驱动。
             try:
@@ -298,7 +281,7 @@ def run_human_search(
                 logger.close()
             raise
         own_context = True
-        logger("browser", f"Edge 启动 user_data_dir={profile} headless={headless}")
+        logger("browser", f"Edge 启动完成 headless={headless}（独立快照）")
     else:
         logger("browser", "复用外部传入的 Playwright context/page")
 
@@ -326,15 +309,13 @@ def run_human_search(
         rewriter = None
         if rewrite_queries:
             try:
-                from .queries import QueryBuilder, SessionChain, quality as _q
+                from .queries import QueryBuilder, SessionChain
                 qb = QueryBuilder(geo, rng)
                 chain = SessionChain(qb, rng) if session_chain else None
                 if chain is not None:
-                    def rewriter(text, _c=chain):
-                        return _c.next(text)[0]
+                    rewriter = lambda text, _c=chain: _c.next(text)[0]
                 else:
-                    def rewriter(text, _b=qb):
-                        return _b.build(text)
+                    rewriter = lambda text, _b=qb: _b.build(text)
                 logger("queries", f"查询改写开启（会话链={'开' if session_chain else '关'}）")
             except Exception as _e:
                 logger("warn", f"查询改写不可用：{_e}")
@@ -458,6 +439,9 @@ def run_human_search(
                         pw.stop()
                     except Exception:
                         pass
+                # 进程已退出后再删快照；删不掉留给下次 prune，不影响本次运行。
+                if automation_snapshot is not None:
+                    cleanup_automation_profile(automation_snapshot)
         logger.close()
         report.log_path = str(Path(log_file).resolve()) if log_file else ""
         try:

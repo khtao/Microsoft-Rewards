@@ -10,37 +10,24 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
 from copy import deepcopy
 import re
-from typing import Literal, Optional, Union
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分活动管理助手"
 APP_VERSION = "1.3.0"
 
-REWARDS_HOME = "https://rewards.bing.com/"
+# search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 5 项参数。
+# round_seconds / gap_seconds 是 [min, max] 区间，随 JSON 存为 list。
+SEARCH_PANEL_KEYS = (
+    "repeat", "level", "keywords", "keyword_sources",
+    "round_seconds", "max_round_seconds", "gap_seconds",
+    "enter_rate", "click_prob", "scroll_screens",
+)
+
 REWARDS_DASHBOARD = "https://rewards.bing.com/"
-# 两个任务页面：dashboard = 每日活动，earn = 日常任务（真实显示名从这里抓）
-REWARDS_DASHBOARD_URL = "https://rewards.bing.com/dashboard"
-REWARDS_EARN_URL = "https://rewards.bing.com/earn"
-# 微软官方 dashboard 数据接口（页面本身也在调用它）
-USER_INFO_API = "https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest"
-
-
-@dataclass
-class BrowserConfig:
-    user_data_dir: str | None = None
-    copy_profile: bool = False
-    edge_path: str | None = None
-    headless: bool = False
-    window_size: str | None = None
-    proxy: str | None = None
-    slow_mo: int = 0
-    keep_browser: bool = True  # 任务之间复用同一个 Edge 实例
-    idle_close: float = 300.0  # 空闲多少秒后关闭浏览器
-    sandbox: Optional[Union[Literal["on"], Literal["off"]]] = None  # None=自动（非 root 开沙箱）
-    policy_dir: str | None = None  # 写 Edge 管理策略用，抑制 --no-sandbox 警告横幅
+SYNC_MIN_INTERVAL_SEC = 900        # 自动同步的最短间隔，避免频繁打扰服务端
+LOGIN_WINDOW_SECONDS = 300         # 「打开浏览器登录」窗口保持时长
 
 
 def data_dir() -> Path:
@@ -108,49 +95,6 @@ DEFAULT_SETTINGS = {
 }
 
 
-@dataclass
-class SearchConfig:
-    """单次搜索的行为参数。"""
-    engine: Literal["bing"] = "bing"  # 只测 Bing
-    level: int = 3  # 拟人强度 1~3
-    enter_rate: float = 0.5  # 回车提交占比
-    click_prob: float = 0.35  # 点击结果概率
-    scroll_screens: float = 1.2  # 结果页滚动屏数
-    no_back: bool = False  # 点击结果后不返回
-    on_captcha: Literal["wait", "skip", "abort"] = "wait"
-
-
-@dataclass
-class TaskConfig:
-    """一次任务（可含多轮）。"""
-    repeat: int = 30  # 重复轮数
-    round_seconds_min: float = 15.0  # 单轮耗时下限（秒）
-    round_seconds_max: float = 30.0  # 单轮耗时上限（秒）
-    gap_min: float = 2.0  # 轮间最小间隔
-    gap_max: float = 8.0  # 轮间最大间隔
-    source: Literal["hot", "news", "mixed", "custom"] = "mixed"
-    keywords: list = field(default_factory=list)  # source=custom 时必填
-    hot_ttl: float = 900.0  # 热词缓存秒数
-    refresh_hotwords: bool = False  # 强制实时重抓
-    seed: int | None = None
-    search: SearchConfig = field(default_factory=SearchConfig)
-    browser: BrowserConfig = field(default_factory=BrowserConfig)
-
-    def validate(self):
-        if self.repeat < 1:
-            raise ValueError("repeat 必须 >= 1")
-        if not (3 <= self.round_seconds_min <= self.round_seconds_max <= 600):
-            raise ValueError("单轮耗时区间非法：需满足 3 <= min <= max <= 600")
-        if self.source == "custom" and not self.keywords:
-            raise ValueError("source=custom 时必须提供 keywords")
-        if self.gap_min > self.gap_max:
-            self.gap_min, self.gap_max = self.gap_max, self.gap_min
-        return self
-
-    def to_dict(self):
-        return asdict(self)
-
-
 _TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
@@ -186,9 +130,10 @@ class Settings:
                         loaded.pop(obsolete, None)
                     if isinstance(loaded.get("search_panel"), dict):
                         # 老版本高级选项已取消，不再默默影响浏览器行为。
-                        allowed = ("repeat", "level", "keywords", "keyword_sources")
-                        loaded["search_panel"] = {k: v for k, v in loaded["search_panel"].items()
-                                                  if k in allowed}
+                        # 拟人强度档位的 5 项参数随 search_panel 一起持久化。
+                        loaded["search_panel"] = {
+                            k: v for k, v in loaded["search_panel"].items()
+                            if k in SEARCH_PANEL_KEYS}
                     # 从旧版“到点自动运行”开关迁移，保留原有时间。
                     if "auto_run_times" not in loaded:
                         old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
@@ -242,9 +187,9 @@ class Settings:
                          "auto_open_time", "auto_open_time_value"):
             changes.pop(obsolete, None)
         if isinstance(changes.get("search_panel"), dict):
-            allowed = ("repeat", "level", "keywords", "keyword_sources")
-            changes["search_panel"] = {k: v for k, v in changes["search_panel"].items()
-                                       if k in allowed}
+            changes["search_panel"] = {
+                k: v for k, v in changes["search_panel"].items()
+                if k in SEARCH_PANEL_KEYS}
         changed = {k: v for k, v in changes.items()
                    if k not in self._data or self._data[k] != v}
         if not changed:

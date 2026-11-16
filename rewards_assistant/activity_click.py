@@ -170,14 +170,3 @@ def click_activity(page, task, *, rng=None) -> bool:
     page.mouse.up()
     return True
 
-
-def confirmed_completed(original, current) -> bool:
-    """严格按官方 offerId / 当日任务 key 对照，不把“点击成功”等同完成。"""
-    old_id = str(getattr(original, "offer_id", "") or "")
-    for task in getattr(current, "tasks", ()):
-        if old_id and old_id == str(getattr(task, "offer_id", "") or ""):
-            return bool(task.complete or (task.points_max > 0 and task.points_earned >= task.points_max))
-        # API 老版本没有 offerId 时，索引与原始活动名称必须一起匹配。
-        if not old_id and task.key == original.key and task.raw_name == original.raw_name:
-            return bool(task.complete or (task.points_max > 0 and task.points_earned >= task.points_max))
-    return False

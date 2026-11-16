@@ -221,19 +221,5 @@ def checks(fp: dict) -> list:
     return out
 
 
-def summarize(fp: dict) -> str:
-    s = fp.get("screen", {})
-    w = fp.get("window", {})
-    wgl = fp.get("webgl", {})
-    return (f"{s.get('w')}x{s.get('h')}@{w.get('dpr')} · 视口 {w.get('innerW')}x{w.get('innerH')} · "
-            f"{fp.get('hardwareConcurrency')}核 · {fp.get('timezone')} · "
-            f"{(wgl.get('renderer') or 'no-webgl')[:28]}")
 
 
-def risk_score(checks_result: list) -> tuple:
-    """根据校验结果给一个 0~100 的风险分（越高越可疑）。"""
-    if not checks_result:
-        return 100, ["无校验结果"]
-    failed = [c for c in checks_result if not c[2]]
-    score = int(round(100.0 * len(failed) / len(checks_result)))
-    return score, [f"{c[0]}：{c[1]}" for c in failed]

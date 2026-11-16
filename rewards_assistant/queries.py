@@ -243,8 +243,3 @@ def quality(queries: list) -> dict:
     }
 
 
-def describe_quality(q: dict) -> str:
-    if not q.get("n"):
-        return "无查询"
-    return (f"{q['n']} 条 · 均长 {q['avg_len']} 字 · 去重率 {q['unique_rate']} · "
-            f"长尾 {q['long_tail_rate']} · 提问式 {q['question_rate']}")

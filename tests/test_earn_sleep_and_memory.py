@@ -223,16 +223,27 @@ def test_suspended_tick_wakes_after_next_calendar_day():
 
 def test_memory_safe_ui_and_menu_contract_static():
     method, source = _get_method("_build_tray")
-    assert "今日完成后休眠至明天" in source
+    # 只按 AST 取 _build_tray 里 addAction 的菜单标签（整文件源码含注释里的
+    # 「刷新界面」等词，不能用全文子串判断）。
+    labels = [n.args[0].value for n in ast.walk(method)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr == "addAction" and n.args
+              and isinstance(n.args[0], ast.Constant)
+              and isinstance(n.args[0].value, str)]
+    assert sorted(labels) == sorted(["显示主页面", "立即同步", "自动完成任务", "退出"])
+    for gone in ("今日完成后休眠至明天", "仅打开未完成任务页", "刷新界面",
+                 "真正退出程序", "停止"):
+        assert gone not in labels, gone
     assert "登录微软账号\").triggered.connect" not in source
     assert "self._sleep_day = today" in source
     assert "window.deleteLater()" in source
-    ui = (Path(__file__).parents[1] / "rewards_assistant" / "ui" / "main_window.py").read_text("utf8")
+    ui = (Path(__file__).parents[1] / "rewards_assistant" / "ui" / "legacy.py").read_text("utf8")
     assert "setMaximumBlockCount(350)" in ui
-    assert "_refresh_active_detail" in ui
+    assert "class SearchRunner" in ui
     assert "bar.addAction(act_login)" not in ui
     assert "self.chk_headless" not in ui
     assert "self.chk_copy" not in ui
+    assert not (Path(__file__).parents[1] / "rewards_assistant" / "ui" / "main_window.py").exists()
 
 
 def test_browser_cleanup_on_normal_run_and_launch_failure_source_contract():
@@ -251,10 +262,12 @@ def test_task_remaining_does_not_subtract_daily_net_from_task_limit():
 
 
 def test_chart_handles_negative_balance_delta_static():
-    source = (Path(__file__).parents[1] / 'rewards_assistant' / 'ui' / 'chart_view.py').read_text('utf8')
-    assert 'self._plot_min = -self._nice_max(abs(low)) if low < 0 else 0.0' in source
-    assert 'max(1.0, abs(zero_y - y))' in source
-    assert 'points_source"] == "earn"' not in source
+    """经典 ChartView 已随旧界面删除；负净变化仍由 points.py 如实显示。"""
+    from rewards_assistant.points import points_display, BALANCE_DELTA
+    root = Path(__file__).parents[1] / "rewards_assistant"
+    assert not (root / "ui" / "chart_view.py").exists()
+    assert "-20" in points_display(BALANCE_DELTA, -20)
+    assert "无昨日余额" in points_display("task_fallback", 10)
 
 
 def test_sqlite_thread_connection_can_be_closed_and_reopened(tmp_path):
@@ -288,8 +301,9 @@ def test_source_labels_for_chart_and_history_are_consistent():
 def test_single_schedule_and_manual_open_entry_not_duplicated():
     root = Path(__file__).parents[1] / "rewards_assistant"
     app = (root / "app.py").read_text(encoding="utf8")
-    panel = (root / "ui" / "panels.py").read_text(encoding="utf8")
+    legacy = (root / "ui" / "legacy.py").read_text(encoding="utf8")
     assert 'self.settings.get("auto_open_time")' not in app
-    assert 'self.auto_open_time' not in panel
-    assert '"仅打开未完成任务页（手动完成）"' in app
+    assert 'self.auto_open_time' not in legacy
+    # 托盘已精简为 4 项，手动打开入口不再有重复菜单项
+    assert '"仅打开未完成任务页（手动完成）"' not in app
     assert 'self._after_sync.add("open")' in app

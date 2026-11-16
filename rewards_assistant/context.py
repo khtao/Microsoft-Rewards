@@ -96,30 +96,8 @@ def apply(ctx, rctx: RequestContext, verbose: bool = False) -> bool:
 
 # ------------------------------------------------------------------ 请求审计
 
-AUDIT_JS_INSTALL = """
-() => {
-  window.__hsReq = [];
-  const po = window.performance && window.performance.getEntriesByType;
-  return !!po;
-}
-"""
 
 
-def audit_navigation(page) -> list:
-    """取回本次导航相关的性能条目，用于检查来路链是否自然。"""
-    try:
-        return page.evaluate("""() => {
-          const es = (performance.getEntriesByType('navigation') || []);
-          return es.map(e => ({
-            name: e.name, type: e.type,
-            redirectCount: e.redirectCount,
-            startTime: Math.round(e.startTime),
-            duration: Math.round(e.duration),
-            transferSize: e.transferSize || 0
-          }));
-        }""") or []
-    except Exception:
-        return []
 
 
 def check_request_coherence(samples: list, geo, checks: list | None = None) -> list:

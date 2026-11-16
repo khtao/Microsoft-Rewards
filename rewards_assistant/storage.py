@@ -11,12 +11,12 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from .config import db_path
 from .task_labels import humanize_task
 from .pending import all_reward_tasks_done
-from .points import calculate_daily_points, BALANCE_DELTA, TASK_FALLBACK
+from .points import calculate_daily_points, TASK_FALLBACK, ALL_SOURCES
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily (
@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS daily (
     available_synced_at TEXT,       -- 仅 API 真正返回余额时记录，0 也有效
     baseline_points INTEGER,       -- 差值所使用的昨日账户余额
     points_source TEXT NOT NULL DEFAULT 'task_fallback',
+    -- 页面「今日积分 / 可领取」真值；NULL 表示本次没读到，绝不写 0
+    today_points INTEGER,
+    claimable_points INTEGER,
+    page_points_synced_at TEXT,
     all_done         INTEGER NOT NULL DEFAULT 0,
     synced_at        TEXT
 );
@@ -98,6 +102,12 @@ class Store:
                              "WHERE available_points>0 AND synced_at IS NOT NULL")
             if "baseline_points" not in cols:
                 conn.execute("ALTER TABLE daily ADD COLUMN baseline_points INTEGER")
+            # 只读同步新增：三项积分里「今日 / 可领取」的真值列
+            for col, decl in (("today_points", "INTEGER"),
+                              ("claimable_points", "INTEGER"),
+                              ("page_points_synced_at", "TEXT")):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE daily ADD COLUMN {col} {decl}")
             tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "link" not in tcols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN link TEXT NOT NULL DEFAULT ''")
@@ -120,9 +130,10 @@ class Store:
     def _migrate_legacy_points(self) -> None:
         """一次性迁移旧版 Earn/估算记录到统一的日差或任务回退规则。"""
         with self._connect() as conn:
+            marks = ",".join("?" for _ in ALL_SOURCES)
             legacy = conn.execute(
-                "SELECT 1 FROM daily WHERE points_source NOT IN (?,?) LIMIT 1",
-                (BALANCE_DELTA, TASK_FALLBACK),
+                f"SELECT 1 FROM daily WHERE points_source NOT IN ({marks}) LIMIT 1",
+                ALL_SOURCES,
             ).fetchone()
             if legacy is None:
                 return
@@ -288,7 +299,9 @@ class Store:
         with self._connect() as conn:
             rows = list(conn.execute("SELECT * FROM tasks WHERE day=?", (day,)))
             current = conn.execute(
-                "SELECT available_points, available_synced_at, level FROM daily WHERE day=?",
+                "SELECT available_points, available_synced_at, level, "
+                "today_points, claimable_points, page_points_synced_at "
+                "FROM daily WHERE day=?",
                 (day,),
             ).fetchone()
             previous = conn.execute(
@@ -307,8 +320,12 @@ class Store:
         yesterday_balance = (int(previous["available_points"])
                              if previous is not None and previous["available_synced_at"] is not None
                              else None)
+        # 页面上真正显示的「今日积分」优先；读不到才退回余额日差 / 任务合计
+        page_today = (int(current["today_points"])
+                      if current is not None and current["today_points"] is not None
+                      else None)
         earned, source, baseline = calculate_daily_points(
-            today_balance, yesterday_balance, task_earned)
+            today_balance, yesterday_balance, task_earned, page_today)
         done = sum(1 for r in rows if r["complete"])
         return {
             "day": day,
@@ -316,6 +333,12 @@ class Store:
             "points_source": source,
             "baseline_points": baseline,
             "available_synced_at": (current["available_synced_at"] if current else None),
+            # 原样带回，避免 refresh_day / save_daily 把已读到的真值抹成 NULL
+            "today_points": page_today,
+            "claimable_points": (int(current["claimable_points"])
+                                 if current is not None and current["claimable_points"] is not None
+                                 else None),
+            "page_points_synced_at": (current["page_points_synced_at"] if current else None),
             "points_max": int(totals["m"] or 0),
             "tasks_done": done,
             "tasks_total": len(rows),
@@ -333,11 +356,16 @@ class Store:
                 """
                 INSERT INTO daily (day, points_earned, points_max, tasks_done, tasks_total,
                                    available_points, level, streak, all_done, synced_at,
-                                   available_synced_at, baseline_points, points_source)
+                                   available_synced_at, baseline_points, points_source,
+                                   today_points, claimable_points, page_points_synced_at)
                 VALUES (:day,:points_earned,:points_max,:tasks_done,:tasks_total,
                         :available_points,:level,:streak,:all_done,:synced_at,
-                        :available_synced_at,:baseline_points,:points_source)
+                        :available_synced_at,:baseline_points,:points_source,
+                        :today_points,:claimable_points,:page_points_synced_at)
                 ON CONFLICT(day) DO UPDATE SET
+                    today_points=excluded.today_points,
+                    claimable_points=excluded.claimable_points,
+                    page_points_synced_at=excluded.page_points_synced_at,
                     points_earned=excluded.points_earned,
                     points_max=excluded.points_max,
                     baseline_points=excluded.baseline_points,
@@ -547,6 +575,46 @@ class Store:
                 "available_synced_at=excluded.available_synced_at",
                 (day, int(available_points), int(level), now),
             )
+
+    # ------------------------------------------------------ 页面三项积分快照
+
+    def save_page_points(self, day: str, points: dict) -> bool:
+        """只写本次真正读到的「今日 / 可领取」；读不到的列保留上次值，不写 0。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        updates = {}
+        for col, key in (("today_points", "today"), ("claimable_points", "claimable")):
+            value = (points or {}).get(key)
+            if value is None or isinstance(value, bool) or int(value) < 0:
+                continue
+            updates[col] = int(value)
+        if not updates:
+            return False
+        updates["page_points_synced_at"] = now
+        cols = ", ".join(("day", *updates.keys()))
+        marks = ", ".join("?" for _ in range(len(updates) + 1))
+        assigns = ", ".join(f"{k}=excluded.{k}" for k in updates)
+        with self.tx() as conn:
+            conn.execute(
+                f"INSERT INTO daily ({cols}) VALUES ({marks}) "
+                f"ON CONFLICT(day) DO UPDATE SET {assigns}",
+                (day, *updates.values()),
+            )
+        return True
+
+    def page_points(self, day: str) -> dict:
+        """供 UI 显示三项积分；None 一律显示「--」，绝不显示假的 0。"""
+        row = self.daily(day)
+        if row is None:
+            return {"available": None, "today": None, "claimable": None}
+        available = (int(row["available_points"])
+                     if row["available_synced_at"] is not None else None)
+        return {
+            "available": available,
+            "today": (int(row["today_points"])
+                      if row["today_points"] is not None else None),
+            "claimable": (int(row["claimable_points"])
+                          if row["claimable_points"] is not None else None),
+        }
 
 
 def day_str(d: Optional[date] = None) -> str:

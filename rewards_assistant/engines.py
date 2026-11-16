@@ -47,8 +47,6 @@ ENGINES = {
     ),
 }
 
-# 允许使用的搜索引擎（单一引擎，保留元组形式便于后续扩展）
-ENGINE_CHOICES = ("bing",)
 DEFAULT_ENGINE = "bing"
 
 

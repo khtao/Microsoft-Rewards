@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -144,11 +143,3 @@ def bootstrap() -> dict:
     return info
 
 
-def warn_if_missing(logger) -> None:
-    """字体确实没找到时给一条明确提示，方便排查方块字。"""
-    info = bootstrap()
-    if not info["qt_family"]:
-        logger("⚠ 未找到中文字体，界面可能出现方块字；"
-               f"请将一个 .ttf/.otf 中文字体放到 {bundled_font_dir() or '程序目录下 fonts/'}")
-    elif info["frozen"] and info["bundle_fonts"]:
-        logger(f"已加载内置字体 {info['bundle_fonts']} 个")

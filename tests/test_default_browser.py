@@ -59,7 +59,7 @@ def test_removed_standalone_and_search_page_entrypoints():
     assert not (root / "run.py").exists()
     assert not (root / "rewards_assistant/get_rewards.py").exists()
     assert not (root / "rewards_assistant/chengyu.txt").exists()
-    for fname in ("rewards_assistant/app.py", "rewards_assistant/ui/panels.py"):
+    for fname in ("rewards_assistant/app.py", "rewards_assistant/ui/legacy.py"):
         source = (root / fname).read_text(encoding="utf-8")
         assert "open_bing" not in source
         assert "打开 Bing 搜索页" not in source

@@ -1,16 +1,61 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller 打包配置（路径全部相对 spec 所在目录，便于在任何机器上构建）。
+
+界面只有一种：Qt Widgets 的 ui/modern 单列窗口。
+不需要 QWebEngineView / HTML 资源 / desktop-bridge.js。
+经典自动完成链路（ActivityWorker / SearchRunner / api.run_human_search）
+保持在包内，由 app.Application 驱动，主按钮与托盘共用 run_pending_tasks()。
+"""
+import os
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('/home/khtao/下载/Rewards_v130/MSRewardsAssistant_v1.3.0/assets/icons', 'assets/icons')]
+ROOT = Path(globals().get('SPECPATH', os.getcwd())).resolve()
+
+datas = []
 binaries = []
 hiddenimports = []
-tmp_ret = collect_all('playwright')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Windows 资源管理器 / 任务栏显示的是 EXE 内嵌图标，不是运行时的
+# QApplication.setWindowIcon()。不传 icon= 时 PyInstaller 会用默认空白图标，
+# 这正是「只有运行时窗口有图标、exe 本身没图标」的原因。Linux 忽略此参数。
+APP_ICO = ROOT / 'assets' / 'icons' / 'app.ico'
+EXE_ICON = str(APP_ICO) if (os.name == 'nt' and APP_ICO.is_file()) else None
+
+icons = ROOT / 'assets' / 'icons'
+if icons.is_dir():
+    datas.append((str(icons), 'assets/icons'))
+
+# 可选字体目录：存在则随包携带，不存在就直接用系统中文字体。
+# 不打包 search_actions.jsonl —— 那是 ActionLogger 写到用户数据目录的运行时
+# 日志（api.DEFAULT_LOG = data_dir()/'search_actions.jsonl'），包内无人读取；
+# 仓库里那份历史样本还含真实 IP / 会话 ID，打包进 .deb 会泄露个人信息。
+fonts = ROOT / 'fonts'
+if fonts.is_dir():
+    datas.append((str(fonts), 'fonts'))
+
+# Playwright 的驱动（node + driver）必须整体携带。
+# PySide6 交给 PyInstaller 自带的 hook-PySide6.QtXxx：它按实际 import 图
+# 收集 Qt 共享库与 plugins/platforms（xcb 等），只带 QtWidgets / QtGui /
+# QtCore / QtSvg / QtNetwork。不要用 collect_all('PySide6') —— 元包会连带
+# 安装 QtWebEngine / Qt3D / QtMultimedia 等扩展（约 400MB），全量收集会让
+# .deb 无谓膨胀，且与本版本「不需要 QtWebEngine」的设计冲突。
+d, b, h = collect_all('playwright')
+datas += d
+binaries += b
+hiddenimports += h
+hiddenimports += [
+    'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore',
+    'PySide6.QtSvg', 'PySide6.QtNetwork',
+    'rewards_assistant.ui.modern.main_window',
+    'rewards_assistant.ui.modern.effects',
+    'rewards_assistant.ui.legacy',
+]
 
 a = Analysis(
     ['rewards_assistant/__main__.py'],
-    pathex=['/home/khtao/下载/Rewards_v130/MSRewardsAssistant_v1.3.0'],
+    pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -29,10 +74,11 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='MSRewardsAssistant',
+    icon=EXE_ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -45,7 +91,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='MSRewardsAssistant',
 )

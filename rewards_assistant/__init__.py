@@ -1,10 +1,11 @@
-"""Microsoft Rewards 每日助手 —— 只读统计 + 手动打卡的桌面小工具。
+"""Microsoft Rewards 桌面助手（社区独立、非官方项目）。
 
-分层说明
---------
-config / auth / rewards_client / storage : 数据与网络层（不依赖 Qt）
-notifier / scheduler / autostart / sync  : 桌面集成层（不依赖窗口）
-ui / app                                 : 界面与托盘入口
+分层：
+
+* ``session`` / ``auth`` / ``readonly_report`` / ``rewards_client`` / ``storage``
+  —— 只读解析与本地数据，不依赖 Qt；
+* ``sync`` / ``notifier`` / ``autostart`` —— 桌面集成；
+* ``ui`` / ``app`` —— 唯一 Qt Widgets 界面、托盘与控制器。
 """
 from .config import APP_TITLE, APP_VERSION
 
