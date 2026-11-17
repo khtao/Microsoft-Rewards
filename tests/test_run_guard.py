@@ -119,8 +119,9 @@ def test_primary_button_becomes_stop_and_sync_entries_are_disabled(wired, monkey
 
     win.update_running_state()
     assert vm.tr(win.lang, "stop_run") in win.home.primary.text()
+    assert win.home.primary.property("danger") == "true"   # 运行期红色
     assert win.home.primary.isEnabled()
-    assert not win.home.refresh_btn.isEnabled()
+    assert not win.home.ring.isEnabled()
     assert not win.home.logo.isEnabled()
     assert not win.act_sync.isEnabled()
 
@@ -130,7 +131,8 @@ def test_primary_button_becomes_stop_and_sync_entries_are_disabled(wired, monkey
     monkeypatch.setattr(ctl, "auto_running", lambda: False)
     win.update_running_state()
     assert vm.tr(win.lang, "sync") in win.home.primary.text()
-    assert win.home.refresh_btn.isEnabled()
+    assert win.home.primary.property("danger") == "false"  # 空闲恢复蓝色
+    assert win.home.ring.isEnabled()
     assert win.act_sync.isEnabled()
     win.home.primary.click()
     assert calls == ["stop", "run"]

@@ -155,7 +155,7 @@ class HomePage(QWidget):
         top = QHBoxLayout()
         self.logo = QPushButton("🔍")
         self.logo.setObjectName("icon")
-        self.logo.clicked.connect(app.sync_now)
+        self.logo.clicked.connect(self._on_refresh_clicked)
         top.addWidget(self.logo)
         self.title = QLabel(tr(self._lang, "app_title"))
         self.title.setStyleSheet("font-size:16px;font-weight:700;")
@@ -175,6 +175,8 @@ class HomePage(QWidget):
         center = QHBoxLayout()
         center.addStretch(1)
         self.ring = RingProgress()
+        self.ring.set_refresh_caption(tr(self._lang, "ring_refresh"))
+        self.ring.clicked.connect(self._on_refresh_clicked)
         center.addWidget(self.ring)
         center.addStretch(1)
         lay.addLayout(center)
@@ -200,6 +202,7 @@ class HomePage(QWidget):
         self._stopping = False
         self._sync_busy = False
         self.primary.clicked.connect(self._on_primary_clicked)
+        self._apply_primary_style()
         lay.addWidget(self.primary)
         self.note = QLabel(tr(self._lang, "readonly_note"))
         self.note.setObjectName("tiny")
@@ -213,10 +216,8 @@ class HomePage(QWidget):
         self.task_title.setObjectName("cardTitle")
         head.addWidget(self.task_title)
         head.addStretch(1)
-        self.refresh_btn = QPushButton(tr(self._lang, "refresh"))
-        self.refresh_btn.setFlat(True)
-        self.refresh_btn.clicked.connect(app.sync_now)
-        head.addWidget(self.refresh_btn)
+        # 「刷新」已移至中央进度圆环：圆环 hover 有呼吸动效并显示「点击刷新」，
+        # 点击即同步。这里不再放第二个文字按钮，减少操作复杂度。
         self.task_card.add_layout(head)
         hero = QFrame()
         hero.setObjectName("heroBar")
@@ -252,6 +253,22 @@ class HomePage(QWidget):
     def enter_widgets(self):
         return list(getattr(self, "_enter_widgets", []))
 
+    def _on_refresh_clicked(self) -> None:
+        """圆环 / 顶部放大镜共用：运行期与同步期一律拒绝，防止误操作。"""
+        if self._running or self._sync_busy or not self.ring.isEnabled():
+            return
+        self.app.sync_now()
+
+    def _apply_primary_style(self) -> None:
+        """运行期主按钮切到红色（停止态），空闲期恢复蓝色。"""
+        danger = "true" if self._running else "false"
+        if self.primary.property("danger") != danger:
+            self.primary.setProperty("danger", danger)
+            style = self.primary.style()
+            style.unpolish(self.primary)
+            style.polish(self.primary)
+        self.primary.update()
+
     def _on_primary_clicked(self) -> None:
         """运行期唯一动作是停止；空闲期启动自动完成（与托盘同一分发逻辑）。"""
         if self._running:
@@ -271,16 +288,18 @@ class HomePage(QWidget):
         self._running = bool(running)
         self._stopping = bool(stopping) and self._running
         self.primary.setText(self._primary_text(self.app.lang))
+        self._apply_primary_style()
         # 停止请求发出后立刻禁用按钮，避免连点造成重复停止/误触。
         self.primary.setEnabled(not self._stopping and not self._sync_busy)
-        self.refresh_btn.setEnabled(not self._running and not self._sync_busy)
+        self.ring.setEnabled(not self._running and not self._sync_busy)
         self.logo.setEnabled(not self._running and not self._sync_busy)
 
     def set_busy(self, busy: bool) -> None:
         """同步进行中：禁用主按钮与刷新入口；运行期主按钮仍可点（作为停止）。"""
         self._sync_busy = bool(busy)
+        self._apply_primary_style()
         self.primary.setEnabled(not self._sync_busy and not self._stopping)
-        self.refresh_btn.setEnabled(not self._sync_busy and not self._running)
+        self.ring.setEnabled(not self._sync_busy and not self._running)
         self.logo.setEnabled(not self._sync_busy and not self._running)
 
     def set_language(self, lang: str) -> None:
@@ -291,8 +310,8 @@ class HomePage(QWidget):
         self.primary.setText(self._primary_text(lang))
         self.note.setText(tr(lang, "readonly_note"))
         self.task_title.setText(tr(lang, "today_tasks"))
-        self.refresh_btn.setText(tr(lang, "refresh"))
         self.ring.set_caption(tr(lang, "today_tasks"))
+        self.ring.set_refresh_caption(tr(lang, "ring_refresh"))
         self.status_chip.set_language(lang)
 
     def set_login_badge(self, ok: Optional[bool]) -> None:
@@ -313,7 +332,7 @@ class HomePage(QWidget):
         for group in groups:
             self.groups_lay.addWidget(GroupBlock(group))
         if not groups:
-            empty = QLabel("暂无任务记录，点「刷新」同步一次。")
+            empty = QLabel(tr(self.app.lang, "empty_tasks"))
             empty.setObjectName("muted")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.groups_lay.addWidget(empty)
@@ -689,7 +708,7 @@ class ModernMainWindow(QWidget):
 
     def _wire_runner(self) -> None:
         self.runner.status.connect(self.set_status_message)
-        self.runner.log.connect(lambda a, d: self.log(f"{a} {d}".strip()[:200]))
+        self.runner.log.connect(lambda a, d: self.log(f"{a} {d}".strip()[:500]))
         self.runner.progress.connect(
             lambda cur, total: self.set_status_message(f"搜索进度 {cur}/{total}"))
         self.runner.finished.connect(

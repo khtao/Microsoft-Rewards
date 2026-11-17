@@ -42,7 +42,7 @@ class ActivityWorker(QThread):
         try:
             from playwright.sync_api import sync_playwright
             options = self.options
-            self.progress.emit("正在准备独立浏览器配置（不影响已打开的 Edge）…")
+            self.progress.emit("正在准备全新浏览器配置（不影响已打开的 Edge）…")
             if self._stop.is_set():
                 return
             pw = sync_playwright().start()
@@ -51,6 +51,7 @@ class ActivityWorker(QThread):
                 edge_path=options.get("edge_path") or find_edge_binary(),
                 proxy=options.get("proxy"), sandbox=options.get("sandbox"),
                 flag_warning="on", verbose=False,
+                log=lambda a, d: self.progress.emit(f"{a} {d}"),
             )
             page = context.pages[0] if context.pages else context.new_page()
             self.progress.emit("正在打开 Bing Rewards 侧栏，识别未完成活动卡片…")

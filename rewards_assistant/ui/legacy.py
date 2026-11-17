@@ -73,7 +73,16 @@ class SearchWorker(QThread):
             self.sig.finished.emit(self.report)
         except Exception as e:
             raw = f"{type(e).__name__}: {e}"
-            self.sig.log.emit("error", traceback.format_exc(limit=4))
+            # 旧版只发多行 traceback，界面把它截到 200 字符，最后一行的
+            # 「异常类型: 原因」永远看不到，日志里只剩两帧文件路径 —— 这正是
+            # 反复靠猜根因的元凶。现在先发一条单行完整原因，再把堆栈压成
+            # 一行短帧，保证任何截断长度下都留得下有用信息。
+            from ..session import redact
+            reason = redact(raw).replace("\n", " ").replace("\r", " ")[:300]
+            self.sig.log.emit("error", reason)
+            frames = [ln.strip() for ln in traceback.format_exc(limit=6).splitlines()
+                      if ln.strip().startswith("File ")]
+            self.sig.log.emit("trace", " | ".join(frames)[:300])
             self.sig.failed.emit(browser_error_hint(raw))
 
 

@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """启动真实 Microsoft Edge（headed）跑实验性自动化链路。
 
-登录态来源默认是**应用自己的独立 profile**（``config.profile_dir()``，与只读
-同步、登录窗口共用），并且自动化一律在它的快照副本里运行：
+登录态与只读同步共用同一份**本机加密凭证**（``credentials.CookieStore``）：
+自动化在一份**全新且空的**配置目录里启动 Edge，随后用 ``ctx.add_cookies()``
+注入凭证。整个链路不复制、不读取任何已有浏览器 profile，因此：
 
-* 不碰用户日常打开的 Edge User Data，不会因为 Edge 正在运行就报
-  ``ProcessSingleton`` / ``shutil.Error: [('...Permission denied...')]``；
-* 不需要用户关闭浏览器，也不与后台只读同步抢同一份 Singleton 锁；
-* 复制时跳过 Chromium 正在占用的锁文件 / WAL / 会话文件，单文件失败不中断。
+* 没有 ``SingletonLock`` / ``ProcessSingleton`` / ``shutil.Error``；
+* 不会把启动 handoff 给残留的 Edge 实例后自行退出；
+* 不需要关闭日常 Edge，也不与登录窗口 / 后台同步抢同一目录；
+* 同步与自动化用同一个账户会话，不会出现「已登录但自动化未登录」的分裂。
 
 经典链路之外，本模块仍提供真实 Edge 的启动参数与沙箱/警告横幅处理。
 """
@@ -31,60 +32,15 @@ EDGE_POLICY_DIRS = (Path("/etc/opt/edge/policies/managed"),
 FLAG_WARNING_POLICY = {"CommandLineFlagSecurityWarningsEnabled": False}
 
 
-IGNORE_DIRS = {
-    "Cache", "Code Cache", "GPUCache", "ShaderCache", "Service Worker",
-    "Crashpad", "logs", "blob_storage", "File System", "IndexedDB",
-    "Session Storage", "Sessions", "VideoDecodeStats", "BudgetDatabase",
-    "BrowserMetrics", "CrashpadMetrics",
-}
-
-# Chromium 运行时会独占这些文件；复制时失败是常态，跳过即可，不影响登录态。
-SKIP_FILE_NAMES = {
-    "Current Session", "Current Tabs", "Last Session", "Last Tabs",
-    "DevToolsActivePort", "LOCK", "SingletonLock", "SingletonCookie",
-    "SingletonSocket", ".DS_Store",
-}
-SKIP_SUFFIXES = ("-journal", "-wal", "-shm", ".tmp", ".log")
-
 AUTOMATION_PROFILE_DIRNAME = "automation_edge_profile"
 
 
-def default_profile_dir() -> Path:
-    """Edge 用户数据根目录：Windows/macOS/Linux 均可识别。"""
-    home = Path.home()
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
-        return base / "Microsoft" / "Edge" / "User Data"
-    if sys.platform == "darwin":
-        return home / "Library" / "Application Support" / "Microsoft Edge"
-    cands = [
-        home / ".config/microsoft-edge",
-        home / ".config/microsoft-edge-stable",
-        home / ".config/microsoft-edge-beta",
-        home / ".config/microsoft-edge-dev",
-        home / ".var/app/com.microsoft.Edge/config/microsoft-edge",
-    ]
-    for c in cands:
-        if (c / "Default").exists() or c.exists():
-            return c
-    return cands[0]
-
-
 def app_profile_dir() -> Path:
-    """应用独立的登录 profile（登录窗口与只读同步共用，不碰日常 Edge）。"""
-    return _app_profile_dir()
+    """应用独立的登录 profile（仅登录窗口 / 退出登录清理使用）。
 
-
-def automation_source_profile() -> Path:
-    """自动化链路默认读取哪份登录态：应用独立 profile 优先。
-
-    独立 profile 里已有 ``Default/`` 或 ``Local State`` 说明用户已完成应用内
-    登录；否则退回系统 Edge 配置目录（仍会被复制成快照，不直接占用）。
+    同步与自动化都改用 ``credentials.CookieStore`` 里的加密凭证，不再读取它。
     """
-    p = app_profile_dir()
-    if (p / "Default").is_dir() or (p / "Local State").is_file():
-        return p
-    return default_profile_dir()
+    return _app_profile_dir()
 
 
 def prune_automation_profiles(keep: int = 3) -> None:
@@ -102,12 +58,11 @@ def prune_automation_profiles(keep: int = 3) -> None:
 
 
 def new_automation_profile_dir() -> Path:
-    """每次自动化运行都用**全新且唯一**的配置目录。
+    """每次自动化运行都用**全新且空**的配置目录，不复制任何文件。
 
-    固定复用同一个 ``automation_edge_profile`` 会让上一次残留的 Edge 进程
-    （或它重建的 SingletonLock）把新启动 handoff 给自己后退出，Playwright
-    于是报 ``Target page, context or browser has been closed`` —— 截图里那句
-    「浏览器窗口被提前关闭」就是这么来的。唯一目录彻底断开这个 handoff 链。
+    目录里没有从旧 profile 带过来的 ``SingletonLock``，也不会被上一次残留的
+    Edge 进程 handoff；Chromium 的 process singleton 按 user-data-dir 路径
+    判定，唯一路径即可彻底断开这条链。登录态改由 ``ctx.add_cookies()`` 注入。
     """
     prune_automation_profiles(keep=3)
     p = data_dir() / (f"{AUTOMATION_PROFILE_DIRNAME}_{os.getpid()}_"
@@ -222,79 +177,107 @@ def find_edge_binary() -> str | None:
     return next((p for p in candidates if os.path.isfile(p)), None)
 
 
-def copy_profile(src: Path, dst: Path) -> Path:
-    """复制 profile 快照：带登录态，且单文件被占用时**只跳过、不整体失败**。
+def playwright_cookies(store=None) -> list[dict]:
+    """把本机加密凭证转成 Playwright ``add_cookies()`` 需要的结构。
 
-    Windows 上 Edge 正在运行时 ``shutil.copytree`` 会对 SQLite / 会话文件抛
-    ``PermissionError`` 并汇总成 ``shutil.Error: [('C:\\Users\\...')]``，
-    旧版因此把整条自动化链路判为「运行失败」。这里改为逐文件复制：缓存目录、
-    锁文件、WAL 直接跳过，其余失败重试两次后跳过，保证快照始终可用。
+    ``expires <= 0`` 是会话 Cookie：Playwright 会把它当成 1970 年已过期，
+    必须**省略**该字段；迁移自明文 Cookie 头的 hostless 项用 ``url`` 代替
+    ``domain``/``path``（两者互斥）。
     """
-    src, dst = Path(src), Path(dst)
-    if src.resolve() == dst.resolve():
-        raise ValueError("快照目录不能作为源用户目录")
-    if dst.exists():
-        # 上次异常退出可能残留文件；删不掉的（被占用）留着，下面逐文件覆盖。
-        shutil.rmtree(dst, ignore_errors=True)
-    dst.mkdir(parents=True, exist_ok=True)
-    # 关键：残留的 Singleton 锁会让 Chromium 直接报 Failed to create a
-    # ProcessSingleton，即使快照本身是新的也一样。
-    for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket",
-                 "DevToolsActivePort", "LOCK"):
-        try:
-            (dst / lock).unlink()
-        except OSError:
-            pass
-    dst_resolved = dst.resolve()
+    from .credentials import CookieStore
 
-    for root, dirs, files in os.walk(src, topdown=True, followlinks=False):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS
-                   and (Path(root) / d).resolve() != dst_resolved]
-        rel = Path(root).relative_to(src)
-        out = dst / rel
-        out.mkdir(parents=True, exist_ok=True)
-        for name in files:
-            if name in SKIP_FILE_NAMES or name.endswith(SKIP_SUFFIXES):
+    out: list[dict] = []
+    for c in (store or CookieStore()).load():
+        name, value = c.get("name"), c.get("value")
+        if not name or value is None:
+            continue
+        cookie = {"name": str(name), "value": str(value),
+                  "secure": bool(c.get("secure"))}
+        try:
+            exp = float(c.get("expires", -1))
+        except (TypeError, ValueError):
+            exp = -1
+        if exp > 0:
+            cookie["expires"] = exp
+        domain = str(c.get("domain") or "")
+        if domain:
+            cookie["domain"] = domain if domain.startswith(".") else "." + domain
+            cookie["path"] = c.get("path") or "/"
+        else:
+            cookie["url"] = "https://rewards.bing.com/"
+        # 跨站认证 Cookie 需要 SameSite=None；仅在 Secure 时合法
+        if cookie["secure"]:
+            cookie["sameSite"] = "None"
+        out.append(cookie)
+    return out
+
+
+def inject_saved_cookies(ctx, store=None) -> int:
+    """把加密凭证注入刚启动的 context；返回成功注入条数。
+
+    旧版明文 Cookie 头迁移来的项可能带畸形域；批量 ``add_cookies`` 会因一条
+    不合规格而整批失败，这里退化为逐条注入并跳过坏项。只要核心认证 Cookie
+    成功，自动化仍能正常读到已登录页面。
+    """
+    cookies = playwright_cookies(store)
+    if not cookies:
+        raise RuntimeError(
+            "尚未保存登录会话：请在「登录」里由本人完成一次 Microsoft Rewards "
+            "登录（含 MFA），会话会加密保存在本机")
+    try:
+        ctx.add_cookies(cookies)
+        return len(cookies)
+    except Exception:
+        pass
+    injected = 0
+    for c in cookies:
+        variants = [c]
+        # 不同 Playwright / Chromium 版本对 sameSite、expires 的校验有差异；
+        # 降级版只保留 name/value/domain(或 url)/path/secure 这些必需字段。
+        if "sameSite" in c or "expires" in c:
+            variants.append({k: v for k, v in c.items()
+                             if k not in ("sameSite", "expires")})
+        for variant in variants:
+            try:
+                ctx.add_cookies([variant])
+                injected += 1
+                break
+            except Exception:
                 continue
-            src_file, dst_file = Path(root) / name, out / name
-            for attempt in range(3):
-                try:
-                    if src_file.is_symlink():
-                        if not dst_file.exists():
-                            dst_file.symlink_to(os.readlink(src_file))
-                    else:
-                        shutil.copy2(src_file, dst_file)
-                    break
-                except (OSError, shutil.Error):
-                    if attempt < 2:
-                        time.sleep(0.2)
-                    # 仍失败：只是少一个非关键文件，绝不抛 shutil.Error
-    return dst
+    if not injected:
+        raise RuntimeError("本机会话 Cookie 无法注入浏览器，请在「登录」里重新登录一次")
+    return injected
 
 
 def browser_error_hint(text: str, limit: int = 90) -> str:
-    """把 Playwright / shutil 的原始异常压成一句可操作提示，不泄漏本地路径。"""
+    """把 Playwright / Chromium 的原始异常压成一句可操作提示，不泄漏本地路径。"""
+    import re
+
     raw = str(text or "").strip()
     first = raw.splitlines()[0] if raw else ""
     low = first.lower()
-    if ("error: [(" in low or "shutil" in low or "errno 13" in low
-            or "permission denied" in low or "winerror 32" in low
-            or "being used by another process" in low):
-        return "复制浏览器配置时部分文件被占用，已自动跳过；若仍未登录，请在应用内重新登录一次"
-    if ("processsingleton" in low or "singletonlock" in low
-            or "singletoncookie" in low or "failed to create a" in low
-            or ("profile" in low and ("in use" in low or "already running" in low))):
-        return "浏览器配置目录被占用：关闭应用自己打开的浏览器窗口后重试（日常 Edge 无需关闭）"
+    if "尚未保存登录会话" in raw:
+        return "尚未保存登录会话：请在「登录」里由本人完成一次 Microsoft Rewards 登录（含 MFA）"
+    if "无法注入浏览器" in raw or "add_cookies" in low:
+        return "本机会话 Cookie 无法注入浏览器，请在「登录」里重新登录一次后重试"
     if ("executable doesn't exist" in low or "browser executable" in low
             or "msedge" in low and ("not found" in low or "not exist" in low)):
         return "未找到 Microsoft Edge，请先安装 Edge 后重试"
-    if ("target page, context or browser has been closed" in low
-            or "browser has been closed" in low):
-        return ("浏览器进程意外退出（配置目录被残留进程占用或窗口被关闭）；"
-                "已自动换用全新配置重试，若仍失败请重启应用")
     if "timed out" in low or "timeout" in low:
         return "浏览器启动超时，请稍后重试"
-    return first[:limit] or "浏览器启动失败，请重试"
+    if ("target page, context or browser has been closed" in low
+            or "browser has been closed" in low):
+        return "浏览器窗口被关闭或启动中断，请重试（无需关闭日常 Edge）"
+    if ("error: [(" in low or "shutil" in low or "errno 13" in low
+            or "permission denied" in low or "winerror 32" in low
+            or "being used by another process" in low
+            or "processsingleton" in low or "singletonlock" in low
+            or "failed to create a" in low):
+        return "浏览器启动被占用，请重试（日常 Edge 无需关闭）"
+    # 兜底：Chromium 异常可能带上 user-data-dir 的绝对路径
+    clean = re.sub(r"[A-Za-z]:[\\/][^\s'\"]+", "[本机路径已省略]", first)
+    clean = re.sub(r"/(?:home|Users|tmp|var)/[^\s'\"]+", "[本机路径已省略]", clean)
+    return clean[:limit] or "浏览器启动失败，请重试"
 
 
 def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
@@ -302,7 +285,7 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
                 edge_path: str | None = None, slow_mo: int = 0,
                 sandbox: str | None = None, suppress_flag_warning: bool | None = None,
                 policy_dir: str | None = None, verbose: bool = True,
-                flag_warning: str = "auto", geo=None):
+                flag_warning: str = "auto", geo=None, minimal: bool = False):
     """返回一个 persistent context（页面与 Cookie 全部落在真实 profile 里）。
 
     sandbox              "on" 开沙箱 / "off" 关沙箱 / None 自动（root 自动关）
@@ -334,6 +317,24 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
                   ("，已抑制警告横幅（策略 + --test-type）" if suppress_flag_warning
                    else "，窗口顶部会有警告横幅"))
 
+    if minimal:
+        # 参数兼容降级：不同 Playwright / Edge 版本对 no_viewport、
+        # permissions、ignore_default_args 等可选参数的接受程度不同。启动
+        # 报参数类错误时，用最小参数集再试一次，保住「能打开浏览器」这条主线。
+        base = dict(user_data_dir=str(user_data_dir), headless=headless,
+                    chromium_sandbox=use_sandbox)
+        if edge_path:
+            base["executable_path"] = edge_path
+        else:
+            base["channel"] = "msedge"
+        try:
+            ctx = pw.chromium.launch_persistent_context(**base)
+        except PWError:
+            base["chromium_sandbox"] = False
+            ctx = pw.chromium.launch_persistent_context(**base)
+        ctx.add_init_script(STEALTH_MIN_JS)
+        return ctx
+
     kwargs = dict(
         user_data_dir=str(user_data_dir),
         headless=headless,
@@ -358,9 +359,28 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
             return pw.chromium.launch_persistent_context(**kw)
         except PWError as e:
             msg = str(e)
-            if "no_viewport" in msg or "unexpected" in msg.lower():
+            low = msg.lower()
+            if "no_viewport" in msg or "unexpected" in low:
                 kw.pop("no_viewport", None)
                 return pw.chromium.launch_persistent_context(**kw)
+            # Windows 打包环境里 channel="msedge" 有时解析不到安装路径（或
+            # 反过来，显式 executable_path 失效）；换另一种解析方式再试一次。
+            if ("executable doesn't exist" in low or "browser executable" in low
+                    or ("msedge" in low and ("not found" in low or "not exist" in low))):
+                alt = dict(kw)
+                if alt.get("channel"):
+                    alt.pop("channel", None)
+                    path = find_edge_binary()
+                    if path:
+                        alt["executable_path"] = path
+                    else:
+                        raise
+                elif alt.get("executable_path"):
+                    alt.pop("executable_path", None)
+                    alt["channel"] = "msedge"
+                else:
+                    raise
+                return pw.chromium.launch_persistent_context(**alt)
             raise
 
     try:
@@ -396,41 +416,80 @@ def is_profile_conflict_error(exc) -> bool:
     return any(k in low for k in _RETRYABLE_LAUNCH_ERRORS)
 
 
-def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
-                           verbose: bool = False, **kwargs):
-    """复制一份唯一快照并启动 Edge；冲突时换全新目录自动重试一次。
+_LAUNCH_ARG_ERRORS = (
+    "unexpected", "no_viewport", "unknown option", "unrecognized",
+    "not supported", "invalid argument", "permissions", "ignore_default_args",
+)
 
-    返回 ``(context, snapshot_path)``。调用方在 ``context.close()`` /
-    ``pw.stop()`` 之后必须调用 ``cleanup_automation_profile(snapshot_path)``。
+
+def is_launch_arg_error(exc) -> bool:
+    """Playwright / Edge 版本差异导致可选启动参数被拒绝，值得降级重试。"""
+    low = str(exc).lower()
+    return any(k in low for k in _LAUNCH_ARG_ERRORS)
+
+
+def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
+                           verbose: bool = False, log=None, **kwargs):
+    """在**全新空目录**启动 Edge，再注入本机加密凭证；返回 ``(ctx, snapshot)``。
+
+    ``user_data_dir`` / ``source_profile`` 是旧版兼容参数，**一律忽略**：新版
+    不复制、不读取任何已有 profile，因此不存在被独占的锁文件、``shutil.Error``
+    或 handoff 到残留实例。``log(action, detail)`` 把每一步写进运行日志，
+    启动失败时不用再靠猜 traceback 定位。调用方在 ``ctx.close()`` /
+    ``pw.stop()`` 之后必须调用 ``cleanup_automation_profile(snapshot)``。
     """
     from playwright.sync_api import Error as PWError  # 延迟导入
 
-    src = (Path(user_data_dir).expanduser() if user_data_dir
-           else Path(source_profile or automation_source_profile()))
-    if not src.exists():
-        raise FileNotFoundError(
-            f"浏览器配置目录不存在：{src}。请在应用内完成一次登录，"
-            f"或用 --user-data-dir 指定 Edge 用户数据目录")
+    def note(action: str, detail: str = "") -> None:
+        if log is not None:
+            try:
+                log(action, str(detail)[:300])
+            except Exception:
+                pass
+
+    cookies = playwright_cookies()
+    note("credentials", f"本机加密凭证 {len(cookies)} 条")
+    if not cookies:
+        # 不发无意义的浏览器启动：未登录就该明确提示重新登录，而不是让 Edge
+        # 起来又退出、再被误报成「浏览器进程意外退出」。
+        note("credentials", "凭证为空，跳过浏览器启动")
+        raise RuntimeError(
+            "尚未保存登录会话：请在「登录」里由本人完成一次 Microsoft Rewards "
+            "登录（含 MFA），会话会加密保存在本机；同步与自动完成任务都用它。")
 
     last = None
+    minimal_next = False
     for attempt in (1, 2):
         snap = new_automation_profile_dir()
-        if src.resolve() == snap.resolve():
-            raise ValueError("自动化快照目录不能作为源用户目录")
+        note("profile", f"第 {attempt} 次：全新空目录 {snap.name}"
+             + ("（最小参数）" if minimal_next else ""))
+        ctx = None
         try:
-            copy_profile(src, snap)
             ctx = launch_edge(pw, user_data_dir=str(snap),
-                              verbose=verbose, **kwargs)
+                              verbose=verbose, minimal=minimal_next, **kwargs)
+            note("edge", "Edge 已启动" + ("（最小参数）" if minimal_next else ""))
+            injected = inject_saved_cookies(ctx)
+            note("cookies", f"已注入 {injected}/{len(cookies)} 条会话 Cookie")
+            if verbose:
+                print(f"[信息] 已注入 {injected} 条本机加密会话 Cookie")
             return ctx, snap
-        except PWError as exc:
+        except BaseException as exc:
             last = exc
+            note("edge_error", f"{type(exc).__name__}: {str(exc)[:200]}")
+            if ctx is not None:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
             cleanup_automation_profile(snap)
-            if attempt == 1 and is_profile_conflict_error(exc):
-                if verbose:
-                    print("[提示] 浏览器启动被占用，换用全新配置目录重试一次…")
+            if not (isinstance(exc, PWError) and attempt == 1):
+                raise
+            if is_profile_conflict_error(exc):
+                note("retry", "换一份全新空目录重试")
+                continue                       # 占用类：换目录，参数不变
+            if is_launch_arg_error(exc):
+                note("retry", "启动参数不兼容，改用最小参数重试")
+                minimal_next = True
                 continue
-            raise
-        except BaseException:
-            cleanup_automation_profile(snap)
-            raise
+            raise                             # 其余错误（没装 Edge 等）不空转
     raise last

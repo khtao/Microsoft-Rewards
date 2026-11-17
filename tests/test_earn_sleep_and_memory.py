@@ -251,7 +251,7 @@ def test_browser_cleanup_on_normal_run_and_launch_failure_source_contract():
     assert 'pw = None  # Playwright' in source
     assert 'if own_context and close_browser:' in source
     assert 'pw.stop()' in source
-    assert 'except BaseException:' in source
+    assert 'except BaseException as exc:' in source
     assert source.count('pw.stop()') >= 2
 
 

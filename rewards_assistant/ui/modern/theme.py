@@ -28,6 +28,8 @@ LIGHT: Dict[str, str] = {
     "segment_bg": "#e9edf5",
     "segment_on": "#ffffff",
     "warn": "#c92a2a",
+    "danger": "#e0454b",
+    "danger_hover": "#c9363c",
     "orange": "#f59e0b",
     "purple": "#7c5cff",
     "scroll": "#c9d2e0",
@@ -64,6 +66,8 @@ DARK: Dict[str, str] = {
     "segment_bg": "#2a3342",
     "segment_on": "#3b4658",
     "warn": "#ff7a7a",
+    "danger": "#ef5b62",
+    "danger_hover": "#ff7178",
     "orange": "#ffc14d",
     "purple": "#a08bff",
     "scroll": "#3a4658",
@@ -160,7 +164,12 @@ QPushButton#primary {{
     background: {c['primary']}; color: #ffffff; border: none;
     border-radius: 12px; font-size: 15px; font-weight: 600; padding: 13px;
 }}
-QPushButton#primary:hover {{ background: {c['primary']}; }}
+QPushButton#primary:hover {{ background: {c['primary_hover']}; }}
+QPushButton#primary[danger="true"] {{
+    background: {c['danger']}; color: #ffffff; border: none;
+}}
+QPushButton#primary[danger="true"]:hover {{ background: {c['danger_hover']}; }}
+QPushButton#primary[danger="true"]:disabled {{ background: {c['danger']}; }}
 QPushButton#icon {{ border: none; background: transparent; font-size: 17px; padding: 4px; }}
 QPushButton#seg {{
     border: none; background: transparent; color: {c['text_sub']};

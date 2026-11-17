@@ -122,6 +122,6 @@ def test_sync_button_delegates_to_classic_sync_worker(wired, monkeypatch):
     ctl, win = wired
     calls = []
     monkeypatch.setattr(ctl, "sync_now", lambda auto=False: calls.append(auto))
-    win.home.refresh_btn.click()
+    win.home.ring.click()
     win.home.primary.parent()  # 保持窗口存活
     assert calls == [False]

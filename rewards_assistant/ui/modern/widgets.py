@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Iterable, Sequence
 
-from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QRectF, Qt,
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QRectF, Qt,
                             QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -21,8 +21,15 @@ from . import theme, viewmodel as vm
 
 # ---------------------------------------------------------------- 圆环进度
 
-class RingProgress(QWidget):
-    """截图中央的蓝色圆环：圆角端点、中间百分比与「今日任务」。"""
+class RingProgress(QAbstractButton):
+    """蓝色圆环 + 中间百分比；**它本身就是「刷新」按钮**。
+
+    对齐插件版圆环的 hover 观感：鼠标进入时光晕呼吸、弧线轻微外扩、末端
+    出现高光点、中心数字微微放大，同时下方小字由「今日任务」变成「点击刷新」；
+    移出即恢复。点击发 ``clicked``，由 HomePage 接到 ``Application.sync_now()``
+    —— 任务卡头部那个「刷新」文字按钮已移除，手动刷新只有这一个显式入口。
+    运行 / 同步期间 ``setEnabled(False)``，视觉变淡且不响应点击。
+    """
 
     def __init__(self, parent=None, size: int = 176) -> None:
         super().__init__(parent)
@@ -31,17 +38,39 @@ class RingProgress(QWidget):
         self._target = 0.0
         self._has_value = False       # 首次渲染不动画，避免启动瞬间显示 0%
         self._caption = "今日任务"
+        self._refresh_caption = "点击刷新"
         self._animate = True
-        # 对齐插件版 SVG stroke-dashoffset 的 transition：760ms ease-out
-        # （比网页端略长，桌面端看得更清楚），不再是每 16ms 线性 +1。
+        self._hovered = False
+        self._hover_phase = 0.0
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setDuration(1500)
+        self._hover_anim.setLoopCount(-1)     # 持续呼吸，直到鼠标移出
+        self._hover_anim.setStartValue(0.0)
+        self._hover_anim.setKeyValueAt(0.5, 1.0)
+        self._hover_anim.setEndValue(0.0)
+        self._hover_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._hover_anim.valueChanged.connect(self._on_hover_phase)
+        # 数值动画：对齐插件版 SVG stroke-dashoffset 的 760ms ease-out
         self._anim = QVariantAnimation(self)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_anim)
         self.setFixedSize(size, size)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    # ------------------------------------------------------------ 文案 / 数值
 
     def set_caption(self, text: str) -> None:
         self._caption = text
+        self.update()
+
+    def set_refresh_caption(self, text: str) -> None:
+        """多语言：hover 时圆环内显示的「点击刷新 / Click to refresh」。
+
+        刻意不用 ↻ / ⟳ 之类符号：部分 CJK 字体缺字会渲染成方块或空心圆。
+        """
+        self._refresh_caption = str(text)
         self.update()
 
     def set_animate(self, enabled: bool) -> None:
@@ -56,7 +85,6 @@ class RingProgress(QWidget):
         instant = (not self._has_value or not (self._animate and animate))
         self._anim.stop()
         if instant:
-            # 首屏直接给真值；之后同步刷新才做平滑过渡
             self._has_value = True
             self._value = self._target
             self.update()
@@ -70,33 +98,93 @@ class RingProgress(QWidget):
         self._value = float(value)
         self.update()
 
+    # ------------------------------------------------------------ hover 呼吸
+
+    def _on_hover_phase(self, value) -> None:
+        self._hover_phase = float(value)
+        self.update()
+
+    def _start_hover(self) -> None:
+        if not self.isEnabled():
+            return
+        self._hovered = True
+        self._hover_anim.start()
+        self.update()
+
+    def _stop_hover(self) -> None:
+        self._hovered = False
+        self._hover_anim.stop()
+        self._hover_phase = 0.0
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self._start_hover()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._stop_hover()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange and not self.isEnabled():
+            self._stop_hover()
+
+    def hover_phase(self) -> float:
+        """供离屏渲染 / 回归断言读取当前呼吸相位。"""
+        return self._hover_phase
+
+    def is_hovered(self) -> bool:
+        return self._hovered
+
+    # ------------------------------------------------------------ 绘制
+
     def paintEvent(self, _event) -> None:
         c = theme.current()
+        phase = self._hover_phase
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(13, 13, self.width() - 26, self.height() - 26)
-        width = 13
+        if not self.isEnabled():
+            p.setOpacity(0.5)
+        # hover 时整圈轻微外扩，幅度 2px，配合光晕形成「呼吸」
+        inset = 13 - 2 * phase
+        rect = QRectF(inset, inset, self.width() - 2 * inset,
+                      self.height() - 2 * inset)
+        width = 13 + 1.5 * phase
         base = QPen(QColor(c["track"]), width, Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap)
         p.setPen(base)
         p.drawArc(rect, 90 * 16, -360 * 16)
         if self._value > 0:
-            # 插件版 .progress-halo：主弧外侧一层淡色光晕；数值动画期间更亮，
-            # 进度变化看得见但不刺眼（减少动画时保留静态淡光晕）。
-            glow = QColor(c["primary"])
+            span = -int(360 * 16 * self._value / 100.0)
             moving = self._anim.state() == QAbstractAnimation.State.Running
-            glow.setAlpha(74 if moving else 34)
-            halo = QPen(glow, width + 9, Qt.PenStyle.SolidLine,
+            glow = QColor(c["primary"])
+            # 静止淡光晕 34；数值动画中 74；hover 呼吸最高到 128
+            glow.setAlpha(max(34, 74 if moving else 34, int(34 + 94 * phase)))
+            halo = QPen(glow, width + 9 + 6 * phase, Qt.PenStyle.SolidLine,
                         Qt.PenCapStyle.RoundCap)
             p.setPen(halo)
-            p.drawArc(rect, 90 * 16, -int(360 * 16 * self._value / 100.0))
-            arc = QPen(QColor(c["primary"]), width, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap)
+            p.drawArc(rect, 90 * 16, span)
+            arc = QPen(QColor(c["primary_hover"] if self._hovered else c["primary"]),
+                       width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
             p.setPen(arc)
-            p.drawArc(rect, 90 * 16, -int(360 * 16 * self._value / 100.0))
+            p.drawArc(rect, 90 * 16, span)
+            # 末端高光点：只在 hover 时出现，半径随相位脉动
+            if phase > 0.02:
+                ang = math.radians(90 - 360 * self._value / 100.0)
+                r = rect.width() / 2.0
+                ex = rect.center().x() + r * math.cos(ang)
+                ey = rect.center().y() - r * math.sin(ang)
+                tip = QColor("#ffffff")
+                tip.setAlpha(int(150 + 90 * phase))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(tip)
+                p.drawEllipse(QRectF(ex - 3 - 2 * phase, ey - 3 - 2 * phase,
+                                    (6 + 4 * phase), (6 + 4 * phase)))
+                p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QColor(c["text"]))
         f = QFont(self.font())
-        f.setPointSize(25)
+        f.setPointSize(25 + int(round(2 * phase)))
         f.setBold(True)
         p.setFont(f)
         p.drawText(rect.adjusted(0, -8, 0, 0), Qt.AlignmentFlag.AlignCenter,
@@ -104,9 +192,15 @@ class RingProgress(QWidget):
         f2 = QFont(self.font())
         f2.setPointSize(9)
         p.setFont(f2)
-        p.setPen(QColor(c["text_sub"]))
+        # hover 时不用浮层提示，直接把圆环内的小字换成可点击说明
+        if self._hovered:
+            p.setPen(QColor(c["primary"]))
+            caption = self._refresh_caption
+        else:
+            p.setPen(QColor(c["text_sub"]))
+            caption = self._caption
         p.drawText(rect.adjusted(0, 34, 0, 0), Qt.AlignmentFlag.AlignCenter,
-                   self._caption)
+                   caption)
         p.end()
 
 
@@ -433,21 +527,21 @@ class StatCard(QFrame):
 class TaskRow(QFrame):
     """一条任务：左侧积分徽章 + 标题/描述 + 状态。"""
 
-    def __init__(self, item: dict, accent: bool = True, parent=None) -> None:
+    def __init__(self, item: dict, parent=None) -> None:
+        """所有任务统一绿色圆角徽章（搜索 60 分与活动 +10 完全同款）。"""
         super().__init__(parent)
         self.setObjectName("taskRow")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(10)
         badge = QFrame()
-        badge.setObjectName("numBadge" if accent else "flat")
+        badge.setObjectName("numBadge")
         badge.setFixedHeight(22)
         badge.setMinimumWidth(38)
         bl = QHBoxLayout(badge)
         bl.setContentsMargins(6, 0, 6, 0)
-        text = f"+{item['points']}" if accent else str(item["points"])
-        b = QLabel(text)
-        b.setObjectName("numBadgeText" if accent else "muted")
+        b = QLabel(f"+{item['points']}")
+        b.setObjectName("numBadgeText")
         b.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bl.addWidget(b)
         lay.addWidget(badge)
@@ -553,7 +647,7 @@ class GroupBlock(QWidget):
         bar = ProgressBar(group["percent"])
         lay.addWidget(bar)
         for item in group["items"]:
-            lay.addWidget(TaskRow(item, accent=(group["label"] != "搜索")))
+            lay.addWidget(TaskRow(item))
 
 
 # ---------------------------------------------------------------- 表单行

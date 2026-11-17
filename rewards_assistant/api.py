@@ -125,8 +125,11 @@ class ActionLogger:
 
     log = __call__
 
-    def close(self):
-        self("session_end", "done")
+    def close(self, status: str = "ok", reason: str = "") -> None:
+        """失败时必须写明原因；旧版无条件写 ``session_end done``，让「浏览器
+        启动失败」看起来像正常收尾，日志里只剩一段被截断的 traceback。"""
+        detail = status if not reason else f"{status}: {reason}"
+        self("session_end", detail)
         if self.fp:
             self.fp.close()
             self.fp = None
@@ -166,7 +169,7 @@ def run_human_search(
         scroll_screens: float = 1.2,
         on_captcha: str = "wait",
         user_data_dir: str | None = None,
-        copy_profile: bool = False,   # 兼容旧设置键；自动化始终使用唯一快照
+        copy_profile: bool = False,   # 兼容旧设置键；新版自动化不复制任何 profile
         edge_path: str | None = None,
         headless: bool = False,
         window_size: str | None = None,
@@ -263,8 +266,9 @@ def run_human_search(
                               launch_automation_edge)
         from playwright.sync_api import sync_playwright
 
-        # 每次运行一份全新的唯一快照：不与日常 Edge、登录 profile、以及上一轮
-        # 残留的 Edge 进程共用目录；启动若因目录占用退出，内部自动换目录重试。
+        # 每次运行一份全新且空的配置目录，登录态由 launch_automation_edge
+        # 从本机加密凭证注入；不复制任何 profile，不与日常 Edge / 登录窗口 /
+        # 残留进程共用目录，因此不会再出现「浏览器进程意外退出」。
         pw = sync_playwright().start()
         try:
             ctx, automation_snapshot = launch_automation_edge(
@@ -272,16 +276,23 @@ def run_human_search(
                 headless=headless, window_size=window_size, proxy=proxy,
                 edge_path=edge_path or find_edge_binary(), slow_mo=slow_mo,
                 sandbox=sandbox, flag_warning=flag_warning,
-                policy_dir=policy_dir, verbose=verbose, geo=geo)
-        except BaseException:
-            # 浏览器启动失败时尚未进入主运行循环，也必须释放驱动。
+                policy_dir=policy_dir, verbose=verbose, geo=geo,
+                log=lambda a, d: logger("browser", f"{a} {d}"))
+        except BaseException as exc:
+            # 关键：先把异常的完整原因写进日志，再收尾。旧版只写
+            # session_end done，UI 又把 traceback 截断到 200 字符，
+            # 真正的原因（最后一行）永远看不到，只能靠猜。
+            from .session import redact
+            reason = redact(f"{type(exc).__name__}: {exc}").replace("\n", " ")
+            logger("browser_error", reason[:400])
             try:
-                pw.stop()
-            finally:
-                logger.close()
+                pw.stop()          # 失败时不能让 stop 的异常覆盖原异常
+            except Exception:
+                pass
+            logger.close("error", reason[:200])
             raise
         own_context = True
-        logger("browser", f"Edge 启动完成 headless={headless}（独立快照）")
+        logger("browser", f"Edge 启动完成 headless={headless}（全新空配置 + 注入加密凭证）")
     else:
         logger("browser", "复用外部传入的 Playwright context/page")
 
@@ -442,7 +453,17 @@ def run_human_search(
                 # 进程已退出后再删快照；删不掉留给下次 prune，不影响本次运行。
                 if automation_snapshot is not None:
                     cleanup_automation_profile(automation_snapshot)
-        logger.close()
+        # finally 里同样要区分成功与异常：旧版无条件写 session_end ok，
+        # 主循环中途失败也被记成正常收尾，日志里看不到原因。
+        import sys
+        pending_exc = sys.exc_info()[1]
+        if pending_exc is not None:
+            from .session import redact
+            why = redact(f"{type(pending_exc).__name__}: {pending_exc}").replace("\n", " ")[:200]
+            logger("run_error", why)
+            logger.close("error", why)
+        else:
+            logger.close("ok")
         report.log_path = str(Path(log_file).resolve()) if log_file else ""
         try:
             from . import fingerprint as _fpmod

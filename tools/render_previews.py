@@ -3,9 +3,10 @@
 
     python tools/render_previews.py
 
-产出 docs/previews/ 下的主页 / 设置页 / 深色 / 进度条修复对照图。
-本版契约：全界面无鼠标悬浮提示、动画恒定开启；设置页底部的「拟人搜索
-默认设置」由「拟人强度 低 / 中 / 高」统一控制 5 项参数。
+产出 docs/previews/ 下的主页 / 运行态 / 圆环 hover / 设置页 / 深色 /
+进度条修复对照图。本版契约：全界面无鼠标悬浮提示（圆环 hover 用内置文字
+与呼吸动效表达可点击）、动画恒定开启；运行期主按钮红色，任务积分徽章
+统一，手动刷新只有中央圆环一个入口。
 """
 from __future__ import annotations
 
@@ -21,15 +22,15 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MS_REWARDS_HOME", tempfile.mkdtemp(prefix="hsa-preview-"))
 
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QVBoxLayout,
-                               QWidget)  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
+                               QPushButton, QVBoxLayout, QWidget)  # noqa: E402
 
 from rewards_assistant.config import Settings  # noqa: E402
 from rewards_assistant.storage import Store  # noqa: E402
 from rewards_assistant.ui.modern import theme, viewmodel as vm  # noqa: E402
 from rewards_assistant.ui.modern.main_window import ModernMainWindow  # noqa: E402
 from rewards_assistant.ui.modern.widgets import (CalendarCell,  # noqa: E402
-                                                  DotsRow, ProgressBar)
+                                                  DotsRow, ProgressBar, TaskRow)
 
 OUT = ROOT / "docs" / "previews"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -126,8 +127,45 @@ def main() -> int:
     for widget in (win.home.card_claimable, win.home.primary, win.home.ring):
         assert widget.toolTip() == "", "不应再有原生黑框 tooltip"
 
-    # 圆环下状态条：四态配色 + 全部完成才绿
+    # 手动刷新已移到圆环：任务卡头部不再有「刷新」文字按钮
+    header_buttons = [b.text() for b in win.home.task_card.findChildren(QPushButton)]
+    assert vm.tr("zh", "refresh") not in header_buttons
+    assert win.home.ring.isEnabled()
+
+    # 所有任务统一绿色圆角徽章（搜索分与活动 +10 同款）
+    task_rows = win.home.groups_host.findChildren(TaskRow)
+    assert task_rows
+    for row in task_rows:
+        badge = next(w for w in row.findChildren(QFrame)
+                     if w.objectName() == "numBadge")
+        label = badge.findChild(QLabel)
+        assert label.text().startswith("+"), label.text()
+
+    # 圆环 hover：呼吸光晕 + 内置「↻ 刷新」文字（不是浮层提示框）
+    ring = win.home.ring
+    ring._start_hover()
+    ring._on_hover_phase(0.9)
+    ring.repaint()
+    ring.grab().save(str(OUT / "ring_hover.png"))
+    assert ring.is_hovered() and ring.hover_phase() > 0.5
+    ring._stop_hover()
+
+    # 运行态：主按钮红色 + 停止文案，圆环与顶部放大镜禁用
+    win.home.set_running(True)
+    settle(app, 4, 200)
+    assert win.home.primary.property("danger") == "true"
+    assert not win.home.ring.isEnabled()
+    win.grab().save(str(OUT / "home_running.png"))
+    win.home.set_running(False)
+    assert win.home.primary.property("danger") == "false"
+
+    # 同步完成态（状态条不再卡在「正在保存…」）
     chip = win.home.status_chip
+    chip.set_state("done", vm.tr("zh", "status.all_done"))
+    settle(app, 4, 120)
+    win.grab().save(str(OUT / "home_synced.png"))
+
+    # 圆环下状态条：四态配色 + 全部完成才绿
     chip.set_state("ready", vm.tr("zh", "status.ready"))
     assert chip.kind() == "ready"
     chip.set_state("done", vm.tr("zh", "status.all_done"))

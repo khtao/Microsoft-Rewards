@@ -106,9 +106,17 @@ SyncWorker（同步未完成任务）→ ActivityWorker（活动卡点击）
 → SearchRunner / api.run_human_search（电脑端搜索）→ sync_now(auto=True)
 ```
 
-这是**实验性链路**，与只读同步层相互独立。两者使用不同的浏览器配置：只读同步用 `config.profile_dir()`（应用独立登录 profile），自动化用 `browser.new_automation_profile_dir()` —— **每次运行一份全新且唯一**的 `copy_profile()` 快照，运行结束后删除、最多保留 3 份历史。固定复用同一个目录会让上一轮残留的 Edge 进程把新启动 handoff 给自己后退出，Playwright 报 `Target page, context or browser has been closed`；`launch_automation_edge()` 在遇到这类冲突时会换全新目录自动重试一次。因此日常 Edge 正在运行、后台同步进行、或上一轮窗口被提前关闭，都不会再触发 `ProcessSingleton` / 文件占用错误。复制时逐文件跳过锁文件与 WAL，单文件失败不影响整份快照。
+这是**实验性链路**，但登录态与只读同步**同源**：都来自 `credentials.CookieStore` 的本机加密凭证。同步用 `HttpFetcher` 直接发 HTTP；自动化用 `browser.new_automation_profile_dir()` 创建一份**全新且空**的 user-data-dir，启动 Edge 后由 `inject_saved_cookies()` 用 `ctx.add_cookies()` 把凭证注入 context。
 
-运行期互斥：``Application.auto_running()`` 为真时，``sync_now()`` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，窗口统一禁用 ``act_sync`` / 刷新按钮 / 顶部放大镜，并锁定停止按钮防连点。整轮结束的 ``running → idle`` 边沿调用 ``_on_auto_run_finished()``，只补一次同步（``_post_run_sync_pending`` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
+**不复制、不读取任何已有 profile**（旧版 `copy_profile()` 整套已删除）：没有 `SingletonLock` / `ProcessSingleton` / `shutil.Error`，没有「残留进程把新启动 handoff 给自己后退出」，Chromium 的 process singleton 按 user-data-dir 路径判定、唯一空目录即可彻底断开这条链；登录窗口与后台同步也不再和它抢目录。`playwright_cookies()` 负责把加密凭证转成 Playwright 结构：会话 Cookie（`expires <= 0`）必须省略 `expires`，迁移来的 hostless 项用 `url` 代替 `domain`/`path`；批量注入失败会逐条兜底并跳过畸形项。凭证为空时 `launch_automation_edge()` 直接抛「尚未保存登录会话」，不启动一个必定退出的浏览器。目录在运行结束后删除，最多保留 3 份历史；仅在极少数瞬时目录占用时换一份全新目录重试一次。
+
+启动失败的可观测性：`launch_automation_edge(log=...)` 把 `credentials`（凭证条数）、`profile`（全新空目录）、`edge`（启动成功/失败）、`cookies`（注入条数）逐阶段写进运行日志；`api.run_human_search()` 在启动异常分支先写 `browser_error: 异常类型: 原因`，再安全 `pw.stop()` 并以 `session_end error: 原因` 收尾，主循环异常的 `finally` 同样区分 `ok` / `error`。`SearchWorker` 不再只发多行 traceback，而是先发一条单行完整原因（`error`），再把栈帧压成一行（`trace`）；界面日志上限从 200 提到 500 字符。这三处一起解决了「日志只剩两帧文件路径、`session_end done` 却失败、真正原因被截断」的问题。
+
+启动健壮性：`launch_edge()` 在 `channel="msedge"` 解析不到 Edge 时自动改用 `find_edge_binary()` 的绝对路径；`launch_automation_edge()` 对占用类错误换全新空目录重试、对参数不兼容类错误（`Unexpected option` / `no_viewport` / `permissions` 等）降级为最小参数集重试，其余错误（没装 Edge、凭证为空）直接给出明确提示、不空转。
+
+运行期互斥：``Application.auto_running()`` 为真时，``sync_now()`` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，主按钮同时通过 ``danger`` 动态属性切到红色 QSS（浅色 / 深色各一套），窗口统一禁用 ``act_sync`` / 圆环 / 顶部放大镜，并锁定停止按钮防连点。
+
+主页交互：`RingProgress` 是 `QAbstractButton`，本身就是唯一的显式手动刷新入口（任务卡头部的文字按钮已删除）。hover 时 1500ms 无限呼吸动画驱动光晕透明度、弧宽、外扩 2px、末端高光点、中心字号，圆环内小字从「今日任务」换成「点击刷新」——用内置文字而非悬浮提示框表达可点击性；移出 / 禁用立即归零。点击与左上角放大镜都走 `HomePage._on_refresh_clicked()`，运行期或同步期直接 return。任务行的 `numBadge` 不再按分组区分 `flat` / `accent`，搜索 60 分与活动 `+10` 使用完全相同的绿色圆角徽章。整轮结束的 ``running → idle`` 边沿调用 ``_on_auto_run_finished()``，只补一次同步（``_post_run_sync_pending`` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
 
 Microsoft Rewards 要求奖励搜索由本人手动进行，不建议用它获取积分；详见 README 的合规章节。
 
