@@ -17,18 +17,6 @@ if not exist "assets\icons\app.ico" (
     echo [WARN] assets\icons\app.ico missing; the EXE will use the default icon.
 )
 
-REM Build with the SYSTEM Python only -- no virtual environment is created.
-REM Override with: set PYTHON=py -3.13   (Windows launcher, not a venv path)
-if defined PYTHON (
-    set "PYCMD=%PYTHON%"
-) else (
-    where py >nul 2>nul
-    if errorlevel 1 (
-        set "PYCMD=python"
-    ) else (
-        set "PYCMD=py -3"
-    )
-)
 
 if exist ".venv-build-win" (
     echo [NOTE] Found stale .venv-build-win from older builds; it is NOT used.
@@ -36,10 +24,10 @@ if exist ".venv-build-win" (
 )
 
 echo [1/3] Using system Python (no venv)...
-%PYCMD% -c "import sys;print('[INFO] Interpreter:',sys.executable)" || goto :fail
-%PYCMD% -c "import sys;print('[INFO] Build Python: {}.{}'.format(*sys.version_info[:2]))" || goto :fail
+python -c "import sys;print('[INFO] Interpreter:',sys.executable)" || goto :fail
+python -c "import sys;print('[INFO] Build Python: {}.{}'.format(*sys.version_info[:2]))" || goto :fail
 
-%PYCMD% -c "import sys;sys.exit(0 if sys.version_info >= (3,15) else 1)"
+python -c "import sys;sys.exit(0 if sys.version_info >= (3,15) else 1)"
 if not errorlevel 1 (
     echo [NOTE] Python 3.15+ needs PySide6 6.12+; requirements.txt selects it automatically.
     echo        This combination is not fully regression-tested. Python 3.12/3.13 is recommended.
@@ -48,16 +36,16 @@ if not errorlevel 1 (
 REM Do NOT upgrade system pip: building against the system environment must not
 REM modify the machine-wide package manager. Only install what is missing.
 echo [2/3] Installing runtime and packaging dependencies into SYSTEM Python...
-%PYCMD% -m pip install --disable-pip-version-check -r requirements-build.txt || goto :depfail
-%PYCMD% -c "import importlib.metadata as m;print('[INFO] requests',m.version('requests'))" || goto :depfail
+python -m pip install --disable-pip-version-check -r requirements-build.txt || goto :depfail
+python -c "import importlib.metadata as m;print('[INFO] requests',m.version('requests'))" || goto :depfail
 
 REM Icons / fonts / Playwright driver / PySide6 / hiddenimports are all
 REM collected by MSRewardsAssistant.spec (SPECPATH is this directory).
 echo [3/3] Building Windows desktop application from spec...
-%PYCMD% -m PyInstaller --noconfirm --clean MSRewardsAssistant.spec || goto :fail
+python -m PyInstaller --noconfirm --clean MSRewardsAssistant.spec || goto :fail
 REM PyInstaller 6.x may emit a symlink / relocate the shiboken6 DLL; force a
 REM real file in _internal root before the guard below.
-%PYCMD% tools\normalize_bundle.py dist\MSRewardsAssistant || goto :fail
+python tools\normalize_bundle.py dist\MSRewardsAssistant || goto :fail
 
 if not exist "dist\MSRewardsAssistant\MSRewardsAssistant.exe" (
     echo [ERROR] Build output missing.
@@ -86,7 +74,7 @@ echo.
 echo [ERROR] Dependency install failed.
 echo   - "No matching distribution found for PySide6": check requirements.txt is
 echo     the python_version-split version, then retry with the official index:
-echo       %PYCMD% -m pip install -i https://pypi.org/simple -r requirements-build.txt
+echo       python -m pip install -i https://pypi.org/simple -r requirements-build.txt
 echo   - Or build with a different SYSTEM interpreter (no venv needed):
 echo       set PYTHON=py -3.13
 echo     See README "Build installers" for details.
