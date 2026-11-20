@@ -193,7 +193,8 @@ def test_ipc_key_is_instance_aware_in_app_source():
     assert "connectToServer(SINGLE_INSTANCE_KEY)" not in src
     assert "server.listen(key)" in src
     assert "win_app_id()" in src
-    assert src.count("self.notifier.notify(window_title(),") >= 6
+    assert "self.notifier.notify(window_title()," in src
+    assert "def messages_enabled" in src and "def tray_enabled" in src
 
 
 # ---------------------------------------------------------------- 入口参数

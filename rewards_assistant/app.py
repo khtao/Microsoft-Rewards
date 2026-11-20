@@ -232,8 +232,52 @@ class Application(QObject):
 
     # ------------------------------------------------------------------ 托盘
 
+    def tray_enabled(self) -> bool:
+        """托盘运行总开关；旧配置回落 close_to_tray，保留用户既有选择。"""
+        return bool(self.settings.get(
+            "tray_enabled", self.settings.get("close_to_tray", True)))
+
+    def messages_enabled(self) -> bool:
+        """消息通知总开关；旧配置回落 notify_after_sync。"""
+        return bool(self.settings.get(
+            "messages_enabled", self.settings.get("notify_after_sync", True)))
+
+    def _destroy_tray(self) -> None:
+        """彻底移除托盘图标与菜单；关闭窗口后进程不再常驻后台。"""
+        if hasattr(self, "_tray_retry"):
+            self._tray_retry.stop()
+        if self.tray is not None:
+            self.tray.hide()
+            self.tray.setContextMenu(None)
+            if self.notifier is not None:
+                self.notifier.attach(None)
+            self.tray.deleteLater()
+            self.tray = None
+        # 托盘可能从未建过（例如启动时「托盘运行」就是关的），此时这些
+        # 属性还不存在，直接读取会 AttributeError 打断启动。
+        menu = getattr(self, "_tray_menu", None)
+        if menu is not None:
+            menu.deleteLater()
+        self._tray_menu = None
+        self.act_tray_sync = None
+        self.act_tray_run = None
+
+    def _apply_tray_mode(self) -> None:
+        """设置切换时即时生效：开则建托盘，关则销毁，无需重启。"""
+        if self.tray_enabled():
+            self._build_tray()
+        else:
+            self._destroy_tray()
+            self._log("托盘运行已关闭：不显示托盘图标，关闭窗口将彻底退出")
+
     def _build_tray(self) -> None:
-        """创建托盘；登录桌面较慢时延后重试，恢复后采用内置应用图标。"""
+        """创建托盘；登录桌面较慢时延后重试，恢复后采用内置应用图标。
+
+        「托盘运行」关闭时不创建任何 QSystemTrayIcon，也不启动重试定时器。
+        """
+        if not self.tray_enabled():
+            self._destroy_tray()
+            return
         if self.tray is not None:
             return
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -325,7 +369,7 @@ class Application(QObject):
             self._wake_from_sleep(show=True)
             return
         self._ensure_window()
-        if self.tray is None:
+        if self.tray_enabled() and self.tray is None:
             self._build_tray()
         if self.window.isVisible():
             self.window.raise_()
@@ -368,7 +412,7 @@ class Application(QObject):
             self._fired.clear()
             self._remember_run_day(now)
             self.window.refresh_all()
-            self.notifier.notify(window_title(), "新的一天，今日任务已重置，加油 💪")
+            self._toast("新的一天，今日任务已重置，加油 💪")
 
         # 自动同步
         interval = int(self.settings.get("sync_interval_minutes") or 0)
@@ -565,7 +609,7 @@ class Application(QObject):
             self._log("今日任务已完成，跳过提醒")
             return
         if row is None:
-            self.notifier.notify(window_title(), "今天的 Rewards 还没开始，点托盘图标同步一下吧")
+            self._toast("今天的 Rewards 还没开始，点圆环同步一下吧")
             return
         # 任务剩余分与账户余额净变化是不同指标，必须按任务逐项计算。
         tasks = self.store.tasks_of_day(day_str())
@@ -573,7 +617,7 @@ class Application(QObject):
                           for t in tasks)
         left_tasks = max(0, int(row["tasks_total"]) - int(row["tasks_done"]))
         title = "早间打卡提醒" if key == "morning" else "晚间补做提醒"
-        self.notifier.notify(window_title(), f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
+        self._toast(f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
 
     # ------------------------------------------------------------------ 同步
 
@@ -639,10 +683,10 @@ class Application(QObject):
                 # 自动同步可能每小时运行，完成提醒一天只发送一次。
                 today = day_str()
                 if self._last_done_notified_day != today:
-                    self.notifier.notify(window_title(), f"今日任务已全部完成 🎉  {text}")
+                    self._toast(f"今日任务已全部完成 🎉  {text}")
                     self._last_done_notified_day = today
             elif self._last_points is not None and earned > self._last_points:
-                self.notifier.notify(window_title(), f"今日积分变化：{text}")
+                self._toast(f"今日积分变化：{text}")
         self._last_points = earned
         self.set_login_status("已登录 · 同步正常", True)
 
@@ -670,10 +714,9 @@ class Application(QObject):
             self.set_login_status("未登录或会话已过期", False)
         else:
             self.set_login_status("网络或服务异常（保留登录状态）", None)
-        if self.window.isVisible():
-            self.notifier.notify(window_title(), message, timeout_ms=10000)
-        else:
-            self._toast(message)
+        # 登录失效 / 网络或服务异常属于严重错误：即使消息通知关闭也提醒，
+        # 否则用户只会看到界面停在旧数据，不知道同步已经失败。
+        self._toast(message, severe=True)
 
     def check_login_status(self) -> None:
         self.set_login_status("检测中…", None)
@@ -775,8 +818,18 @@ class Application(QObject):
 
     # ------------------------------------------------------------------ 杂项
 
-    def _toast(self, message: str) -> None:
-        self.notifier.notify(window_title(), message)
+    def _toast(self, message: str, *, severe: bool = False) -> None:
+        """消息通知总闸门。
+
+        关闭「消息通知」后，跨天、早晚提醒、积分变化、设置已保存、任务页
+        打开进度等一律只写运行日志，不再发系统消息；``severe=True`` 的
+        同步/登录失败仍照常提醒，避免用户对着旧数据不知情。
+        """
+        if not severe and not self.messages_enabled():
+            self._log(message)
+            return
+        self.notifier.notify(window_title(), message,
+                             timeout_ms=10000 if severe else 8000)
 
     def _log(self, message: str) -> None:
         print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
@@ -840,6 +893,8 @@ class Application(QObject):
                 self._fired.discard(marker)
         # 已触发的时间保留到次日，即使用户调整设置也不能重复执行同一时刻。
         # 其他设置均由使用方实时读取，无需重启或重新创建定时器。
+        # 托盘运行是例外：需要真的创建/销毁系统托盘图标，立即生效。
+        QTimer.singleShot(0, self._apply_tray_mode)  # 内部幂等，开/关都安全
         if manual:
             self._toast("设置已保存")
         if (data.get("sleep_when_all_done") and not previous.get("sleep_when_all_done")
@@ -911,10 +966,15 @@ class Application(QObject):
         self._opener.stop()
         if self.activity_running():
             self._activity_worker.request_stop()
-        if self.window is not None:
-            self.window.runner.stop()
-            search_busy = self.window.runner.is_running()
-        else:
+        try:
+            if self.window is not None:
+                self.window.runner.stop()
+                search_busy = self.window.runner.is_running()
+            else:
+                search_busy = False
+        except RuntimeError:
+            # 关闭窗口彻底退出时，窗口的 C++ 对象可能先于 quit() 被回收。
+            self.window = None
             search_busy = False
         if search_busy or self.activity_running() or any(w.isRunning() for w in self._workers):
             QTimer.singleShot(500, self.quit)

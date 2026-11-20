@@ -209,7 +209,8 @@ I18N: Dict[str, Dict[str, str]] = {
         "settings_sub": "常用设置",
         "today_tasks": "今日任务", "all_done": "已完成", "pending": "待完成",
         "sync_desktop": "同步与桌面", "sync_interval": "自动刷新",
-        "remind_group": "任务提醒", "background_group": "后台与通知",
+        "remind_group": "任务提醒", "tray_group": "托盘运行",
+        "messages_group": "消息通知",
         "tools": "工具", "sync_off": "关",
         "available": "可用积分", "today": "今日积分", "claimable": "可领取",
         "sync": "自动完成任务", "refresh": "刷新",
@@ -253,7 +254,8 @@ I18N: Dict[str, Dict[str, str]] = {
         "settings_sub": "Essentials",
         "today_tasks": "Today's tasks", "all_done": "All done", "pending": "Pending",
         "sync_desktop": "Sync & desktop", "sync_interval": "Auto refresh",
-        "remind_group": "Task reminders", "background_group": "Background",
+        "remind_group": "Task reminders", "tray_group": "Tray icon",
+        "messages_group": "Notifications",
         "tools": "Tools", "sync_off": "Off",
         "available": "Available", "today": "Earned today", "claimable": "To claim",
         "sync": "Auto-complete tasks", "refresh": "Refresh",
@@ -349,7 +351,9 @@ UI_DEFAULTS: Dict[str, Any] = {
     # 统一管理组：一个控件同时写多个经典键（见 pref_to_settings）
     "ui_sync_mode": "60",            # 关 / 15 / 30 / 60 分钟
     "ui_remind_mode": True,          # 早晚提醒一起开关
-    "ui_background_mode": True,      # 通知 / 静音 / 托盘一起开关
+    # 02 拆分成两个独立开关：托盘运行 / 消息通知，二者默认都打开。
+    "ui_tray_mode": True,            # → tray_enabled + close_to_tray
+    "ui_messages_mode": True,        # → messages_enabled + notify_after_sync
 }
 
 # 控件键 → Settings 键；值为 None 表示该键本身就是 Settings 键（纯界面偏好）。
@@ -378,7 +382,8 @@ CLASSIC_BINDING: Dict[str, Optional[str]] = {
     # 组键：值只作文档标注，实际写入多个键由 pref_to_settings 负责
     "ui_sync_mode": "sync_interval_minutes + sync_interval_value_minutes",
     "ui_remind_mode": "remind_time + evening_remind_time (+_value)",
-    "ui_background_mode": "notify_after_sync + silent_when_all_done + close_to_tray",
+    "ui_tray_mode": "tray_enabled + close_to_tray",
+    "ui_messages_mode": "messages_enabled + notify_after_sync",
 }
 
 LEVEL_TO_CHOICE = {1: "低", 2: "中", 3: "高"}
@@ -457,8 +462,12 @@ def settings_values(settings) -> Dict[str, Any]:
                            str(minutes) if minutes in (15, 30, 60) else "60")
     out["ui_remind_mode"] = bool(settings.get("remind_time", "09:00")) or bool(
         settings.get("evening_remind_time", "20:30"))
-    out["ui_background_mode"] = any(bool(settings.get(k, True)) for k in (
-        "notify_after_sync", "silent_when_all_done", "close_to_tray"))
+    # 旧配置没有新键时回退到对应的 1.3.0 键：以前关过「后台与通知」组的
+    # 用户，拆分后依然保持关闭；全新安装两个开关都默认打开。
+    out["ui_tray_mode"] = bool(settings.get(
+        "tray_enabled", settings.get("close_to_tray", True)))
+    out["ui_messages_mode"] = bool(settings.get(
+        "messages_enabled", settings.get("notify_after_sync", True)))
     return out
 
 
@@ -540,11 +549,15 @@ def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
             "evening_remind_time": "20:30" if on else "",
             "evening_remind_time_value": "20:30",
         }
-    if key == "ui_background_mode":
+    if key == "ui_tray_mode":
         on = bool(value)
-        # 休眠属于不推荐改动项，两档都保持关闭；其余三项统一管理。
-        return {"notify_after_sync": on, "silent_when_all_done": on,
-                "close_to_tray": on, "sleep_when_all_done": False}
+        # 托盘运行：同时写总开关与 1.3.0 的 close_to_tray，切换即时生效。
+        return {"tray_enabled": on, "close_to_tray": on}
+    if key == "ui_messages_mode":
+        on = bool(value)
+        # 消息通知：同时写总开关与 1.3.0 的 notify_after_sync。
+        # silent_when_all_done 是「全部完成跳过提醒」的推荐默认，不受影响。
+        return {"messages_enabled": on, "notify_after_sync": on}
     return {key: value}
 
 
@@ -595,8 +608,12 @@ def defaults_patch(current_level: int = 2) -> dict:
         "search_panel": sp,
         "chart_days": 30,
         "ui_log_enabled": True,
+        # 旧「后台与通知」组顺带写的两个隐藏项，拆分后仍固定为推荐默认。
+        "silent_when_all_done": True,
+        "sleep_when_all_done": False,
     }
-    for key in ("ui_sync_mode", "ui_remind_mode", "ui_background_mode"):
+    for key in ("ui_sync_mode", "ui_remind_mode",
+                "ui_tray_mode", "ui_messages_mode"):
         patch.update(pref_to_settings(p, key, p[key]))
     return patch
 
@@ -667,9 +684,10 @@ def ease_out_cubic(t: float) -> float:
 # 能统一管理的合并成一个控件（一次写齐一组经典键）：
 #   自动同步   = 开关 + 间隔（关 / 15 / 30 / 60 分钟）
 #   任务提醒   = 早间 + 晚间（含 HH:MM）
-#   后台与通知 = 通知 + 静音 + 托盘（休眠保持关闭，属不推荐改动项）
+#   已拆开的两项各自独立：托盘运行（图标 + 关闭窗口隐藏）/ 消息通知
+#   （关闭后只保留严重错误提醒）。休眠保持关闭，属不推荐改动项。
 #
-# 最终可见控件 10 个键，且每个都真实生效；「减少动画」已删除，动画恒定开启。
+# 最终可见控件 11 个键，且每个都真实生效；「减少动画」已删除，动画恒定开启。
 
 # 兼容常量：旧版控件键，已不再显示；保留供既有配置读取与回归测试。
 SWITCH_KEYS: Sequence[str] = (
@@ -688,7 +706,7 @@ VISIBLE_SETTING_KEYS: Sequence[str] = (
     "ui_language", "ui_theme",
     # 02 同步与桌面（拟人强度控件放在底部的「拟人搜索默认设置」区）
     "ui_search_level", "ui_sync_mode", "ui_remind_mode",
-    "ui_background_mode", "ui_launch_at_login",
+    "ui_tray_mode", "ui_messages_mode", "ui_launch_at_login",
     # 03 定时运行
     "ui_schedule_enabled", "ui_schedule_times",
     # 04 日历（查看器，不是配置项）

@@ -30,7 +30,7 @@ from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon,
+    QMessageBox, QPushButton, QScrollArea, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -51,6 +51,16 @@ from .viewmodel import (calendar_days, calendar_months,
                         settings_values, tr)
 from .widgets import (CalendarGrid, Card, GroupBlock, RingProgress, Row,
                       Segmented, StatCard, StatusChip, Switch, TimeChip)
+
+
+def should_hide_in_tray(controller) -> bool:
+    """关闭窗口时是否仅隐藏到托盘。
+
+    必须同时满足：托盘运行开着、且托盘图标真的建起来了。托盘运行关闭
+    （或系统托盘尚不可用）时返回 False，调用方会 accept 关闭并退出进程。
+    """
+    return bool(controller is not None and controller.tray_enabled()
+                and controller.tray is not None)
 
 
 def _clear_layout(layout) -> None:
@@ -358,7 +368,7 @@ class HomePage(QWidget):
 # ---------------------------------------------------------------- 设置页
 
 class SettingsPage(QWidget):
-    """精简设置：4 张卡 + 工具行，共 9 个控件。
+    """精简设置：4 张卡 + 独立区块 + 工具行，共 10 个控件。
 
     * 「一般不会改 / 不推荐改」的项由 ``vm.defaults_patch()`` 一次写成推荐默认，
       不再显示控件；
@@ -412,7 +422,8 @@ class SettingsPage(QWidget):
         add_row(c1, tr(lang, "theme"), self.theme_seg)
         lay.addWidget(c1)
 
-        # 02 同步与桌面：3 个「统一管理」组，一次改动写齐一组经典键。
+        # 02 同步与桌面：自动刷新 / 任务提醒仍是统一管理组；
+        #    托盘运行与消息通知各自独立，默认都打开。
         #    拟人强度移到下方「拟人搜索默认设置」区，与其余拟人参数放在一起。
         c2 = Card(number="02", title=tr(lang, "sync_desktop"),
                   color=theme.current()["primary"])
@@ -421,8 +432,10 @@ class SettingsPage(QWidget):
         add_row(c2, tr(lang, "sync_interval"), self.sync_seg)
         self.remind_sw = Switch(bool(v["ui_remind_mode"]))
         add_row(c2, tr(lang, "remind_group"), self.remind_sw)
-        self.background_sw = Switch(bool(v["ui_background_mode"]))
-        add_row(c2, tr(lang, "background_group"), self.background_sw)
+        self.tray_sw = Switch(bool(v["ui_tray_mode"]))
+        add_row(c2, tr(lang, "tray_group"), self.tray_sw)
+        self.messages_sw = Switch(bool(v["ui_messages_mode"]))
+        add_row(c2, tr(lang, "messages_group"), self.messages_sw)
         self.autostart_sw = Switch(bool(v["ui_launch_at_login"]))
         add_row(c2, tr(lang, "autostart"), self.autostart_sw)
         lay.addWidget(c2)
@@ -538,8 +551,9 @@ class SettingsPage(QWidget):
         self.level_seg.changed.connect(lambda t: b("ui_search_level", t))
         self.sync_seg.changed.connect(lambda t: b("ui_sync_mode", t))
         self.remind_sw.toggled.connect(lambda x: b("ui_remind_mode", bool(x)))
-        self.background_sw.toggled.connect(
-            lambda x: b("ui_background_mode", bool(x)))
+        self.tray_sw.toggled.connect(lambda x: b("ui_tray_mode", bool(x)))
+        self.messages_sw.toggled.connect(
+            lambda x: b("ui_messages_mode", bool(x)))
         self.autostart_sw.toggled.connect(
             lambda x: b("ui_launch_at_login", bool(x)))
         self.schedule_sw.toggled.connect(
@@ -547,11 +561,12 @@ class SettingsPage(QWidget):
         self.cal_seg.changed.connect(lambda t: b("ui_calendar_view", t))
 
     def sync_from_settings(self) -> None:
-        """落盘后回填 9 个控件，全程阻断信号避免回环。"""
+        """落盘后回填 10 个控件，全程阻断信号避免回环。"""
         v = self.app.prefs
         widgets = [self.lang_seg, self.theme_seg, self.level_seg,
-                   self.sync_seg, self.remind_sw, self.background_sw,
-                   self.autostart_sw, self.schedule_sw, self.cal_seg]
+                   self.sync_seg, self.remind_sw, self.tray_sw,
+                   self.messages_sw, self.autostart_sw, self.schedule_sw,
+                   self.cal_seg]
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -560,7 +575,8 @@ class SettingsPage(QWidget):
             self.level_seg.set_value(v["ui_search_level"])
             self.sync_seg.set_value(str(v["ui_sync_mode"]))
             self.remind_sw.setChecked(bool(v["ui_remind_mode"]))
-            self.background_sw.setChecked(bool(v["ui_background_mode"]))
+            self.tray_sw.setChecked(bool(v["ui_tray_mode"]))
+            self.messages_sw.setChecked(bool(v["ui_messages_mode"]))
             self.autostart_sw.setChecked(bool(v["ui_launch_at_login"]))
             self.schedule_sw.setChecked(bool(v["ui_schedule_enabled"]))
             self.cal_seg.set_value(v["ui_calendar_view"])
@@ -1139,11 +1155,11 @@ class ModernMainWindow(QWidget):
             except RuntimeError:
                 pass
         ctl = self.controller
-        if (ctl is not None and self.settings.get("close_to_tray", True)
-                and QSystemTrayIcon.isSystemTrayAvailable()):
+        if should_hide_in_tray(ctl):
             event.ignore()
             self.hide()
             return
         event.accept()
+        # 托盘运行关闭时不再常驻后台：关闭窗口即彻底退出进程。
         if ctl is not None:
             QTimer.singleShot(0, ctl.quit)

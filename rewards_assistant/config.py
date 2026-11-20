@@ -203,9 +203,14 @@ DEFAULT_SETTINGS = {
     "auto_run_fired_times": [],
     # 是否随系统启动（Windows 写注册表 / macOS 写 LaunchAgent / Linux 写 autostart）
     "launch_at_login": False,
-    # 同步后是否弹出通知
+    # 消息通知总开关（默认开）。关闭后除同步/登录失败等严重错误外，
+    # 跨天、早晚提醒、积分变化、设置已保存等一律只写日志、不弹系统消息。
+    "messages_enabled": True,
+    # 同步后是否弹出通知；与 messages_enabled 同值写入，兼容 1.3.0 语义。
     "notify_after_sync": True,
-    # 主窗口关闭时最小化到托盘而不是退出
+    # 托盘运行总开关（默认开）。关闭后不创建托盘图标，关闭窗口即彻底退出。
+    "tray_enabled": True,
+    # 主窗口关闭时最小化到托盘而不是退出；与 tray_enabled 同值，兼容 1.3.0。
     "close_to_tray": True,
     # 在官方任务全部完成后低内存休眠：进程仍运行，次日自动恢复托盘。
     "sleep_when_all_done": False,
@@ -257,6 +262,17 @@ class Settings:
                         loaded["search_panel"] = {
                             k: v for k, v in loaded["search_panel"].items()
                             if k in SEARCH_PANEL_KEYS}
+                    # 「后台与通知」拆成「托盘运行 / 消息通知」时的一次性迁移：
+                    # 旧组关闭会把下面三个键同时写成 False。若新键尚未落盘且
+                    # 命中该特征，两个新开关继承「关闭」，不擅自重新打开用户
+                    # 明确关掉的托盘与系统消息；全新安装仍默认打开。
+                    if ("tray_enabled" not in loaded
+                            and "messages_enabled" not in loaded
+                            and loaded.get("notify_after_sync") is False
+                            and loaded.get("silent_when_all_done") is False
+                            and loaded.get("close_to_tray") is False):
+                        loaded["tray_enabled"] = False
+                        loaded["messages_enabled"] = False
                     # 从旧版“到点自动运行”开关迁移，保留原有时间。
                     if "auto_run_times" not in loaded:
                         old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")

@@ -189,7 +189,8 @@ def test_settings_page_has_four_cards_and_intensity_in_defaults_card():
                  "install_hover_tips", "setToolTip(", "manager.refresh"):
         assert gone not in page, f"旧控件 / 悬浮提示残留：{gone}"
     for kept in ('self.level_seg = Segmented(', 'self.sync_seg = Segmented(',
-                 'self.remind_sw = Switch(', 'self.background_sw = Switch(',
+                 'self.remind_sw = Switch(', 'self.tray_sw = Switch(',
+                 'self.messages_sw = Switch(',
                  'self.autostart_sw = Switch(', 'self.schedule_sw = Switch(',
                  'self.cal_seg = Segmented(', 'self.defaults_grid = QGridLayout(',
                  'def refresh_defaults_summary(', 'vm.default_settings_summary(',
@@ -221,11 +222,19 @@ def test_managed_groups_write_several_real_classic_keys_at_once():
     on = vm.pref_to_settings(p, "ui_remind_mode", True)
     assert on["remind_time"] == "09:00" and on["evening_remind_time"] == "20:30"
 
-    bg = vm.pref_to_settings(p, "ui_background_mode", False)
-    assert bg["notify_after_sync"] is False and bg["close_to_tray"] is False
-    assert bg["sleep_when_all_done"] is False
-    assert set(vm.managed_group_keys("ui_background_mode")) >= {
-        "notify_after_sync", "silent_when_all_done", "close_to_tray"}
+    # 拆分后两个开关彼此独立，不再互相牵连
+    tray_off = vm.pref_to_settings(p, "ui_tray_mode", False)
+    assert tray_off == {"tray_enabled": False, "close_to_tray": False}
+    assert "messages_enabled" not in tray_off
+    msg_off = vm.pref_to_settings(p, "ui_messages_mode", False)
+    assert msg_off == {"messages_enabled": False, "notify_after_sync": False}
+    assert "tray_enabled" not in msg_off
+    assert vm.pref_to_settings(p, "ui_tray_mode", True)["tray_enabled"] is True
+    assert vm.pref_to_settings(p, "ui_messages_mode", True)["messages_enabled"] is True
+    assert set(vm.managed_group_keys("ui_tray_mode")) == {
+        "tray_enabled", "close_to_tray"}
+    assert set(vm.managed_group_keys("ui_messages_mode")) == {
+        "messages_enabled", "notify_after_sync"}
 
 
 def test_hidden_keys_are_fixed_to_defaults_and_groups_stay_editable():
@@ -238,8 +247,8 @@ def test_hidden_keys_are_fixed_to_defaults_and_groups_stay_editable():
                 "ui_notify_after_sync", "ui_close_to_tray", "ui_sleep_all_done"):
         assert key in hidden, key
     for key in ("ui_language", "ui_theme", "ui_search_level", "ui_sync_mode",
-                "ui_remind_mode", "ui_background_mode", "ui_schedule_times",
-                "ui_launch_at_login"):
+                "ui_remind_mode", "ui_tray_mode", "ui_messages_mode",
+                "ui_schedule_times", "ui_launch_at_login"):
         assert key in visible, key
 
     patch = vm.defaults_patch()
@@ -254,6 +263,9 @@ def test_hidden_keys_are_fixed_to_defaults_and_groups_stay_editable():
     assert patch["chart_days"] == 30 and patch["ui_log_enabled"] is True
     assert patch["sync_interval_minutes"] == 60
     assert patch["notify_after_sync"] is True and patch["sleep_when_all_done"] is False
+    # 两个新开关默认打开，且同步写齐经典兼容键
+    assert patch["tray_enabled"] is True and patch["close_to_tray"] is True
+    assert patch["messages_enabled"] is True
     for key in ("ui_language", "ui_theme", "ui_schedule_enabled",
                 "ui_schedule_times", "ui_launch_at_login", "ui_calendar_view"):
         assert key not in patch, key
@@ -450,11 +462,12 @@ def test_settings_values_roundtrip_for_managed_groups(tmp_path, monkeypatch):
     s = Settings()
     s.update(vm.pref_to_settings(vm.settings_values(s), "ui_sync_mode", "15"))
     s.update(vm.pref_to_settings(vm.settings_values(s), "ui_remind_mode", False))
-    s.update(vm.pref_to_settings(vm.settings_values(s), "ui_background_mode", False))
+    s.update(vm.pref_to_settings(vm.settings_values(s), "ui_tray_mode", False))
+    s.update(vm.pref_to_settings(vm.settings_values(s), "ui_messages_mode", False))
     v = vm.settings_values(Settings())
     assert v["ui_sync_mode"] == "15"
     assert v["ui_remind_mode"] is False
-    assert v["ui_background_mode"] is False
+    assert v["ui_tray_mode"] is False and v["ui_messages_mode"] is False
     assert Settings().get("sync_interval_minutes") == 15
     assert Settings().get("remind_time") == ""
     assert Settings().get("close_to_tray") is False
