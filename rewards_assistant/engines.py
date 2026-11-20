@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 # 提交之后至少要留给"看结果"的时间
 RESULTS_RESERVE = 3.0
@@ -31,6 +32,8 @@ class Engine:
     consent: list = field(default_factory=list)
     captcha: list = field(default_factory=list)
     ready: list = field(default_factory=list)
+    # 「地址栏搜索」直接导航的目标模板；{q} = URL 编码后的关键词。
+    search: str = "https://www.bing.com/search?q={q}&mkt={mkt}"
 
 
 ENGINES = {
@@ -44,6 +47,7 @@ ENGINES = {
         captcha=["#verify", "#captcha", "iframe[src*='captcha']", ".vs_captcha",
                  "text=请证明你不是机器人", "text=Verify you are human"],
         ready=["#sb_form_q", "#b_results"],
+        search="https://www.bing.com/search?q={q}&mkt={mkt}",
     ),
 }
 
@@ -61,6 +65,24 @@ def home_url(engine: Engine, geo=None) -> str:
     """首页 URL 带市场参数，与 IP 归属保持一致。"""
     mkt = getattr(geo, "market", None) or "zh-CN"
     return f"https://www.bing.com/?mkt={mkt}"
+
+
+def address_bar_url(engine: Engine, keyword: str) -> str:
+    """等价「在浏览器地址栏敲入 Bing 搜索 URL 并回车」的导航目标。
+
+    Playwright 只能操作页面 DOM，无法直接控制 Chromium omnibox；从服务端
+    看，地址栏搜索就是一次对 ``/search?q=...`` 的直接 GET（没有首页表单
+    提交链），这里用 ``page.goto`` 精确表达这个行为。mkt 与首页保持一致。
+    """
+    tpl = getattr(engine, "search", "") or "https://www.bing.com/search?q={q}&mkt={mkt}"
+    mkt = "zh-CN"
+    try:
+        values = parse_qs(urlparse(engine.home).query).get("mkt")
+        if values:
+            mkt = values[0]
+    except Exception:
+        pass
+    return tpl.format(q=quote_plus(str(keyword)), mkt=quote_plus(mkt))
 
 
 def on_engine_domain(page, engine: Engine) -> bool:
@@ -136,63 +158,90 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
     budget 不为 None 时，全程按剩余时间裁剪动作，保证在预算内收尾。
     返回 {"ok": bool, "clicked": str|None, "reason": str|None}
 
-    导航链：首轮进首页；后续轮次若已在 Bing 上，就**留在 SERP 直接改词**——
-    真人不会每搜一个词都重新打开一次首页，那会产生一串可疑的重复首页请求。
+    导航链：默认每轮以 ``cfg.address_bar_rate``（25%）概率从地址栏直接导航
+    到搜索 URL；其余轮次首轮进首页、后续轮次若已在 Bing 上就**留在 SERP
+    直接改词**——真人不会每搜一个词都重新打开一次首页，那会产生一串可疑的
+    重复首页请求。两条路径共享同一套结果阅读 / 点击 / 滚动拟人动作。
     """
     if budget is not None:
         human.bind(budget)
 
-    reuse = bool(getattr(cfg, "reuse_serp", True))
-    if reuse and on_engine_domain(page, engine):
-        log("reuse", "停留在搜索结果页，直接改词（不重新打开首页）")
-        human.pause(0.3, 1.2)
+    # ---- 默认配置：每轮以 25% 概率走「地址栏搜索」----------------------
+    # 真人不会永远在页面搜索框里改词：有时会从地址栏直接发起一次 Bing 搜索。
+    # Playwright 无法操作 omnibox，用等价的直接导航表达；结果阅读 / 点击 /
+    # 滚动等后续拟人动作两条路径完全一致。概率由 api.run_human_search 的
+    # address_bar_rate 传入，设置页「拟人强度」统一写进经典 search_panel。
+    rate = max(0.0, min(1.0, float(getattr(cfg, "address_bar_rate", 0.0) or 0.0)))
+    via_address_bar = human.rng.random() < rate
+    last_xy = None
+    if via_address_bar:
+        url = address_bar_url(engine, keyword)
+        log("address_bar", f"地址栏搜索命中（{rate:.0%}）：{keyword}")
+        human.pause(0.5, 1.4)                   # 切到地址栏 + 敲入 URL
+        timeout = 30000
+        if budget is not None:
+            timeout = int(max(4000, min(timeout, budget.left * 1000 * 0.6)))
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(6000, timeout))
+        except Exception:
+            pass
+        human.pause(0.3, 0.9)
+        if detect_captcha(page, engine, log, cfg.on_captcha):
+            log("captcha", "验证后继续本轮搜索")
+        last_xy = handle_consent(page, engine, human, log, None)
     else:
-        goto_home(page, engine, human, log, budget)
-        if budget is not None and budget.left <= RESULTS_RESERVE + 1:
-            log("warn", f"打开首页已耗时 {budget.elapsed:.1f}s，本轮压缩后续动作")
-
-    if detect_captcha(page, engine, log, cfg.on_captcha):
-        log("captcha", "验证后继续本轮搜索")
-    last_xy = handle_consent(page, engine, human, log, None)
-
-    wait_ms = 15000 if budget is None else int(max(3000, min(15000, budget.left * 1000 * 0.4)))
-    box_loc, sel = _first_visible(page, engine.inputs, timeout_ms=wait_ms)
-    if box_loc is None:
-        log("error", "找不到搜索框")
-        return {"ok": False, "reason": "no-input", "clicked": None}
-    log("focus", f"定位搜索框 {sel}")
-
-    last_xy = human.human_click(page, box_loc, last_xy)
-    human.pause(0.15, 0.6)
-    if human.rng.random() < 0.5:               # 真人换词时也会全选删掉
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Delete")
-        human.pause(0.1, 0.3)
-
-    # 粘贴预算：给提交和看结果留位置即可，粘贴本身很快
-    paste_seconds = None
-    if budget is not None:
-        room = budget.left - RESULTS_RESERVE - 1.0
-        paste_seconds = max(0.4, min(3.0, room * 0.2))
-    log("paste", f"粘贴关键词：{keyword}"
-                 + (f"（预算 {paste_seconds:.1f}s）" if paste_seconds else ""))
-    human.paste_text(page, box_loc, keyword, seconds=paste_seconds)
-    ok_input = human.fix_input(page, box_loc, keyword)
-    if not ok_input:
-        log("warn", f"输入框内容与预期不一致，已尝试修正：{keyword}")
-    human.pause(0.3, 1.2)                       # 输完会犹豫一下
-
-    if human.rng.random() < cfg.enter_rate:
-        log("submit", "回车提交")
-        page.keyboard.press("Enter")
-    else:
-        btn, bsel = _first_visible(page, engine.buttons, timeout_ms=3000)
-        if btn is not None:
-            log("submit", f"点击搜索按钮 {bsel}")
-            human.human_click(page, btn, last_xy)
+        reuse = bool(getattr(cfg, "reuse_serp", True))
+        if reuse and on_engine_domain(page, engine):
+            log("reuse", "停留在搜索结果页，直接改词（不重新打开首页）")
+            human.pause(0.3, 1.2)
         else:
-            log("submit", "未找到按钮，退回回车")
+            goto_home(page, engine, human, log, budget)
+            if budget is not None and budget.left <= RESULTS_RESERVE + 1:
+                log("warn", f"打开首页已耗时 {budget.elapsed:.1f}s，本轮压缩后续动作")
+
+        if detect_captcha(page, engine, log, cfg.on_captcha):
+            log("captcha", "验证后继续本轮搜索")
+        last_xy = handle_consent(page, engine, human, log, None)
+
+        wait_ms = 15000 if budget is None else int(max(3000, min(15000, budget.left * 1000 * 0.4)))
+        box_loc, sel = _first_visible(page, engine.inputs, timeout_ms=wait_ms)
+        if box_loc is None:
+            log("error", "找不到搜索框")
+            return {"ok": False, "reason": "no-input", "clicked": None}
+        log("focus", f"定位搜索框 {sel}")
+
+        last_xy = human.human_click(page, box_loc, last_xy)
+        human.pause(0.15, 0.6)
+        if human.rng.random() < 0.5:               # 真人换词时也会全选删掉
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+            human.pause(0.1, 0.3)
+
+        # 粘贴预算：给提交和看结果留位置即可，粘贴本身很快
+        paste_seconds = None
+        if budget is not None:
+            room = budget.left - RESULTS_RESERVE - 1.0
+            paste_seconds = max(0.4, min(3.0, room * 0.2))
+        log("paste", f"粘贴关键词：{keyword}"
+                     + (f"（预算 {paste_seconds:.1f}s）" if paste_seconds else ""))
+        human.paste_text(page, box_loc, keyword, seconds=paste_seconds)
+        ok_input = human.fix_input(page, box_loc, keyword)
+        if not ok_input:
+            log("warn", f"输入框内容与预期不一致，已尝试修正：{keyword}")
+        human.pause(0.3, 1.2)                       # 输完会犹豫一下
+
+        if human.rng.random() < cfg.enter_rate:
+            log("submit", "回车提交")
             page.keyboard.press("Enter")
+        else:
+            btn, bsel = _first_visible(page, engine.buttons, timeout_ms=3000)
+            if btn is not None:
+                log("submit", f"点击搜索按钮 {bsel}")
+                human.human_click(page, btn, last_xy)
+            else:
+                log("submit", "未找到按钮，退回回车")
+                page.keyboard.press("Enter")
 
     wait_ms = 20000 if budget is None else int(max(2500, min(20000, budget.left * 1000 * 0.7)))
     res, rsel = _first_visible(page, engine.results, timeout_ms=wait_ms)

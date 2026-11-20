@@ -18,6 +18,9 @@
 **不以明文落盘**，而不是对抗已经攻陷本机的攻击者。机器名或系统用户变化
 会让非 Windows 凭证失效，重新登录一次即可。
 
+多开隔离：凭证文件落在 ``config.instance_home()/<FILENAME>``，且非默认实例
+的加密熵追加实例 id，因此不同环境保存的是不同账号的会话，互相拷文件也解不开。
+
 零第三方依赖：只用标准库；Windows DPAPI 通过 ctypes 调用系统 DLL。
 """
 from __future__ import annotations
@@ -61,9 +64,10 @@ def _relevant_domain(domain: str) -> bool:
 
 
 def data_dir() -> Path:
+    """当前实例的数据目录；多开时每个实例一份，互不共享。"""
     try:
-        from .config import data_dir as _dir  # 唯一真源
-        return Path(_dir())
+        from .config import instance_home as _home  # 唯一真源
+        return Path(_home())
     except Exception:                        # 独立运行 / 单测兜底
         override = os.environ.get("MS_REWARDS_HOME")
         if override:
@@ -76,6 +80,23 @@ def data_dir() -> Path:
             base = Path.home() / ".local" / "share" / "msrewardsassistant"
         base.mkdir(parents=True, exist_ok=True)
         return base
+
+
+def _entropy() -> bytes:
+    """每个实例用不同的加密熵。
+
+    默认实例沿用 1.3.0 的 ENTROPY，旧凭证零迁移；新实例追加实例 id，
+    因此即便把 A 环境的凭证文件拷到 B 环境目录，也解不出 A 的账号会话 ——
+    多开的「环境独立」在密钥层同样成立。
+    """
+    try:
+        from .config import instance_id as _id
+        ident = _id()
+    except Exception:
+        return ENTROPY
+    if ident == "default":
+        return ENTROPY
+    return ENTROPY + b"|instance=" + ident.encode("ascii", "ignore")
 
 
 # ---------------------------------------------------------------- Windows DPAPI
@@ -103,7 +124,7 @@ def _dpapi(data: bytes, *, protect: bool) -> Optional[bytes]:
                        ctypes.c_ulong, ctypes.POINTER(_BLOB)]
         fn.restype = ctypes.c_int
         src, src_arr = _make_blob(data)
-        ent, ent_arr = _make_blob(ENTROPY)
+        ent, ent_arr = _make_blob(_entropy())
         out = _BLOB()
         ok = fn(ctypes.byref(src), "MSRewardsAssistant", ctypes.byref(ent),
                 None, None, 0, ctypes.byref(out))
@@ -140,7 +161,7 @@ def _machine_seed() -> bytes:
 
 
 def _derive_key(nonce: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", _machine_seed() + ENTROPY,
+    return hashlib.pbkdf2_hmac("sha256", _machine_seed() + _entropy(),
                                nonce, PBKDF2_ROUNDS, 32)
 
 
@@ -223,7 +244,14 @@ class CookieStore:
     """加密凭证文件；损坏 / 篡改 / 换机器一律当作「尚未保存会话」。"""
 
     def __init__(self, path=None) -> None:
-        self.path = Path(path) if path else data_dir() / FILENAME
+        if path:
+            self.path = Path(path)
+        else:
+            try:
+                from .config import credentials_path as _cred
+                self.path = Path(_cred())
+            except Exception:
+                self.path = data_dir() / FILENAME
 
     def exists(self) -> bool:
         return self.path.is_file() and self.path.stat().st_size > len(MAGIC) + 1

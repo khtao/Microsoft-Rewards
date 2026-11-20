@@ -6,16 +6,31 @@ import sys
 from pathlib import Path
 from typing import List
 
-from .config import APP_NAME, APP_TITLE
+from .config import (autostart_name, instance_id, is_default_instance,
+                     window_title)
 
 
 def _launch_command() -> List[str]:
-    """返回用于自启动的命令行。打包成 exe 后直接用 exe 本身。"""
+    """返回用于自启动的命令行；非默认实例必须带上 --instance。
+
+    否则多个环境会共用同一份自启命令，开机只拉起默认账号，另一个环境
+    的定时与提醒永远不运行 —— 这是多开最容易漏掉的一处。
+    """
     if getattr(sys, "frozen", False):  # PyInstaller / Nuitka
-        return [sys.executable, "--minimized"]
-    # 使用包内统一入口；无需额外 run.py，且不依赖当前工作目录。
-    entry = Path(__file__).resolve().parent / "__main__.py"
-    return [sys.executable, str(entry), "--minimized"]
+        cmd = [sys.executable]
+    else:
+        # 使用包内统一入口；无需额外 run.py，且不依赖当前工作目录。
+        entry = Path(__file__).resolve().parent / "__main__.py"
+        cmd = [sys.executable, str(entry)]
+    if not is_default_instance():
+        cmd += ["--instance", instance_id()]
+    cmd.append("--minimized")
+    return cmd
+
+
+def _entry_name() -> str:
+    """注册表值 / plist / .desktop 都按实例分开，互不覆盖。"""
+    return autostart_name()
 
 
 # --------------------------------------------------------------------- Windows
@@ -30,10 +45,10 @@ def _win_set(enabled: bool) -> bool:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
             if enabled:
                 cmd = " ".join(f'"{c}"' if " " in c else c for c in _launch_command())
-                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
+                winreg.SetValueEx(key, _entry_name(), 0, winreg.REG_SZ, cmd)
             else:
                 try:
-                    winreg.DeleteValue(key, APP_NAME)
+                    winreg.DeleteValue(key, _entry_name())
                 except FileNotFoundError:
                     pass
         return True
@@ -49,7 +64,7 @@ def _win_get() -> bool:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                             r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            winreg.QueryValueEx(key, APP_NAME)
+            winreg.QueryValueEx(key, _entry_name())
             return True
     except OSError:
         return False
@@ -57,8 +72,12 @@ def _win_get() -> bool:
 
 # ----------------------------------------------------------------------- macOS
 
+def _mac_label() -> str:
+    return "com.user." + _entry_name().lower()
+
+
 def _mac_plist() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"com.user.{APP_NAME.lower()}.plist"
+    return Path.home() / "Library" / "LaunchAgents" / f"{_mac_label()}.plist"
 
 
 def _mac_set(enabled: bool) -> bool:
@@ -72,7 +91,7 @@ def _mac_set(enabled: bool) -> bool:
         f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.user.{APP_NAME.lower()}</string>
+  <key>Label</key><string>{_mac_label()}</string>
   <key>ProgramArguments</key><array>{parts}</array>
   <key>RunAtLoad</key><true/>
 </dict></plist>
@@ -86,7 +105,7 @@ def _mac_set(enabled: bool) -> bool:
 
 def _linux_desktop() -> Path:
     base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "autostart" / f"{APP_NAME.lower()}.desktop"
+    return base / "autostart" / f"{_entry_name().lower()}.desktop"
 
 
 def _linux_set(enabled: bool) -> bool:
@@ -99,7 +118,7 @@ def _linux_set(enabled: bool) -> bool:
     lines = [
         "[Desktop Entry]",
         "Type=Application",
-        f"Name={APP_TITLE}",
+        f"Name={window_title()}",
         f"Exec={cmd}",
         "Hidden=false",
         "NoDisplay=false",

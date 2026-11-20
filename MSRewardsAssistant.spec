@@ -45,6 +45,35 @@ d, b, h = collect_all('playwright')
 datas += d
 binaries += b
 hiddenimports += h
+
+# --- shiboken6 动态库：显式平铺，绝不依赖 PyInstaller hook 的隐式摆放 ---
+# collect_dynamic_libs('shiboken6') 在 PyInstaller 6.x 返回空；某些构建环境
+# 里 hook-PySide6 只把 libshiboken6.abi3.so.6.9 放进 _internal/shiboken6/
+# 子目录，甚至只在 _internal 顶层留一个 symlink。而 Shiboken.abi3.so 的
+# DT_NEEDED 由动态加载器按 LD_LIBRARY_PATH（PyInstaller onedir 设成
+# _internal）搜索 —— 顶层没有真实文件时就会报
+#   libshiboken6.abi3.so.6.9: cannot open shared object file
+# 这个行为随 PyInstaller / shiboken6 版本、venv 布局、文件系统是否保留
+# symlink 而变化，是构建可移植性缺陷。这里把**真实文件**（非 symlink）
+# 显式放到 _internal 顶层，Windows 的 shiboken6*.dll 同样处理。
+SHIBOKEN_EXPLICIT = []
+try:
+    import shiboken6 as _sb
+    _sb_dir = Path(_sb.__file__).resolve().parent
+    _patterns = ('libshiboken6*.so*', 'libshiboken6*.dylib',
+                 'shiboken6*.dll', 'libshiboken6*.dll')
+    _seen = set()
+    for _pat in _patterns:
+        for _lib in sorted(_sb_dir.glob(_pat)):
+            _real = _lib.resolve() if _lib.is_symlink() else _lib
+            _key = (_real.name, _real)
+            if _real.is_file() and _key not in _seen:
+                _seen.add(_key)
+                SHIBOKEN_EXPLICIT.append((str(_real), '.'))
+except Exception:
+    pass
+binaries += SHIBOKEN_EXPLICIT
+hiddenimports += ['shiboken6']
 hiddenimports += [
     # 同步层用 async_api 并发抓两页，sync_api 作为无异步环境兜底；
     # 显式列出，避免打包后因动态导入缺失而退化成串行。

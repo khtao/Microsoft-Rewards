@@ -26,10 +26,17 @@ from types import SimpleNamespace
 from .engines import ENGINES, resolve_engine, run_search
 from .human import Budget, Human
 from .trends import Keyword, get_keyword_pool
-from .config import data_dir
+from .config import search_log_path
+
+
+def default_log_path() -> str:
+    """行为日志落在当前实例目录；多开时各写各的，不串号。"""
+    return str(search_log_path())
+
 
 # 不在启动目录写日志；系统登录后自启动时 CWD 常常不可写。
-DEFAULT_LOG = str(data_dir() / "search_actions.jsonl")
+# 保留常量以兼容旧调用点；运行期统一用 default_log_path() 动态解析。
+DEFAULT_LOG = default_log_path()
 
 
 # ------------------------------------------------------------------ 数据结构
@@ -167,6 +174,7 @@ def run_human_search(
         click_prob: float = 0.35,
         enter_rate: float = 0.5,
         scroll_screens: float = 1.2,
+        address_bar_rate: float = 0.25,
         on_captcha: str = "wait",
         user_data_dir: str | None = None,
         copy_profile: bool = False,   # 兼容旧设置键；新版自动化不复制任何 profile
@@ -186,7 +194,7 @@ def run_human_search(
         session_chain: bool = True,
         reuse_serp: bool = True,
         audit_requests: bool = False,
-        log_file: str | None = DEFAULT_LOG,
+        log_file: str | None = None,
         log_callback=None,
         stop_check=None,
         verbose: bool = True,
@@ -209,6 +217,9 @@ def run_human_search(
     level             : 拟人强度 1~3
     round_seconds     : 每轮时长随机区间（秒），默认 16~29，配合 max_round_seconds=30
     gap_seconds       : 两轮之间的间隔区间（秒）
+    address_bar_rate  : 每轮改用「地址栏直接导航到搜索 URL」的概率，默认 0.25；
+                        其余轮次走页面搜索框输入。Playwright 无法操作 omnibox，
+                        用等价的 page.goto 表达，结果阅读 / 点击 / 滚动完全一致。
     sandbox           : "on" 开沙箱 / "off" 关沙箱 / None 自动（root 自动关，并抑制警告横幅）
     page / context    : 注入已有的 Playwright 页面或上下文；不传则自行启动 Edge
     close_browser     : 结束时是否关闭浏览器（注入的对象不受影响）
@@ -219,6 +230,7 @@ def run_human_search(
     """
     if repeat < 1:
         raise ValueError("repeat 必须 >= 1")
+    log_file = log_file or default_log_path()
     # 只保留 Bing：历史配置里的 baidu / both 会被收敛掉，不报错
     engines = tuple(dict.fromkeys(resolve_engine(e) for e in (engines or ("bing",))))
     if len(engines) > 1:
@@ -235,6 +247,8 @@ def run_human_search(
     cfg = SimpleNamespace(
         on_captcha=on_captcha, click_prob=click_prob,
         enter_rate=enter_rate, scroll_screens=scroll_screens, no_back=False,
+        # 非法值一律裁剪到 [0, 1]，避免旧配置写进字符串后整轮异常
+        address_bar_rate=max(0.0, min(1.0, float(address_bar_rate))),
         reuse_serp=reuse_serp,
     )
 

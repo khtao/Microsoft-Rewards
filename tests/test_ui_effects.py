@@ -246,7 +246,7 @@ def test_hidden_keys_are_fixed_to_defaults_and_groups_stay_editable():
     sp = patch["search_panel"]
     assert sp["level"] == 2 and sp["repeat"] == vm.REPEAT_DEFAULT == 12
     assert sp["keywords"] == "" and sp["keyword_sources"] == tuple(vm.DEFAULT_SOURCES)
-    # 默认档位必须带齐 5 项拟人参数
+    # 默认档位必须带齐 6 项拟人参数
     for key in vm.INTENSITY_PARAM_KEYS:
         assert key in sp, key
     assert vm.defaults_patch(3)["search_panel"]["level"] == 3
@@ -300,14 +300,15 @@ def test_plus_button_adds_time_without_input_dialog():
 
 # ---------------------------------------------------------------- 拟人强度统一控制
 
-def test_intensity_profiles_cover_three_levels_and_five_displayed_params():
+def test_intensity_profiles_cover_three_levels_and_six_displayed_params():
     assert list(vm.INTENSITY_PROFILES) == ["低", "中", "高"]
     assert [vm.INTENSITY_PROFILES[k]["level"] for k in ("低", "中", "高")] == [1, 2, 3]
     labels = [row[1] for row in vm.DEFAULT_SUMMARY_ROWS]
-    assert labels == ["搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数"]
+    assert labels == ["搜索轮数", "单轮耗时", "回车提交", "结果点击",
+                      "滚动屏数", "地址栏搜索"]
     keys = {row[0] for row in vm.DEFAULT_SUMMARY_ROWS}
     assert keys == {"repeat", "round_seconds", "enter_rate",
-                    "click_prob", "scroll_screens"}
+                    "click_prob", "scroll_screens", "address_bar_rate"}
     for choice, profile in vm.INTENSITY_PROFILES.items():
         for key in keys | set(vm.INTENSITY_PARAM_KEYS):
             assert key in profile, (choice, key)
@@ -317,9 +318,12 @@ def test_intensity_profiles_cover_three_levels_and_five_displayed_params():
         assert 0 <= profile["enter_rate"] <= 1
         assert 0 <= profile["click_prob"] <= 1
         assert profile["scroll_screens"] > 0
-    # 三档取值必须彼此不同（统一管理而非固定值）
-    for key in keys:
+    # 除「地址栏搜索」这项固定默认配置外，三档取值必须彼此不同
+    for key in keys - {"address_bar_rate"}:
         assert len({str(vm.INTENSITY_PROFILES[c][key]) for c in vm.INTENSITY_PROFILES}) == 3, key
+    # 25% 是固定默认配置，三档一致，但仍由强度切换统一写回
+    for choice, profile in vm.INTENSITY_PROFILES.items():
+        assert profile["address_bar_rate"] == 0.25, choice
 
 
 def test_middle_profile_matches_api_run_human_search_defaults():
@@ -334,9 +338,10 @@ def test_middle_profile_matches_api_run_human_search_defaults():
     assert sig.parameters["enter_rate"].default == mid["enter_rate"]
     assert sig.parameters["click_prob"].default == mid["click_prob"]
     assert sig.parameters["scroll_screens"].default == mid["scroll_screens"]
+    assert sig.parameters["address_bar_rate"].default == mid["address_bar_rate"] == 0.25
 
 
-def test_intensity_switch_writes_all_five_params_at_once():
+def test_intensity_switch_writes_all_six_params_at_once():
     """一个控件统一控制：切档一次写齐整组参数，且关键词/来源不丢失。"""
     p = dict(vm.UI_DEFAULTS)
     p.update({"ui_keywords": "旅行", "ui_sources": "baidu,bing"})
@@ -349,7 +354,7 @@ def test_intensity_switch_writes_all_five_params_at_once():
             assert sp[key] == profile[key], (choice, key)
         assert sp["keywords"] == "旅行"
         assert sp["keyword_sources"] == ("baidu", "bing")
-        # 其它设置写入不能把 5 项参数冲掉
+        # 其它设置写入不能把 6 项参数冲掉
         again = vm.pref_to_settings({**p, "ui_search_level": choice},
                                     "ui_keywords", "摄影")
         for key in vm.INTENSITY_PARAM_KEYS:
@@ -357,23 +362,26 @@ def test_intensity_switch_writes_all_five_params_at_once():
                 assert again["search_panel"][key] == profile[key], (choice, key)
 
 
-def test_default_settings_summary_is_five_rows_and_follows_intensity():
+def test_default_settings_summary_is_six_rows_and_follows_intensity():
     zh = dict(vm.default_settings_summary(dict(vm.UI_DEFAULTS), "zh"))
-    assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 5
+    assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 6
     assert zh["搜索轮数"] == "12 轮"
     assert zh["单轮耗时"] == "16–29 秒"
     assert zh["回车提交"] == "50%"
     assert zh["结果点击"] == "35%"
     assert zh["滚动屏数"] == "1.2 屏"
+    assert zh["地址栏搜索"] == "25%"
 
     low = dict(vm.default_settings_summary(
         {"ui_search_level": "低", "ui_intensity_params": vm.intensity_profile("低")}, "zh"))
     assert low == {"搜索轮数": "8 轮", "单轮耗时": "10–18 秒",
-                   "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏"}
+                   "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏",
+                   "地址栏搜索": "25%"}
     high = dict(vm.default_settings_summary(
         {"ui_search_level": "高", "ui_intensity_params": vm.intensity_profile("高")}, "zh"))
     assert high == {"搜索轮数": "16 轮", "单轮耗时": "24–40 秒",
-                    "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏"}
+                    "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏",
+                    "地址栏搜索": "25%"}
 
     en = dict(vm.default_settings_summary(
         {"ui_search_level": "中", "ui_intensity_params": vm.intensity_profile("中")}, "en"))
@@ -382,6 +390,7 @@ def test_default_settings_summary_is_five_rows_and_follows_intensity():
     assert en["Enter submits"] == "50%"
     assert en["Result clicks"] == "35%"
     assert en["Result scrolling"] == "1.2 screens"
+    assert en["Address-bar search"] == "25%"
 
 
 def test_intensity_params_are_persisted_and_transmitted_to_classic_chain():
@@ -392,7 +401,8 @@ def test_intensity_params_are_persisted_and_transmitted_to_classic_chain():
         assert f'"{key}"' in cfg
     legacy = LEGACY.read_text(encoding="utf8")
     for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                "enter_rate", "click_prob", "scroll_screens"):
+                "enter_rate", "click_prob", "scroll_screens",
+                "address_bar_rate"):
         assert key in legacy, key
     assert "params[key]" in legacy
     assert "state[key] = sp[key]" in legacy, "_view_state 必须保留强度参数"

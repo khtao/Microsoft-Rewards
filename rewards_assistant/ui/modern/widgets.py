@@ -31,7 +31,7 @@ class RingProgress(QAbstractButton):
     运行 / 同步期间 ``setEnabled(False)``，视觉变淡且不响应点击。
     """
 
-    def __init__(self, parent=None, size: int = 176) -> None:
+    def __init__(self, parent=None, size: int = 188) -> None:
         super().__init__(parent)
         self._size = size
         self._value = 0.0
@@ -137,20 +137,38 @@ class RingProgress(QAbstractButton):
     def is_hovered(self) -> bool:
         return self._hovered
 
+    def paint_geometry(self, phase: float | None = None):
+        """一次算出全部绘制几何，保证**任何 hover 相位都不出界**。
+
+        截图里的 bug：旧版 ``inset = 13 - 2*phase`` 在相位 1 时只剩 11px，
+        而 halo 笔宽最大 29.5px（半宽 14.75），加上 100% 满圆时 12 点方向
+        RoundCap 与末端高光点都朝径向外溢，顶端被 widget 边界裁成平边。
+
+        现在相位增大时圆环**向内**收缩（inset 变大），光晕变宽/变亮、弧线
+        加粗、高光点变大、字号微增 —— 呼吸感不靠向外顶，边界永远圆润。
+        返回值 ``(inset, arc_w, halo_w, tip_r, outer_margin)``，其中
+        ``outer_margin`` 是最外侧绘制元素到 widget 边缘的余量，必须 > 0。
+        """
+        ph = 0.0 if phase is None else max(0.0, min(1.0, float(phase)))
+        inset = 19.0 + 2.0 * ph
+        arc_w = 12.0 + 1.5 * ph
+        halo_w = arc_w + 7.0 + 4.0 * ph
+        tip_r = 3.0 + 2.0 * ph
+        outer = inset - max(halo_w / 2.0, arc_w / 2.0, tip_r)
+        return inset, arc_w, halo_w, tip_r, outer
+
     # ------------------------------------------------------------ 绘制
 
     def paintEvent(self, _event) -> None:
         c = theme.current()
         phase = self._hover_phase
+        inset, width, halo_width, tip_r, _margin = self.paint_geometry(phase)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if not self.isEnabled():
             p.setOpacity(0.5)
-        # hover 时整圈轻微外扩，幅度 2px，配合光晕形成「呼吸」
-        inset = 13 - 2 * phase
         rect = QRectF(inset, inset, self.width() - 2 * inset,
                       self.height() - 2 * inset)
-        width = 13 + 1.5 * phase
         base = QPen(QColor(c["track"]), width, Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap)
         p.setPen(base)
@@ -161,7 +179,7 @@ class RingProgress(QAbstractButton):
             glow = QColor(c["primary"])
             # 静止淡光晕 34；数值动画中 74；hover 呼吸最高到 128
             glow.setAlpha(max(34, 74 if moving else 34, int(34 + 94 * phase)))
-            halo = QPen(glow, width + 9 + 6 * phase, Qt.PenStyle.SolidLine,
+            halo = QPen(glow, halo_width, Qt.PenStyle.SolidLine,
                         Qt.PenCapStyle.RoundCap)
             p.setPen(halo)
             p.drawArc(rect, 90 * 16, span)
@@ -179,8 +197,8 @@ class RingProgress(QAbstractButton):
                 tip.setAlpha(int(150 + 90 * phase))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(tip)
-                p.drawEllipse(QRectF(ex - 3 - 2 * phase, ey - 3 - 2 * phase,
-                                    (6 + 4 * phase), (6 + 4 * phase)))
+                p.drawEllipse(QRectF(ex - tip_r, ey - tip_r,
+                                    2 * tip_r, 2 * tip_r))
                 p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QColor(c["text"]))
         f = QFont(self.font())

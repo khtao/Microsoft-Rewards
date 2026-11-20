@@ -144,10 +144,13 @@ def main() -> int:
     # 圆环 hover：呼吸光晕 + 内置「↻ 刷新」文字（不是浮层提示框）
     ring = win.home.ring
     ring._start_hover()
-    ring._on_hover_phase(0.9)
+    # 用最大相位出图：这是截图里被裁成平边的那个状态
+    ring._on_hover_phase(1.0)
     ring.repaint()
     ring.grab().save(str(OUT / "ring_hover.png"))
-    assert ring.is_hovered() and ring.hover_phase() > 0.5
+    assert ring.is_hovered() and ring.hover_phase() == 1.0
+    _inset, _arc, _halo, _tip, margin = ring.paint_geometry(1.0)
+    assert margin >= 4.0, "最大相位光晕必须完整落在 widget 内"
     ring._stop_hover()
 
     # 运行态：主按钮红色 + 停止文案，圆环与顶部放大镜禁用
@@ -208,24 +211,27 @@ def main() -> int:
     assert win.prefs["ui_schedule_times"] == ["08:00", "08:30", "09:00"]
     assert win.settings.get("auto_run_times") == ["08:00", "08:30", "09:00"]
 
-    # 拟人搜索默认设置：5 行只读值 + 一个强度控件，值随档位联动且真实写回
+    # 拟人搜索默认设置：6 行只读值 + 一个强度控件，值随档位联动且真实写回
     rows = summary_texts(sp)
-    assert len(rows) == 5, rows
-    for label in ("搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数"):
+    assert len(rows) == 6, rows
+    for label in ("搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数",
+                  "地址栏搜索"):
         assert any(label in t for t in rows), (label, rows)
     assert any("12 轮" in t for t in rows), "默认中档搜索轮数应为 12"
     assert any("16–29 秒" in t for t in rows)
     assert any("50%" in t for t in rows) and any("35%" in t for t in rows)
     assert any("1.2 屏" in t for t in rows)
+    assert any("25%" in t for t in rows), "地址栏搜索默认概率必须是 25%"
     assert sp.level_seg.value() == "中"
 
-    # 低档：整组参数一起变，且经典 SearchPanel._collect() 能透传给执行层
+    # 低档：整组参数一起变（地址栏 25% 为固定默认），且经典 _collect() 透传
     sp.level_seg.changed.emit("低")
     rows_low = summary_texts(sp)
     assert any("8 轮" in t for t in rows_low), rows_low
     assert any("10–18 秒" in t for t in rows_low), rows_low
     assert any("35%" in t for t in rows_low) and any("20%" in t for t in rows_low)
     assert any("0.6 屏" in t for t in rows_low)
+    assert any("25%" in t for t in rows_low)
     live = win.settings.get("search_panel")
     assert live["level"] == 1 and live["repeat"] == 8
     assert live["enter_rate"] == 0.35 and live["click_prob"] == 0.20
@@ -233,15 +239,17 @@ def main() -> int:
     collected = win.search._collect()
     assert collected["enter_rate"] == 0.35 and collected["click_prob"] == 0.20
     assert collected["scroll_screens"] == 0.6
+    assert collected["address_bar_rate"] == 0.25
     assert tuple(collected["round_seconds"]) == (10.0, 18.0)
 
-    # 高档：再切一次，5 行与经典参数同步变化
+    # 高档：再切一次，6 行与经典参数同步变化
     sp.level_seg.changed.emit("高")
     rows_high = summary_texts(sp)
     assert any("16 轮" in t for t in rows_high), rows_high
     assert any("24–40 秒" in t for t in rows_high), rows_high
     assert any("70%" in t for t in rows_high) and any("55%" in t for t in rows_high)
     assert any("2 屏" in t for t in rows_high)
+    assert any("25%" in t for t in rows_high)
     assert win.settings.get("search_panel")["level"] == 3
     assert win.search._collect()["enter_rate"] == 0.70
 
@@ -258,7 +266,8 @@ def main() -> int:
     win.grab().save(str(OUT / "dark.png"))
 
     print("previews OK:", ", ".join(sorted(p.name for p in OUT.glob("*.png"))))
-    print("intensity rows:", len(rows), "→ low", len(rows_low), "→ high", len(rows_high))
+    print("intensity rows:", len(rows), "→ low", len(rows_low), "→ high", len(rows_high),
+          "| address-bar 25%")
     print("daily group:", daily["earned"], "/", daily["total"], "→",
           daily["percent"], "% → fill", vm.progress_fill(daily["percent"], 316), "px")
     win.close()

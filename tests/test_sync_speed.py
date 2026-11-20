@@ -2,8 +2,9 @@
 """同步速度回归：同步链路不启动浏览器、两页并发、解析器单次扫描、落库单次提交。
 
 根本优化：凭证与浏览器解耦。``/dashboard`` 与 ``/earn`` 是服务端渲染的
-HTML，需要的只是带 Cookie 的两个 GET；现在由 ``HttpFetcher`` 用
-``requests.Session`` 并发完成，Chromium 冷启动（数秒）从同步路径彻底消失。
+HTML，需要的只是带 Cookie 的两个 GET；现在由 ``HttpFetcher`` 并发完成，
+Chromium 冷启动（数秒）从同步路径彻底消失。requests 被系统环境污染时由
+标准库 ``urllib`` 自动兜底（见 test_http_stdlib_fallback.py）。
 """
 from __future__ import annotations
 

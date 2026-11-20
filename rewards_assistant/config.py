@@ -2,6 +2,12 @@
 
 所有用户数据（SQLite 数据库、浏览器登录态、设置）都放在同一个数据目录下，
 避免污染项目目录，也方便用户备份与彻底卸载。
+
+**多开环境**：一个进程对应一个实例（``--instance <id>`` / 环境变量
+``MS_REWARDS_INSTANCE``）。默认实例 ``default`` 沿用原来的数据目录，旧数据
+零迁移；其余实例各自落在 ``<base>/instances/<id>/`` 下，设置、积分库、
+加密凭证、浏览器 profile、运行日志、自动化快照、开机自启项全部独立，
+因此可以登录不同的 Microsoft 账号且互不干扰。
 """
 from __future__ import annotations
 
@@ -12,17 +18,19 @@ import tempfile
 from pathlib import Path
 from copy import deepcopy
 import re
+from typing import Optional
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分活动管理助手"
 APP_VERSION = "1.3.0"
 
-# search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 5 项参数。
+# search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 6 项参数
+# （含默认的 address_bar_rate = 25% 地址栏搜索概率）。
 # round_seconds / gap_seconds 是 [min, max] 区间，随 JSON 存为 list。
 SEARCH_PANEL_KEYS = (
     "repeat", "level", "keywords", "keyword_sources",
     "round_seconds", "max_round_seconds", "gap_seconds",
-    "enter_rate", "click_prob", "scroll_screens",
+    "enter_rate", "click_prob", "scroll_screens", "address_bar_rate",
 )
 
 REWARDS_DASHBOARD = "https://rewards.bing.com/"
@@ -30,8 +38,48 @@ SYNC_MIN_INTERVAL_SEC = 900        # 自动同步的最短间隔，避免频繁�
 LOGIN_WINDOW_SECONDS = 300         # 「打开浏览器登录」窗口保持时长
 
 
-def data_dir() -> Path:
-    """返回数据目录，可通过环境变量 MS_REWARDS_HOME 覆盖（方便测试与便携版）。"""
+# ---------------------------------------------------------------- 实例标识
+
+ENV_INSTANCE = "MS_REWARDS_INSTANCE"
+DEFAULT_INSTANCE = "default"
+_SINGLE_KEY = "MSRewardsAssistant_SingleInstance_v1"
+_WIN_APP_ID = "Independent.RewardsActivityCompanion"
+INSTANCE_META = "instance.json"
+
+
+def normalize_instance_id(raw) -> str:
+    """实例 id 只接受 1~32 位 ASCII slug；其余一律回落默认实例。
+
+    不做「清洗后接受」：中文名、``../`` 路径片段、超长串都应明确拒绝，
+    否则用户以为开了新环境，实际却写进了某个意想不到的目录。显示名由
+    ``instance.json`` 的 ``label`` 单独保存，可以任意中文。
+    """
+    s = str(raw or "").strip()
+    if not s or len(s) > 32 or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", s):
+        return DEFAULT_INSTANCE
+    name = s.lower()
+    return DEFAULT_INSTANCE if name == "instances" else name
+
+
+def instance_id() -> str:
+    """当前进程的实例 id（进程启动后不再变化）。"""
+    return normalize_instance_id(os.environ.get(ENV_INSTANCE))
+
+
+def set_instance_id(raw) -> str:
+    """入口处设定实例并写入环境变量；必须在导入数据层之前调用。"""
+    ident = normalize_instance_id(raw)
+    os.environ[ENV_INSTANCE] = ident
+    return ident
+
+
+def is_default_instance(ident: Optional[str] = None) -> bool:
+    return (ident if ident is not None else instance_id()) == DEFAULT_INSTANCE
+
+
+def base_data_dir() -> Path:
+    """所有实例共享的根目录（默认实例本身就用它）。"""
     override = os.environ.get("MS_REWARDS_HOME")
     if override:
         base = Path(override)
@@ -45,12 +93,75 @@ def data_dir() -> Path:
     return base
 
 
+def instances_root() -> Path:
+    return base_data_dir() / "instances"
+
+
+def instance_home(ident: Optional[str] = None) -> Path:
+    """某个实例独占的数据目录；默认实例与 1.3.0 路径完全一致。
+
+    传 ident 可查询「别的实例」的目录（不切换当前进程环境），供环境管理
+    界面列目录用；不传则用当前进程实例。
+    """
+    name = normalize_instance_id(ident) if ident is not None else instance_id()
+    home = base_data_dir() if name == DEFAULT_INSTANCE else instances_root() / name
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def instance_meta_path(ident: Optional[str] = None) -> Path:
+    return instance_home(ident) / INSTANCE_META
+
+
+def instance_label(ident: Optional[str] = None) -> str:
+    """实例显示名；默认实例固定显示中文「默认环境」（界面可按语言替换）。"""
+    name = normalize_instance_id(ident) if ident is not None else instance_id()
+    if name == DEFAULT_INSTANCE:
+        return "默认环境"
+    try:
+        meta = json.loads(instance_meta_path(name).read_text(encoding="utf-8"))
+        label = str(meta.get("label") or "").strip()
+        if label:
+            return label[:24]
+    except (OSError, ValueError, TypeError):
+        pass
+    return name
+
+
+def window_title() -> str:
+    return APP_TITLE if is_default_instance() else f"{APP_TITLE} · {instance_label()}"
+
+
+def single_instance_key(ident: Optional[str] = None) -> str:
+    """QLocalServer 名按实例区分：同环境只开一份，不同环境可并存。"""
+    name = normalize_instance_id(ident) if ident is not None else instance_id()
+    return _SINGLE_KEY if name == DEFAULT_INSTANCE else f"{_SINGLE_KEY}_{name}"
+
+
+def win_app_id() -> str:
+    name = instance_id()
+    return _WIN_APP_ID if name == DEFAULT_INSTANCE else f"{_WIN_APP_ID}.{name}"
+
+
+def autostart_name() -> str:
+    name = instance_id()
+    return APP_NAME if name == DEFAULT_INSTANCE else f"{APP_NAME}_{name}"
+
+
+# ---------------------------------------------------------------- 数据路径
+# 下面全部经 ``data_dir()`` 派生，因此旧代码无需改动就自动按实例隔离。
+
+def data_dir() -> Path:
+    """当前实例的数据目录；可通过 MS_REWARDS_HOME 覆盖根目录。"""
+    return instance_home()
+
+
 def db_path() -> Path:
     return data_dir() / "rewards.db"
 
 
 def profile_dir() -> Path:
-    """Playwright 持久化用户目录，登录态保存在这里。"""
+    """Playwright 持久化用户目录，登录态保存在这里（每个实例独立）。"""
     p = data_dir() / "browser_profile"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -58,6 +169,18 @@ def profile_dir() -> Path:
 
 def _settings_path() -> Path:
     return data_dir() / "settings.json"
+
+
+def log_path() -> Path:
+    return data_dir() / "run.log"
+
+
+def search_log_path() -> Path:
+    return data_dir() / "search_actions.jsonl"
+
+
+def credentials_path() -> Path:
+    return data_dir() / "session_cookies.bin"
 
 
 DEFAULT_SETTINGS = {
@@ -130,7 +253,7 @@ class Settings:
                         loaded.pop(obsolete, None)
                     if isinstance(loaded.get("search_panel"), dict):
                         # 老版本高级选项已取消，不再默默影响浏览器行为。
-                        # 拟人强度档位的 5 项参数随 search_panel 一起持久化。
+                        # 拟人强度档位的 6 项参数随 search_panel 一起持久化。
                         loaded["search_panel"] = {
                             k: v for k, v in loaded["search_panel"].items()
                             if k in SEARCH_PANEL_KEYS}

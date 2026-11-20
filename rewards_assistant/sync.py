@@ -278,7 +278,10 @@ class SyncWorker(QThread):
         except AuthError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:
-            self.failed.emit("同步失败：" + redact(str(exc)))
+            # 带上异常类型名，避免只剩一句 'xxx' object is not callable 无从定位；
+            # 标准库兜底已让同步不再因 requests 被污染而失败，这行只作诊断。
+            self.failed.emit("同步失败：" +
+                             redact(f"{type(exc).__name__}: {exc}"))
         finally:
             self.store.close_thread_connection()
 

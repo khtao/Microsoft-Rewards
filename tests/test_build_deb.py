@@ -74,12 +74,16 @@ def test_pyinstaller_spec_collects_only_what_is_needed():
     assert "Analysis(" in code and "COLLECT(" in code
 
 
-def test_build_scripts_use_the_single_spec_and_fall_back_without_venv():
+def test_build_scripts_use_the_single_spec_and_system_python_only():
     ubuntu = (ROOT / "build_ubuntu.sh").read_text(encoding="utf8")
     win = (ROOT / "build_windows.bat").read_text(encoding="utf8")
     assert "MSRewardsAssistant.spec" in ubuntu and "MSRewardsAssistant.spec" in win
-    assert "-m venv" in ubuntu
-    assert "python3-venv 不可用" in ubuntu and "USE_VENV=0" in ubuntu
+    # 用户明确要求：编译只用系统环境，不创建 / 不复用虚拟环境
+    assert "-m venv" not in ubuntu and "-m venv" not in win
+    assert "--upgrade pip" not in ubuntu and "--upgrade pip" not in win
+    assert 'PY="${PYTHON:-python3}"' in ubuntu
+    assert "使用系统 Python（不创建虚拟环境）" in ubuntu
+    assert "SYSTEM Python" in win and 'set "PYCMD=%PYTHON%"' in win
     assert "requirements-build.txt" in ubuntu and "requirements-build.txt" in win
     assert "--noconfirm --clean" in ubuntu
     # 不再自己拼 --add-data / --collect-all（由 spec 统一管）

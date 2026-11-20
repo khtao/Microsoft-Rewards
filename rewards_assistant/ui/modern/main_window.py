@@ -29,13 +29,15 @@ from typing import Any, List, Optional
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon,
     QVBoxLayout, QWidget,
 )
 
+from ... import instances
 from ...browser import browser_error_hint
-from ...config import (APP_TITLE, Settings, data_dir, normalize_run_times)
+from ...config import (Settings, data_dir, instance_label,
+                       is_default_instance, normalize_run_times, window_title)
 from ...notifier import Notifier
 from ...session import ALLOWED_PATHS, default_fetcher, redact
 from ...storage import Store, day_str
@@ -160,6 +162,11 @@ class HomePage(QWidget):
         self.title = QLabel(tr(self._lang, "app_title"))
         self.title.setStyleSheet("font-size:16px;font-weight:700;")
         top.addWidget(self.title)
+        if not is_default_instance():
+            # 多开时一眼分清当前是哪个账号的环境；默认环境保持原样。
+            badge = QLabel("· " + instance_label())
+            badge.setObjectName("tiny")
+            top.addWidget(badge)
         top.addStretch(1)
         self.login_badge = QPushButton("🏅 " + tr(self._lang, "unknown"))
         self.login_badge.setObjectName("icon")
@@ -472,6 +479,31 @@ class SettingsPage(QWidget):
         dsl.addLayout(self.defaults_grid)
         lay.addWidget(ds)
 
+        # 运行环境：一键新建并打开一个独立进程，可登录不同账号。
+        # 用常驻文字说明，不挂任何悬浮提示；用 flat 区块，不增加 Card 编号。
+        env = QFrame()
+        env.setObjectName("flat")
+        envl = QVBoxLayout(env)
+        envl.setContentsMargins(12, 10, 12, 10)
+        envl.setSpacing(6)
+        env_title = QLabel(tr(lang, "instance_title"))
+        env_title.setStyleSheet("font-size:13px;font-weight:700;")
+        envl.addWidget(env_title)
+        env_hint = QLabel(tr(lang, "instance_hint"))
+        env_hint.setObjectName("tiny")
+        env_hint.setWordWrap(True)
+        envl.addWidget(env_hint)
+        self.env_rows = QVBoxLayout()
+        self.env_rows.setSpacing(4)
+        envl.addLayout(self.env_rows)
+        self.env_name = QLineEdit()
+        self.env_name.setPlaceholderText(tr(lang, "instance_name_hint"))
+        envl.addWidget(self.env_name)
+        new_env = QPushButton(tr(lang, "instance_new"))
+        new_env.clicked.connect(app.new_instance)
+        envl.addWidget(new_env)
+        lay.addWidget(env)
+
         # 工具：导出 / 抓取 / 恢复默认，都是一次点击的操作，不再是设置项
         tools = QHBoxLayout()
         b1 = QPushButton(tr(lang, "export_logs"))
@@ -490,10 +522,11 @@ class SettingsPage(QWidget):
         outer.addWidget(scroll)
 
         self._connect_signals()
-        self._enter_widgets = [c1, c2, c3, c4, ds]
+        self._enter_widgets = [c1, c2, c3, c4, ds, env]
         # 全界面不安装任何悬浮提示管理器，说明一律用常驻只读文字呈现。
         self.refresh_times()
         self.refresh_defaults_summary()
+        self.refresh_instances()
 
     def enter_widgets(self):
         return list(getattr(self, "_enter_widgets", []))
@@ -536,9 +569,34 @@ class SettingsPage(QWidget):
                 w.blockSignals(False)
         self.refresh_times()
         self.refresh_defaults_summary()
+        self.refresh_instances()
+
+    def refresh_instances(self) -> None:
+        """列出所有独立环境；「打开」只拉起另一个进程，不在本进程切换数据。"""
+        _clear_layout(self.env_rows)
+        lang = self.app.lang
+        for entry in instances.list_instances():
+            row = QHBoxLayout()
+            name = (tr(lang, "instance_default") if entry["is_default"]
+                    else str(entry["label"]))
+            label = QLabel(f"{name}  ({entry['id']})")
+            label.setObjectName("muted")
+            row.addWidget(label, 1)
+            if entry["current"]:
+                cur = QLabel(tr(lang, "instance_current"))
+                cur.setObjectName("tiny")
+                row.addWidget(cur)
+            else:
+                btn = QPushButton(tr(lang, "instance_open"))
+                btn.setFixedWidth(64)
+                ident = str(entry["id"])
+                btn.clicked.connect(
+                    lambda _checked=False, i=ident: self.app.open_instance(i))
+                row.addWidget(btn)
+            self.env_rows.addLayout(row)
 
     def refresh_defaults_summary(self) -> None:
-        """5 行拟人参数只读展示；强度切换后由 sync_from_settings 调用。
+        """6 行拟人参数只读展示；强度切换后由 sync_from_settings 调用。
 
         旧 QLabel 必须先 setParent(None)：deleteLater() 只是排队删除，控件在
         事件循环处理前仍挂在父级上被绘制，连续切档会让新旧两行文字叠在一起
@@ -623,7 +681,7 @@ class ModernMainWindow(QWidget):
         repeat_patch = vm.repeat_upgrade_patch(self.settings)
         if repeat_patch:
             self.settings.update(repeat_patch)
-        # 旧 search_panel 只有 level/repeat：按当前档位补齐 5 项拟人参数。
+        # 旧 search_panel 只有 level/repeat：按当前档位补齐 6 项拟人参数。
         intensity_patch = vm.intensity_upgrade_patch(self.settings)
         if intensity_patch:
             self.settings.update(intensity_patch)
@@ -636,7 +694,7 @@ class ModernMainWindow(QWidget):
         self._syncing = False
         self._stopping = False
 
-        self.setWindowTitle(APP_TITLE)
+        self.setWindowTitle(window_title())
         # 单列弹窗式布局：固定逻辑宽度，避免长状态文案 / 最大化把窗口撑宽。
         # 392 与浏览器插件版 popup 的视觉宽度一致（高 DPI 由系统统一缩放）。
         self.setFixedWidth(392)
@@ -996,6 +1054,34 @@ class ModernMainWindow(QWidget):
         self.rebuild_ui()
         self.refresh()
         self.log("已恢复默认设置（经典 Settings 键）")
+
+    # ------------------------------------------------------------ 多开环境
+
+    def new_instance(self) -> None:
+        """建一个全新独立环境并启动独立进程；当前窗口的数据完全不动。"""
+        page = getattr(self, "settings_page", None)
+        label = page.env_name.text().strip() if page is not None else ""
+        try:
+            entry = instances.create_instance(label, self.lang)
+        except (RuntimeError, OSError) as exc:
+            self.home.set_detail("新建环境失败：" + str(exc))
+            self.log("新建环境失败：" + str(exc))
+            return
+        ok = instances.launch_instance(str(entry["id"]))
+        if page is not None:
+            page.env_name.clear()
+            page.refresh_instances()
+        detail = (f"已启动独立环境：{entry['label']}（{entry['id']}）" if ok
+                  else f"环境 {entry['label']} 已创建，但新进程启动失败")
+        self.home.set_detail(detail)
+        self.log(detail)
+
+    def open_instance(self, ident: str) -> None:
+        """打开已存在的环境；同环境已运行时由它自己的单实例 IPC 唤醒窗口。"""
+        ok = instances.launch_instance(ident)
+        detail = f"已打开环境 {ident}" if ok else f"打开环境 {ident} 失败"
+        self.home.set_detail(detail)
+        self.log(detail)
 
     # ------------------------------------------------------------ 日志 / 抓取
 

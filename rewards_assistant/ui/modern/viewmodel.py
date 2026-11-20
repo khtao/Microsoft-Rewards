@@ -242,6 +242,11 @@ I18N: Dict[str, Dict[str, str]] = {
         "status.limit": "已达上限", "status.error": "出错",
         "status.all_done": "已完成，无需动作", "status.synced": "已同步积分",
         "status.stopping": "正在停止", "status.completing": "正在完成任务",
+        "instance_title": "运行环境", "instance_hint":
+            "每个环境独立保存账号、积分记录与设置，可同时打开多个窗口",
+        "instance_default": "默认环境", "instance_current": "当前",
+        "instance_open": "打开", "instance_new": "新建并打开独立环境",
+        "instance_name_hint": "环境名称（可选，如：工作账号）",
     },
     "en": {
         "app_title": "Assistant", "settings": "Settings",
@@ -281,6 +286,11 @@ I18N: Dict[str, Dict[str, str]] = {
         "status.limit": "Daily limit reached", "status.error": "Error",
         "status.all_done": "All tasks done — nothing to do", "status.synced": "Points synced",
         "status.stopping": "Stopping", "status.completing": "Completing tasks",
+        "instance_title": "Environments", "instance_hint":
+            "Each environment keeps its own account, points and settings. Open several at once.",
+        "instance_default": "Default", "instance_current": "Current",
+        "instance_open": "Open", "instance_new": "Create & open environment",
+        "instance_name_hint": "Environment name (optional, e.g. Work account)",
     },
 }
 
@@ -471,7 +481,7 @@ def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
                "ui_calendar_view", "ui_log_enabled"):
         return {key: value}
     if key == "ui_search_level":
-        # 「统一管理」：一个控件一次写齐 5 项拟人参数（其余参数也随档位联动）。
+        # 「统一管理」：一个控件一次写齐 6 项拟人参数（其余参数也随档位联动）。
         return search_patch(**intensity_profile(str(value)))
     if key in ("ui_repeat", "ui_search_cap"):
         n = int(value)
@@ -539,7 +549,7 @@ def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
 
 
 def _search_panel_from_prefs(p: dict) -> dict:
-    # 以当前档位为底，保证任何一次设置写入都不会把 5 项拟人参数冲掉。
+    # 以当前档位为底，保证任何一次设置写入都不会把 6 项拟人参数冲掉。
     out = intensity_profile(str(p.get("ui_search_level", "中")))
     out["repeat"] = int(p.get("ui_repeat", REPEAT_DEFAULT) or REPEAT_DEFAULT)
     out["keywords"] = str(p.get("ui_keywords", "") or "")
@@ -573,7 +583,7 @@ def defaults_patch(current_level: int = 2) -> dict:
     """被隐藏 / 被合并的设置项统一写成推荐默认，只写它们自己那批键。
 
     ``search_panel`` 必须一次性给全字段：``Settings.update`` 是整体替换
-    这个 dict，逐个 patch 叠加会只剩最后一个字段。拟人强度档位的 5 项参数
+    这个 dict，逐个 patch 叠加会只剩最后一个字段。拟人强度档位的 6 项参数
     也一并写入，保证默认档位（中）就是真实执行值。
     """
     p = dict(UI_DEFAULTS)
@@ -697,33 +707,36 @@ def managed_group_keys(key: str) -> Sequence[str]:
 
 # ---------------------------------------------------------------- 拟人搜索默认设置
 #
-# 设置页底部只展示 5 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
-# 滚动屏数），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」这一个控件统一
-# 控制。切换强度时 pref_to_settings() 一次性把整组参数写进经典 ``search_panel``，
-# 经典 SearchPanel._collect() 再把它们透传给 api.run_human_search()，所以显示值
-# 就是真实执行值，不是摆设。
+# 设置页底部只展示 6 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
+# 滚动屏数 / 地址栏搜索），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」
+# 这一个控件统一控制。切换强度时 pref_to_settings() 一次性把整组参数写进经典
+# ``search_panel``，经典 SearchPanel._collect() 再把它们透传给
+# api.run_human_search()，所以显示值就是真实执行值，不是摆设。
 #
 # 中档取值与 api.run_human_search() 签名默认逐项一致（单测会核对）；低档更轻快，
 # 高档更慢、抖动更大。level 同时驱动 human.PROFILES 的 1 / 2 / 3 级拟人行为。
+# address_bar_rate 是固定默认配置（25% 概率从地址栏直接发起搜索），三档取同值：
+# 它属于「强度统一写回」的参数组，但不随强度增减，避免把概率写成可调的隐蔽项。
 
 INTENSITY_PARAM_KEYS: Sequence[str] = (
     "repeat", "level", "round_seconds", "max_round_seconds",
     "gap_seconds", "enter_rate", "click_prob", "scroll_screens",
+    "address_bar_rate",
 )
 
 INTENSITY_PROFILES: Dict[str, Dict[str, Any]] = {
     "低": dict(level=1, repeat=8,
                round_seconds=(10.0, 18.0), max_round_seconds=20.0,
                gap_seconds=(2.0, 6.0), enter_rate=0.35,
-               click_prob=0.20, scroll_screens=0.6),
+               click_prob=0.20, scroll_screens=0.6, address_bar_rate=0.25),
     "中": dict(level=2, repeat=12,
                round_seconds=(16.0, 29.0), max_round_seconds=30.0,
                gap_seconds=(3.0, 12.0), enter_rate=0.50,
-               click_prob=0.35, scroll_screens=1.2),
+               click_prob=0.35, scroll_screens=1.2, address_bar_rate=0.25),
     "高": dict(level=3, repeat=16,
                round_seconds=(24.0, 40.0), max_round_seconds=45.0,
                gap_seconds=(6.0, 18.0), enter_rate=0.70,
-               click_prob=0.55, scroll_screens=2.0),
+               click_prob=0.55, scroll_screens=2.0, address_bar_rate=0.25),
 }
 
 DEFAULT_SUMMARY_ROWS: Sequence[tuple[str, str, str]] = (
@@ -733,6 +746,7 @@ DEFAULT_SUMMARY_ROWS: Sequence[tuple[str, str, str]] = (
     ("enter_rate", "回车提交", "Enter submits"),
     ("click_prob", "结果点击", "Result clicks"),
     ("scroll_screens", "滚动屏数", "Result scrolling"),
+    ("address_bar_rate", "地址栏搜索", "Address-bar search"),
 )
 
 # 旧配置一次性迁移标记：把只有 level 的 search_panel 补齐为整组档位参数。
@@ -763,7 +777,7 @@ def intensity_upgrade_patch(settings) -> dict:
 
 
 def default_settings_summary(prefs: dict, lang: str = "zh") -> list[tuple[str, str]]:
-    """5 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。"""
+    """6 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。"""
     en = lang == "en"
     params = intensity_profile(prefs.get("ui_search_level", "中"))
     params.update(prefs.get("ui_intensity_params") or {})
@@ -775,8 +789,9 @@ def default_settings_summary(prefs: dict, lang: str = "zh") -> list[tuple[str, s
         elif key == "round_seconds":
             lo, hi = _range_pair(params.get("round_seconds"), (16.0, 29.0))
             value = f"{_num(lo)}–{_num(hi)} " + ("sec" if en else "秒")
-        elif key in ("enter_rate", "click_prob"):
-            value = f"{int(round(float(params.get(key, 0)) * 100))}%"
+        elif key in ("enter_rate", "click_prob", "address_bar_rate"):
+            fallback = 0.25 if key == "address_bar_rate" else 0
+            value = f"{int(round(float(params.get(key, fallback)) * 100))}%"
         else:  # scroll_screens
             value = f"{_num(params.get('scroll_screens', 1.2))} " + (
                 "screens" if en else "屏")

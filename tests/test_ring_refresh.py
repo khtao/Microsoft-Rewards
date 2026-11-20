@@ -191,3 +191,44 @@ def test_ring_click_is_ignored_while_running_or_syncing(home):
     page.set_busy(False)
     page.ring.click()
     assert calls == ["sync"]
+
+
+# ---------------------------------------------------------------- 5. 最大相位不裁切
+
+def test_ring_never_clips_at_any_hover_phase(home):
+    """截图里的 bug：相位 1 时光晕/RoundCap/末端高光点被 widget 边界切平。"""
+    page, _, _ = home
+    ring = page.ring
+    for ph in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
+        inset, arc_w, halo_w, tip_r, outer = ring.paint_geometry(ph)
+        assert outer >= 4.0, (ph, outer)          # 至少 4px 余量
+        assert inset > halo_w / 2.0 + tip_r * 0
+        # 圆心到边缘留得下最粗笔刷的一半
+        assert inset - halo_w / 2.0 > 0
+    # 相位增大时向内收缩，而不是向外顶出边界
+    assert ring.paint_geometry(1.0)[0] > ring.paint_geometry(0.0)[0]
+    # 视觉直径基本不变（旧版 176/inset13 → 150）
+    assert abs((188 - 2 * ring.paint_geometry(0)[0]) - 150) < 1
+
+
+def test_max_phase_render_is_round_and_no_exception(home):
+    """最大相位 + 100% 满圆：渲染不抛异常，抓图尺寸正确。"""
+    page, _, qapp = home
+    ring = page.ring
+    ring.set_value(100, animate=False)
+    ring._start_hover()
+    ring._on_hover_phase(1.0)
+    ring.repaint()
+    img = ring.grab().toImage()
+    assert img.width() == ring.width() and img.height() == ring.height()
+    # 最外一圈像素不得出现蓝色弧线（说明没有被裁成平边贴到边界）
+    from PySide6.QtGui import QColor
+    def bluish(color):
+        return color.blue() > color.red() + 30 and color.blue() > 120 and color.alpha() > 40
+    for x in (0, 1, ring.width() - 2, ring.width() - 1):
+        for y in range(0, ring.height(), 4):
+            assert not bluish(QColor(img.pixel(x, y))), (x, y)
+    for y in (0, 1, ring.height() - 2, ring.height() - 1):
+        for x in range(0, ring.width(), 4):
+            assert not bluish(QColor(img.pixel(x, y))), (x, y)
+    ring._stop_hover()

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..api import DEFAULT_LOG, run_human_search
+from ..api import default_log_path, run_human_search
 from ..browser import browser_error_hint, find_edge_binary, is_root
 from ..pending import pending_desktop_rounds
 from ..trends import HTTP_SOURCES
@@ -113,7 +113,8 @@ class SearchRunner(QObject):
             headless=False,
             copy_profile=False,
             keep_open=0.0,
-            log_file=str(DEFAULT_LOG),
+            address_bar_rate=0.25,
+            log_file=default_log_path(),
         )
 
     @staticmethod
@@ -248,13 +249,14 @@ class SearchPanel(QWidget):
             "keywords": self.edt_keywords.text(),
             "keyword_sources": [name for name, cb in self.chk_sources.items() if cb.isChecked()],
         }
-        # 拟人强度档位的 5 项参数不在这张表单上，但 _load_settings() 回填控件
+        # 拟人强度档位的 6 项参数不在这张表单上，但 _load_settings() 回填控件
         # 会触发 valueChanged → _save_settings()。必须原样带上，否则整组参数
         # 会在「切换强度」时被只有 4 个键的表单值覆盖丢失。
         sp = self.settings.get("search_panel", {}) if self.settings else {}
         if isinstance(sp, dict):
             for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                        "enter_rate", "click_prob", "scroll_screens"):
+                        "enter_rate", "click_prob", "scroll_screens",
+                        "address_bar_rate"):
                 if key in sp and sp[key] is not None:
                     state[key] = sp[key]
         return state
@@ -358,9 +360,9 @@ class SearchPanel(QWidget):
     def _collect(self) -> dict:
         """与定时任务共用一套固定默认参数，不再从旧设置继承危险选项。
 
-        拟人强度档位统一控制的 5 项参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果
-        点击 / 滚动屏数）从经典 ``search_panel`` 透传给 api.run_human_search，
-        保证设置页显示的值就是真实执行值。
+        拟人强度档位统一控制的 6 项参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果
+        点击 / 滚动屏数 / 地址栏搜索）从经典 ``search_panel`` 透传给
+        api.run_human_search，保证设置页显示的值就是真实执行值。
         """
         kws = [k.strip() for k in self.edt_keywords.text().split(",") if k.strip()]
         params = SearchRunner.defaults()
@@ -373,7 +375,8 @@ class SearchPanel(QWidget):
         sp = self.settings.get("search_panel", {}) if self.settings else {}
         if isinstance(sp, dict):
             for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                        "enter_rate", "click_prob", "scroll_screens"):
+                        "enter_rate", "click_prob", "scroll_screens",
+                        "address_bar_rate"):
                 if key in sp and sp[key] is not None:
                     params[key] = tuple(sp[key]) if isinstance(sp[key], (list, tuple)) \
                         and key in ("round_seconds", "gap_seconds") else sp[key]

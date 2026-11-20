@@ -15,6 +15,8 @@ if [[ ${1:-} != '--package-only' ]]; then
 fi
 BIN="$ROOT/dist/MSRewardsAssistant/MSRewardsAssistant"
 [[ -x "$BIN" ]] || { echo "[错误] 未找到已构建程序: $BIN" >&2; exit 1; }
+# --package-only 也做归一化：允许直接复用已有 dist，不要求重跑 PyInstaller。
+python3 "$ROOT/tools/normalize_bundle.py" "$ROOT/dist/MSRewardsAssistant"
 # COLLECT 被中断时（如 CI 超时 / 进程被杀）可能只拷了部分文件，仍会留下可
 # 执行的 EXE。检查两个必带资源，避免把残缺 dist 封成看似正常的 .deb。
 DIST="$ROOT/dist/MSRewardsAssistant"
@@ -41,6 +43,18 @@ mkdir -p "$PKG/DEBIAN" "$PKG/opt/ms-rewards-assistant" "$PKG/usr/bin" "$PKG/usr/
 [[ -s "$ROOT/assets/icons/app.svg" ]] || { echo "[错误] 缺少图标 SVG" >&2; exit 1; }
 [[ -s "$ROOT/assets/icons/app_256.png" ]] || { echo "[错误] 缺少图标 PNG" >&2; exit 1; }
 cp -a "$ROOT/dist/MSRewardsAssistant/." "$PKG/opt/ms-rewards-assistant/"
+# 打包前防呆：顶层 shiboken6 库必须是真实文件（不是悬空 symlink）。
+# 解包后的 /opt 路径与构建目录不同，symlink 或缺失都会导致启动失败。
+SB_OK=0
+for f in "$PKG/opt/ms-rewards-assistant/_internal"/libshiboken6*.so* \
+        "$PKG/opt/ms-rewards-assistant/_internal"/shiboken6*.dll; do
+  [[ -f "$f" && ! -L "$f" ]] && { SB_OK=1; break; }
+done
+[[ "$SB_OK" = "1" ]] || {
+  echo "[错误] _internal 顶层缺少真实 shiboken6 动态库，拒绝打出坏包。" >&2
+  echo "       先用 ./build_ubuntu.sh 重新构建（脚本会做同样校验）。" >&2
+  exit 1
+}
 # freedesktop icon theme: 应用菜单、任务栏及通知区域均可查找到图标。
 install -Dm644 "$ROOT/assets/icons/app.svg" \
   "$PKG/usr/share/icons/hicolor/scalable/apps/ms-rewards-assistant.svg"
@@ -66,6 +80,12 @@ Description: 积分活动管理助手（独立项目）
 EOF
 cat > "$PKG/usr/bin/ms-rewards-assistant" <<'SHLAUNCH'
 #!/bin/sh
+# 双保险：显式把 _internal 与其 shiboken6 子目录加入动态加载器搜索路径。
+# PyInstaller 的 bootloader 通常会自己设置 LD_LIBRARY_PATH，但不同版本 /
+# 安装布局下并不保证；shiboken6 的 Shiboken.abi3.so 通过 DT_NEEDED 找
+# libshiboken6.abi3.so.6.9，缺路径就会报 "cannot open shared object file"。
+INTERNAL=/opt/ms-rewards-assistant/_internal
+export LD_LIBRARY_PATH="$INTERNAL:$INTERNAL/shiboken6${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec /opt/ms-rewards-assistant/MSRewardsAssistant "$@"
 SHLAUNCH
 chmod 755 "$PKG/usr/bin/ms-rewards-assistant"

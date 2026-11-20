@@ -256,6 +256,80 @@ class ReadOnlyFetcher:
         raise NotImplementedError
 
 
+def _requests_session_factory():
+    """返回可用的 ``requests.Session`` 工厂；被污染时返回 None。
+
+    某些系统 Python 环境里（pip 装过 lazy-import 类注入库、或与 PyInstaller
+    的冻结导入器混用时），``requests.Session`` 会被替换成一个类型名为
+    ``lazy_import`` 的代理对象，调用它就抛::
+
+        'lazy_import' object is not callable
+
+    旧版同步链路直接 ``requests.Session()``，于是整轮同步被这个导入层异常
+    击垮，界面显示「同步失败: 'lazy_import' object is not callable」，而积分
+    只能停留在上次快照。这里做一次**真实构造预检**（不发网络请求），失败就
+    整体切到标准库 ``urllib`` 后端，绝不把导入层异常抛给同步层。
+    """
+    try:
+        import requests
+        factory = getattr(requests, "Session", None)
+        if not callable(factory):
+            return None
+        probe = factory()                       # 真实构造，拦住代理对象
+        if not callable(getattr(probe, "get", None)):
+            return None
+        close = getattr(probe, "close", None)
+        if callable(close):
+            close()
+        return factory
+    except Exception:
+        return None
+
+
+def _stdlib_opener(cookies):
+    """标准库后端：CookieJar 按域管理凭证，重定向时不会把 Cookie 发到别站。
+
+    只保留 bing.com / rewards.bing.com 域的 Cookie；``HTTPCookieProcessor``
+    会像浏览器一样按 domain / path / secure 决定是否携带，比手拼 Cookie 头
+    更安全（未登录重定向到 login.live.com 时不会泄漏会话）。
+    """
+    import http.cookiejar
+    import urllib.request
+
+    jar = http.cookiejar.CookieJar()
+    for c in cookies:
+        try:
+            raw_value = c.get("value")
+            if raw_value is None or str(raw_value) == "":
+                continue
+            name, value = str(c["name"]), str(raw_value)
+            if not name:
+                continue
+            raw_domain = str(c.get("domain") or "rewards.bing.com")
+            initial_dot = raw_domain.startswith(".")
+            domain = raw_domain.lstrip(".")
+            if not (domain == "rewards.bing.com" or domain == "bing.com"
+                    or domain.endswith(".bing.com")):
+                continue
+            jar.set_cookie(http.cookiejar.Cookie(
+                version=0, name=name, value=value,
+                port=None, port_specified=False,
+                domain=domain, domain_specified=True,
+                domain_initial_dot=initial_dot,
+                path=str(c.get("path") or "/"), path_specified=True,
+                secure=bool(c.get("secure")), expires=None, discard=True,
+                comment=None, comment_url=None, rest={}, rfc2109=False))
+        except Exception:
+            continue
+    return urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar))
+
+
+_STDLIB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/124.0.0.0 Safari/537.36")
+
+
 class HttpFetcher(ReadOnlyFetcher):
     """纯 HTTP 只读抓取器：不启动浏览器，只用加密凭证并发 GET 两页。
 
@@ -263,8 +337,13 @@ class HttpFetcher(ReadOnlyFetcher):
     执行；要的只是带 Cookie 的两个 GET。凭证由 :class:`CookieStore` 提供，
     ``probe()`` / ``sync_once()`` / ``readonly_report`` 一行都不用改。
 
-    每页用独立的 ``requests.Session``（Session 本身不保证线程安全），两页在
-    线程池里并发；单页异常只影响自己，返回 transient 而不会误判登录失效。
+    每页用独立的会话（Session / opener 本身不保证线程安全），两页在线程池里
+    并发；单页异常只影响自己，返回 transient 而不会误判登录失效。
+
+    **双后端**：优先 ``requests``（做构造预检），不可用时自动切到标准库
+    ``urllib.request``。这样系统环境里即使装了会污染 ``requests`` 的
+    lazy-import 代理，同步也不会再报 ``'lazy_import' object is not callable``；
+    运行时若仍遇到 ``not callable``，该页会再用标准库重试一次。
     """
 
     def __init__(self, store: Optional[CookieStore] = None,
@@ -273,9 +352,63 @@ class HttpFetcher(ReadOnlyFetcher):
         self.timeout = timeout
         self.max_workers = max(1, int(max_workers))
 
-    def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
-        import requests
+    def _timeout_seconds(self) -> float:
+        t = self.timeout
+        if isinstance(t, (tuple, list)) and len(t) >= 2:
+            return float(t[1])
+        return float(t)
 
+    def _one_requests(self, factory, path: str, cookies) -> PageResult:
+        with factory() as s:
+            for c in cookies:
+                try:
+                    s.cookies.set(c["name"], c["value"],
+                                  domain=c.get("domain") or "",
+                                  path=c.get("path") or "/",
+                                  secure=bool(c.get("secure")))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            resp = s.get(BASE + path, headers=_NO_STORE_HEADERS,
+                         timeout=self.timeout, allow_redirects=True)
+            return PageResult(
+                path=path, ok=200 <= resp.status_code < 300,
+                status=resp.status_code, html=resp.text,
+                kind=classify_status(resp.status_code),
+                signin_page=is_sign_in_page(resp.text),
+            )
+
+    def _one_stdlib(self, path: str, cookies) -> PageResult:
+        """零第三方依赖的等价两页 GET，异常一律转 transient。"""
+        import urllib.error
+        import urllib.request
+
+        headers = dict(_NO_STORE_HEADERS)
+        headers["User-Agent"] = _STDLIB_UA
+        req = urllib.request.Request(BASE + path, headers=headers, method="GET")
+        status, html = None, ""
+        try:
+            opener = _stdlib_opener(cookies)
+            with opener.open(req, timeout=self._timeout_seconds()) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+                raw = resp.read()
+                charset = resp.headers.get_content_charset() or "utf-8"
+                html = raw.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            # 401/403/429/5xx 也是响应，读 body 才能正确判登录页
+            try:
+                status = exc.code
+                raw = exc.read()
+                charset = exc.headers.get_content_charset() or "utf-8"
+                html = raw.decode(charset, errors="replace")
+            except Exception:
+                html = ""
+        except Exception as exc:
+            return PageResult(path=path, error=redact(str(exc)), kind="transient")
+        return PageResult(
+            path=path, ok=200 <= (status or 0) < 300, status=status, html=html,
+            kind=classify_status(status), signin_page=is_sign_in_page(html))
+
+    def fetch_many(self, paths: Iterable[str]) -> Dict[str, PageResult]:
         paths = list(paths)
         for p in paths:
             assert_readonly(p)
@@ -288,28 +421,19 @@ class HttpFetcher(ReadOnlyFetcher):
                       "Rewards 登录（含 MFA），会话会加密保存在本机。")
                 for p in paths}
 
+        factory = _requests_session_factory()
+
         def one(path: str) -> PageResult:
-            with requests.Session() as s:
-                for c in cookies:
-                    try:
-                        s.cookies.set(c["name"], c["value"],
-                                      domain=c.get("domain") or "",
-                                      path=c.get("path") or "/",
-                                      secure=bool(c.get("secure")))
-                    except (KeyError, TypeError, ValueError):
-                        continue
+            if factory is not None:
                 try:
-                    resp = s.get(BASE + path, headers=_NO_STORE_HEADERS,
-                                 timeout=self.timeout, allow_redirects=True)
-                    return PageResult(
-                        path=path, ok=200 <= resp.status_code < 300,
-                        status=resp.status_code, html=resp.text,
-                        kind=classify_status(resp.status_code),
-                        signin_page=is_sign_in_page(resp.text),
-                    )
+                    return self._one_requests(factory, path, cookies)
                 except Exception as exc:
-                    return PageResult(path=path, error=redact(str(exc)),
-                                      kind="transient")
+                    # 预检漏过的运行时污染（如 s.get 内部才是 lazy 代理）
+                    # 不走 transient，直接让标准库兜底重试一次。
+                    if "not callable" not in str(exc):
+                        return PageResult(path=path, error=redact(str(exc)),
+                                          kind="transient")
+            return self._one_stdlib(path, cookies)
 
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(self.max_workers, len(paths))) as ex:

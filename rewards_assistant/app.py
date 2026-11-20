@@ -20,7 +20,9 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from . import autostart
 from .activity_worker import ActivityWorker
 from .auth import AuthManager
-from .config import APP_TITLE, APP_VERSION, Settings
+from .config import (APP_TITLE, APP_VERSION, Settings, instance_id,
+                     instance_label, single_instance_key, win_app_id,
+                     window_title)
 from .fonts import bootstrap, pick_qt_font_family
 from .local_browser import open_url as open_in_browser
 from .notifier import Notifier
@@ -30,18 +32,19 @@ from .storage import Store, day_str
 from .sync import StatusWorker, SyncWorker
 from .ui.icons import app_icon
 from .ui.login_dialog import LoginDialog
+# 兼容旧引用：默认实例的 key 保持 1.3.0 不变；实际监听一律走
+# ``single_instance_key()``，让不同环境各有自己的 IPC 通道、可同时运行。
 SINGLE_INSTANCE_KEY = "MSRewardsAssistant_SingleInstance_v1"
 
 
 def _set_win_app_id() -> None:
-    """Windows 下给进程设置 AppUserModelID，通知才会带正确图标与来源名。"""
+    """Windows 下给进程设置 AppUserModelID；多开时按实例区分通知来源。"""
     if sys.platform != "win32":
         return
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "Independent.RewardsActivityCompanion")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(win_app_id())
     except Exception:
         pass
 
@@ -107,6 +110,9 @@ class Application(QObject):
         if self._already_running():
             return 0
 
+        ident = instance_id()
+        self._log(f"当前环境：{instance_label()}（{ident}）· "
+                  f"IPC {single_instance_key()}")
         self.notifier = Notifier(logger=self._log)
         self._build_scheduler()
         if self._sleep_day == datetime.now().date().isoformat():
@@ -195,18 +201,19 @@ class Application(QObject):
 
     def _already_running(self) -> bool:
         """单实例：已有进程在跑就把它的窗口唤出来。"""
+        key = single_instance_key()
         socket = QLocalSocket()
-        socket.connectToServer(SINGLE_INSTANCE_KEY)
+        socket.connectToServer(key)
         if socket.waitForConnected(300):
             socket.write(b"show")
             socket.flush()
             socket.waitForBytesWritten(300)
             socket.disconnectFromServer()
             return True
-        QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+        QLocalServer.removeServer(key)
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self._on_new_connection)
-        self.server.listen(SINGLE_INSTANCE_KEY)
+        self.server.listen(key)
         return False
 
     def _on_new_connection(self) -> None:
@@ -361,7 +368,7 @@ class Application(QObject):
             self._fired.clear()
             self._remember_run_day(now)
             self.window.refresh_all()
-            self.notifier.notify(APP_TITLE, "新的一天，今日任务已重置，加油 💪")
+            self.notifier.notify(window_title(), "新的一天，今日任务已重置，加油 💪")
 
         # 自动同步
         interval = int(self.settings.get("sync_interval_minutes") or 0)
@@ -558,7 +565,7 @@ class Application(QObject):
             self._log("今日任务已完成，跳过提醒")
             return
         if row is None:
-            self.notifier.notify(APP_TITLE, "今天的 Rewards 还没开始，点托盘图标同步一下吧")
+            self.notifier.notify(window_title(), "今天的 Rewards 还没开始，点托盘图标同步一下吧")
             return
         # 任务剩余分与账户余额净变化是不同指标，必须按任务逐项计算。
         tasks = self.store.tasks_of_day(day_str())
@@ -566,7 +573,7 @@ class Application(QObject):
                           for t in tasks)
         left_tasks = max(0, int(row["tasks_total"]) - int(row["tasks_done"]))
         title = "早间打卡提醒" if key == "morning" else "晚间补做提醒"
-        self.notifier.notify(APP_TITLE, f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
+        self.notifier.notify(window_title(), f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
 
     # ------------------------------------------------------------------ 同步
 
@@ -632,10 +639,10 @@ class Application(QObject):
                 # 自动同步可能每小时运行，完成提醒一天只发送一次。
                 today = day_str()
                 if self._last_done_notified_day != today:
-                    self.notifier.notify(APP_TITLE, f"今日任务已全部完成 🎉  {text}")
+                    self.notifier.notify(window_title(), f"今日任务已全部完成 🎉  {text}")
                     self._last_done_notified_day = today
             elif self._last_points is not None and earned > self._last_points:
-                self.notifier.notify(APP_TITLE, f"今日积分变化：{text}")
+                self.notifier.notify(window_title(), f"今日积分变化：{text}")
         self._last_points = earned
         self.set_login_status("已登录 · 同步正常", True)
 
@@ -664,7 +671,7 @@ class Application(QObject):
         else:
             self.set_login_status("网络或服务异常（保留登录状态）", None)
         if self.window.isVisible():
-            self.notifier.notify(APP_TITLE, message, timeout_ms=10000)
+            self.notifier.notify(window_title(), message, timeout_ms=10000)
         else:
             self._toast(message)
 
@@ -769,7 +776,7 @@ class Application(QObject):
     # ------------------------------------------------------------------ 杂项
 
     def _toast(self, message: str) -> None:
-        self.notifier.notify(APP_TITLE, message)
+        self.notifier.notify(window_title(), message)
 
     def _log(self, message: str) -> None:
         print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
@@ -923,7 +930,7 @@ def main(argv: Optional[list] = None) -> int:
     argv = list(argv if argv is not None else sys.argv)
     if "--quit" in argv:
         socket = QLocalSocket()
-        socket.connectToServer(SINGLE_INSTANCE_KEY)
+        socket.connectToServer(single_instance_key())
         if socket.waitForConnected(300):
             socket.write(b"quit")
             socket.flush()
