@@ -43,13 +43,18 @@ def app_profile_dir() -> Path:
     return _app_profile_dir()
 
 
-def prune_automation_profiles(keep: int = 3) -> None:
-    """清理历史快照目录；正在被进程占用的删不掉就留着，不报错。"""
+def prune_automation_profiles(keep: int = 3,
+                              prefix: str = AUTOMATION_PROFILE_DIRNAME) -> None:
+    """清理历史快照目录；正在被进程占用的删不掉就留着，不报错。
+
+    ``prefix`` 让「自动完成任务」与「领取页」各有自己的目录族：领取窗口会
+    一直开着等用户手动领取，不能被自动化新一轮的 prune 误删。
+    """
     base = data_dir()
     try:
         cands = sorted(
             (d for d in base.iterdir()
-             if d.is_dir() and d.name.startswith(AUTOMATION_PROFILE_DIRNAME + "_")),
+             if d.is_dir() and d.name.startswith(prefix + "_")),
             key=lambda d: d.stat().st_mtime, reverse=True)
     except OSError:
         return
@@ -57,25 +62,26 @@ def prune_automation_profiles(keep: int = 3) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def new_automation_profile_dir() -> Path:
-    """每次自动化运行都用**全新且空**的配置目录，不复制任何文件。
+def new_automation_profile_dir(prefix: str = AUTOMATION_PROFILE_DIRNAME) -> Path:
+    """每次都用**全新且空**的配置目录，不复制任何文件。
 
     目录里没有从旧 profile 带过来的 ``SingletonLock``，也不会被上一次残留的
     Edge 进程 handoff；Chromium 的 process singleton 按 user-data-dir 路径
     判定，唯一路径即可彻底断开这条链。登录态改由 ``ctx.add_cookies()`` 注入。
+    路径挂在 ``data_dir()`` 下，因此多开时每个实例互不共享。
     """
-    prune_automation_profiles(keep=3)
-    p = data_dir() / (f"{AUTOMATION_PROFILE_DIRNAME}_{os.getpid()}_"
+    prune_automation_profiles(keep=3, prefix=prefix)
+    p = data_dir() / (f"{prefix}_{os.getpid()}_"
                       f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:4]}")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def cleanup_automation_profile(path) -> None:
+def cleanup_automation_profile(path, prefix: str = AUTOMATION_PROFILE_DIRNAME) -> None:
     """运行结束后删除本次快照；删不掉（进程未完全退出）就留给下次 prune。"""
     if path:
         shutil.rmtree(Path(path), ignore_errors=True)
-    prune_automation_profiles(keep=3)
+    prune_automation_profiles(keep=3, prefix=prefix)
 
 
 def is_root() -> bool:
@@ -429,14 +435,18 @@ def is_launch_arg_error(exc) -> bool:
 
 
 def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
-                           verbose: bool = False, log=None, **kwargs):
-    """在**全新空目录**启动 Edge，再注入本机加密凭证；返回 ``(ctx, snapshot)``。
+                           verbose: bool = False, log=None, store=None,
+                           profile_prefix: str = AUTOMATION_PROFILE_DIRNAME,
+                           **kwargs):
+    """在**全新空目录**启动 Edge，再注入指定凭证；返回 ``(ctx, snapshot)``。
 
     ``user_data_dir`` / ``source_profile`` 是旧版兼容参数，**一律忽略**：新版
     不复制、不读取任何已有 profile，因此不存在被独占的锁文件、``shutil.Error``
-    或 handoff 到残留实例。``log(action, detail)`` 把每一步写进运行日志，
-    启动失败时不用再靠猜 traceback 定位。调用方在 ``ctx.close()`` /
-    ``pw.stop()`` 之后必须调用 ``cleanup_automation_profile(snapshot)``。
+    或 handoff 到残留实例。``store`` 显式传入当前实例的 ``CookieStore``，多开时
+    不会误注入另一个账号的会话；``profile_prefix`` 让领取窗口与自动化目录族
+    分开。``log(action, detail)`` 把每一步写进运行日志，启动失败时不用再靠猜
+    traceback 定位。调用方在 ``ctx.close()`` / ``pw.stop()`` 之后必须调用
+    ``cleanup_automation_profile(snapshot, prefix=profile_prefix)``。
     """
     from playwright.sync_api import Error as PWError  # 延迟导入
 
@@ -447,7 +457,7 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
             except Exception:
                 pass
 
-    cookies = playwright_cookies()
+    cookies = playwright_cookies(store)
     note("credentials", f"本机加密凭证 {len(cookies)} 条")
     if not cookies:
         # 不发无意义的浏览器启动：未登录就该明确提示重新登录，而不是让 Edge
@@ -460,7 +470,7 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
     last = None
     minimal_next = False
     for attempt in (1, 2):
-        snap = new_automation_profile_dir()
+        snap = new_automation_profile_dir(prefix=profile_prefix)
         note("profile", f"第 {attempt} 次：全新空目录 {snap.name}"
              + ("（最小参数）" if minimal_next else ""))
         ctx = None
@@ -468,7 +478,7 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
             ctx = launch_edge(pw, user_data_dir=str(snap),
                               verbose=verbose, minimal=minimal_next, **kwargs)
             note("edge", "Edge 已启动" + ("（最小参数）" if minimal_next else ""))
-            injected = inject_saved_cookies(ctx)
+            injected = inject_saved_cookies(ctx, store)
             note("cookies", f"已注入 {injected}/{len(cookies)} 条会话 Cookie")
             if verbose:
                 print(f"[信息] 已注入 {injected} 条本机加密会话 Cookie")
@@ -481,7 +491,7 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
                     ctx.close()
                 except Exception:
                     pass
-            cleanup_automation_profile(snap)
+            cleanup_automation_profile(snap, prefix=profile_prefix)
             if not (isinstance(exc, PWError) and attempt == 1):
                 raise
             if is_profile_conflict_error(exc):

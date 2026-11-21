@@ -375,9 +375,12 @@ def test_intensity_switch_writes_all_six_params_at_once():
 
 
 def test_default_settings_summary_is_six_rows_and_follows_intensity():
-    zh = dict(vm.default_settings_summary(dict(vm.UI_DEFAULTS), "zh"))
+    # 首行是「至多 N 轮，根据任务进度，目前搜索 M 轮」：N 是档位上限，
+    # M 按官方任务剩余进度算，不再是写死的「12 轮」。
+    zh = dict(vm.default_settings_summary(
+        dict(vm.UI_DEFAULTS), "zh", current_rounds=12))
     assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 6
-    assert zh["搜索轮数"] == "12 轮"
+    assert zh["搜索轮数"] == "至多 12 轮，根据任务进度，目前搜索 12 轮"
     assert zh["单轮耗时"] == "16–29 秒"
     assert zh["回车提交"] == "50%"
     assert zh["结果点击"] == "35%"
@@ -385,24 +388,31 @@ def test_default_settings_summary_is_six_rows_and_follows_intensity():
     assert zh["地址栏搜索"] == "25%"
 
     low = dict(vm.default_settings_summary(
-        {"ui_search_level": "低", "ui_intensity_params": vm.intensity_profile("低")}, "zh"))
-    assert low == {"搜索轮数": "8 轮", "单轮耗时": "10–18 秒",
+        {"ui_search_level": "低", "ui_intensity_params": vm.intensity_profile("低")},
+        "zh", current_rounds=8))
+    assert low == {"搜索轮数": "至多 8 轮，根据任务进度，目前搜索 8 轮", "单轮耗时": "10–18 秒",
                    "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏",
                    "地址栏搜索": "25%"}
     high = dict(vm.default_settings_summary(
-        {"ui_search_level": "高", "ui_intensity_params": vm.intensity_profile("高")}, "zh"))
-    assert high == {"搜索轮数": "16 轮", "单轮耗时": "24–40 秒",
+        {"ui_search_level": "高", "ui_intensity_params": vm.intensity_profile("高")},
+        "zh", current_rounds=12))
+    # 强度=高时上限 16，但按任务进度实际只跑 12 轮（对应真实日志 09:00 的 12/12）
+    assert high == {"搜索轮数": "至多 16 轮，根据任务进度，目前搜索 12 轮", "单轮耗时": "24–40 秒",
                     "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏",
                     "地址栏搜索": "25%"}
 
     en = dict(vm.default_settings_summary(
-        {"ui_search_level": "中", "ui_intensity_params": vm.intensity_profile("中")}, "en"))
-    assert en["Search rounds"] == "12 rounds"
+        {"ui_search_level": "中", "ui_intensity_params": vm.intensity_profile("中")},
+        "en", current_rounds=7))
+    assert en["Search rounds"] == (
+        "Up to 12 rounds, 7 planned now based on task progress")
     assert en["Round length"] == "16–29 sec"
     assert en["Enter submits"] == "50%"
     assert en["Result clicks"] == "35%"
     assert en["Result scrolling"] == "1.2 screens"
     assert en["Address-bar search"] == "25%"
+    fallback = dict(vm.default_settings_summary(dict(vm.UI_DEFAULTS), "zh"))
+    assert fallback["搜索轮数"] == "至多 12 轮，根据任务进度，目前搜索 0 轮"
 
 
 def test_intensity_params_are_persisted_and_transmitted_to_classic_chain():

@@ -7,8 +7,9 @@
 2. 三项积分「卡片标签 → 相邻数值」优先、RSC 字段兜底，**绝不用任务合计推算**；
    读不到就是 ``None``，绝不写成 0（UI 显示「--」）；
 3. 识别登录页 / 公开「关于」页，直接返回 ``signed_out``，不写假的 0 分；
-4. 任务卡同时支持 RSC ``dailySetItems`` 与可见 DOM 绿色徽章卡，按最近 ``<h2>``
-   分组、两页去重，并输出逐条解析日志；
+4. 任务卡同时支持 RSC ``dailySetItems``（每日活动）与 ``activityCards``
+   （/earn「日常任务」，含折叠区里未完成的卡）、可见 DOM 绿色徽章卡；
+   RSC 完成态优先、两页按 offerId 去重，并输出逐条解析日志；
 5. ``pointsCounters`` 读不到时返回 ``None`` 而不是伪造「已满」；官方每日
    搜索上限按等级为 15 / 30 / 60 分，硬编码 60/60 会误报完成进度。
 
@@ -50,6 +51,7 @@ class Card:
     completed: bool = False
     url: str = ""
     source: str = "rsc"          # rsc / dom / counter
+    offer_id: str = ""           # RSC offerId：同名卡去重/落库不互相覆盖
 
 
 @dataclass
@@ -155,9 +157,20 @@ _SIGNIN_PATTERNS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+# 已登录的 Rewards 页面一定带这些服务端数据（RSC payload）。公开「关于」页
+# 与登录页都没有。新版 /dashboard 页脚可能仍挂「登录 / 创建帐户」推广链接，
+# 若只按文案组合判断会把已登录页误判成登录页：/dashboard 整页被丢弃，
+# 导出 zip 里只剩 /earn 一页，同步也被压成 DEGRADED。
+_SIGNED_IN_MARKERS = re.compile(
+    r'"(?:pointsCounters|dailySetItems|activityCards|pointsHistory|'
+    r'availablePoints|userStatus|dashboardBalance)"', re.I)
+
+
 def is_sign_in_page(html: str) -> bool:
     """未登录页 / 公开 About 页识别。宁可判成未登录，也不要拿公开页去解析积分。"""
     t = str(html or "")
+    if _SIGNED_IN_MARKERS.search(t):
+        return False
     for first, second in _SIGNIN_PATTERNS:
         if re.search(first, t, re.I) and re.search(second, t, re.I):
             return True
@@ -333,15 +346,34 @@ def json_array_objects(clean: str, key: str) -> List[str]:
     return objs
 
 
+# RSC 数组 → 分组。``activityCards`` 是 /earn「日常任务 / MoreActivities」区
+# 的服务端真值：页面上默认折叠（"显示更多"）的卡只出现在这里，DOM 里看不到。
+# 例如「你是否知道答案？ +5」今天未完成的那张，就只在 activityCards 里。
+RSC_ARRAY_SECTIONS: Tuple[Tuple[str, str], ...] = (
+    ("dailySetItems", "daily"),   # 每日活动 3 张 ×10
+    ("activityCards", "promo"),   # 日常任务：只要有积分就纳入
+)
+
+
 def structured_items_from(html: str,
-                          keys: Sequence[str] = ("dailySetItems",),
+                          keys: Optional[Sequence] = None,
                           section: str = "daily",
                           clean: Optional[str] = None) -> List[Card]:
-    """RSC：每日活动卡（标题 / 分值 / 完成态 / 落地页）。"""
+    """RSC：每日活动 + 日常任务卡（标题 / 分值 / 完成态 / 落地页 / offerId）。
+
+    ``keys`` 默认是 ``RSC_ARRAY_SECTIONS``；也可传 ``["dailySetItems"]`` 之类
+    的字符串序列（沿用 ``section``），或 ``(key, section)`` 对。
+    """
     clean = decode_payload(html) if clean is None else clean
+    specs: List[Tuple[str, str]] = []
+    for spec in (RSC_ARRAY_SECTIONS if keys is None else keys):
+        if isinstance(spec, (tuple, list)) and len(spec) == 2:
+            specs.append((str(spec[0]), str(spec[1])))
+        else:
+            specs.append((str(spec), section))
     out: List[Card] = []
     seen = set()
-    for key in keys:
+    for key, sec in specs:
         for obj in json_array_objects(clean, key):
             def grab(pattern: str) -> Optional[str]:
                 m = re.search(pattern, obj, re.I)
@@ -353,15 +385,18 @@ def structured_items_from(html: str,
                 continue
             desc = clean_text(grab(r'"description"\s*:\s*"([^"]*)"'))
             completed = bool(re.search(r'"isCompleted"\s*:\s*true', obj, re.I))
-            dedup = title + "|" + desc + "|" + str(points)
+            offer_id = grab(r'"offerId"\s*:\s*"([^"]*)"') or ""
+            # 同名卡（如两天的「你是否知道答案？」）靠 offerId + 描述区分，
+            # 不能只按标题去重，否则未完成的那张会被已完成的同名卡吃掉。
+            dedup = "|".join((title, desc, str(points), offer_id))
             if dedup in seen:
                 continue
             seen.add(dedup)
             out.append(Card(
-                name=title, description=desc, section=section, points=points,
+                name=title, description=desc, section=sec, points=points,
                 earned=points if completed else 0, completed=completed,
                 url=grab(r'"(?:destination|url|href)"\s*:\s*"([^"]*)"') or "",
-                source="rsc",
+                source="rsc", offer_id=offer_id,
             ))
     return out
 
@@ -408,21 +443,66 @@ def visible_cards_from(html: str) -> Tuple[List[Card], Dict[str, int]]:
     return out, {"noBadge": no_badge, "otherSeen": other_seen, "domCards": len(out)}
 
 
+def card_dedup_key(item: Card) -> str:
+    """基础键：标题 / 描述 / 分值 / 分组（不含 offerId），跨页口径一致。"""
+    return "|".join((item.name, item.description, str(item.points), item.section))
+
+
+def dedup_cards(cards: Sequence[Card]) -> List[Card]:
+    """统一去重，规则只有三条，页内与跨页共用：
+
+    1. **带 offerId 的 RSC 卡是服务端真值**，每个不同 offerId 各留一张——
+       所以两天的同名同分「你是否知道答案？」（一张未完成、一张已完成）
+       会同时保留，不会再互相覆盖成假 100%；
+    2. 同基础键下**没有 offerId 的卡是镜像**（DOM 卡、或 /dashboard 的简化
+       payload），只要该组已有带 offerId 的真卡就丢弃，避免跨页重复显示；
+    3. 整组都没有 offerId 时只留一张，RSC 优先。
+
+    顺序按原始出现位置恢复，不改变界面上的分组排列。
+    """
+    bases = [card_dedup_key(c) for c in cards]
+    offered: Dict[str, set] = {}
+    for card, base in zip(cards, bases):
+        if card.offer_id:
+            offered.setdefault(base, set()).add(card.offer_id)
+    # 带 offerId 的排前面（信息更全），其次 RSC 优先
+    order = sorted(range(len(cards)), key=lambda i: (
+        0 if cards[i].offer_id else 1,
+        0 if cards[i].source == "rsc" else 1,
+        i,
+    ))
+    keep: Dict[str, int] = {}
+    for i in order:
+        card, base = cards[i], bases[i]
+        if not card.offer_id and offered.get(base):
+            continue
+        key = base + ("|" + card.offer_id if card.offer_id else "")
+        if key not in keep:
+            keep[key] = i
+    return [cards[i] for i in sorted(keep.values())]
+
+
 def cards_from_rewards_html(html: str, clean: Optional[str] = None
                             ) -> Tuple[List[Card], Dict[str, int]]:
+    """合并 RSC 与可见 DOM 卡，RSC 优先。
+
+    DOM 只渲染「显示更多」展开前的卡，且完成态来自可见文案；RSC 是服务端
+    真值（``isCompleted``）。同名同分同分组时以 RSC 为准，否则 DOM 里已完成的
+    「你是否知道答案？」会把 activityCards 里未完成的那张挤掉，主界面误报
+    「今日全部任务已完成」。
+    """
     rsc = structured_items_from(html, clean=clean)
     dom, stats = visible_cards_from(html)
-    out: List[Card] = []
-    seen = set()
+    rsc_ident = {(i.name, i.section, i.points) for i in rsc}
+    candidates: List[Card] = []
     for item in (*rsc, *dom):
         if item.section not in SECTION_LABEL:
             continue
-        key = "|".join((item.name, item.description, str(item.points), item.section))
-        if key in seen:
+        if item.source == "dom" and (item.name, item.section, item.points) in rsc_ident:
             continue
-        seen.add(key)
-        out.append(item)
-    return [x for x in out if x.points > 0 and x.name], stats
+        candidates.append(item)
+    return [x for x in dedup_cards(candidates)
+            if x.points > 0 and x.name], stats
 
 
 # ---------------------------------------------------------------- 搜索进度
@@ -481,8 +561,7 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
     )
     logs.append("三项积分：卡片「标签→数值」解析 /dashboard + /earn → 合并取值")
 
-    seen = set()
-    items: List[Card] = []
+    page_cards: List[Card] = []
     rsc_hits = dom_hits = 0
     for page_name, page_html, page_clean in (("/dashboard", d_html, d_clean),
                                              ("/earn", e_html, e_clean)):
@@ -492,16 +571,17 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
         page_items, stats = cards_from_rewards_html(page_html, page_clean)
         rsc_hits += sum(1 for x in page_items if x.source == "rsc")
         dom_hits += sum(1 for x in page_items if x.source == "dom")
+        promo_rsc = sum(1 for x in page_items
+                        if x.source == "rsc" and x.section == "promo")
         logs.append(
             f"{page_name}：徽章卡 {stats['domCards']} 张，无徽章推广卡 {stats['noBadge']} 张，"
-            f"其它版块卡 {stats['otherSeen']} 张")
-        for it in page_items:
-            key = "|".join((it.name, it.description, str(it.points), it.section))
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(it)
-    logs.append(f"RSC 命中 {rsc_hits} 张（两页相加、去重前）；可见 DOM 徽章卡命中 {dom_hits} 张")
+            f"其它版块卡 {stats['otherSeen']} 张，日常任务 RSC 卡 {promo_rsc} 张")
+        page_cards.extend(page_items)
+    # 两页统一去重：/dashboard 与 /earn 的同一张卡合并，服务端 offerId
+    # 不同的同名卡分别保留（未完成的那张不会被已完成的吞掉）。
+    items = dedup_cards(page_cards)
+    logs.append(f"RSC 命中 {rsc_hits} 张（两页相加、去重前，含 activityCards 日常任务）；"
+                f"可见 DOM 徽章卡命中 {dom_hits} 张")
     logs.append(f"两页去重后保留 {len(items)} 张有积分任务卡")
 
     counter = (parse_search_counter(e_html, e_clean) if e_html else None) or (
@@ -575,7 +655,7 @@ def to_legacy_dashboard(report: Report, day: str, level: int = 0) -> dict:
             "pointProgress": int(card.earned),
             "complete": bool(card.completed),
             "destination": card.url or "",
-            "offerId": "",
+            "offerId": card.offer_id or "",
         }
 
     daily = [promo(i) for g in report.groups if g.key == "daily" for i in g.items]

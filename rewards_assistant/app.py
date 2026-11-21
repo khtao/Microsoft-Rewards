@@ -7,19 +7,23 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .ui.modern import ModernMainWindow
 
-from PySide6.QtCore import QObject, QTimer, Qt
+from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import autostart
 from .activity_worker import ActivityWorker
 from .auth import AuthManager
+from .claim import (CLAIM_URL, claim_ready, open_claim_window,
+                    short_claim_error)
+from .credentials import CookieStore
 from .config import (APP_TITLE, APP_VERSION, Settings, instance_id,
                      instance_label, single_instance_key, win_app_id,
                      window_title)
@@ -52,6 +56,9 @@ def _set_win_app_id() -> None:
 class Application(QObject):
     """把数据层、界面层和系统集成粘在一起的控制器。"""
 
+    # 领取窗口在后台线程里等用户关闭；结束时回到主线程复位卡片闸门。
+    claim_finished = Signal()
+
     def __init__(self, argv: list) -> None:
         super().__init__()
         self.argv = argv
@@ -78,6 +85,13 @@ class Application(QObject):
         self._sync_enrich_current = False
         self._activity_worker: Optional[ActivityWorker] = None
         self._activity_then_search = False
+        # 「可领取」卡：只有最近一次同步成功才算有可信快照；领取窗口开着时
+        # 闸门关闭，避免连点开出多个 Edge。线程是 daemon，不阻塞退出。
+        self._last_sync_ok = False
+        self._claim_opening = False
+        self._claim_thread: Optional[threading.Thread] = None
+        self._claim_stop = threading.Event()
+        self.claim_finished.connect(self._on_claim_finished)
 
         # 逐个打开任务页的调度器（第一个立即，之后随机间隔）
         self._opener = PendingOpener(self._gap_seconds,
@@ -619,6 +633,90 @@ class Application(QObject):
         title = "早间打卡提醒" if key == "morning" else "晚间补做提醒"
         self._toast(f"{title}：还剩 {left_tasks} 项 / 约 {left_points} 分")
 
+    # ------------------------------------------------------------ 可领取积分
+
+    def claim_available(self) -> bool:
+        """此刻是否真的能领取；任何一项不确定都返回 False（卡片无动作）。
+
+        快照取本实例 ``rewards.db`` 的页面真值，登录态取最近一次检测，凭证
+        取本实例 ``CookieStore``。运行 / 同步 / 已有领取窗口期间一律关闭。
+        """
+        claimable = None
+        try:
+            claimable = self.store.page_points(day_str()).get("claimable")
+        except Exception:
+            return False
+        try:
+            has_cookies = bool(CookieStore().load())
+        except Exception:
+            has_cookies = False
+        win = getattr(self, "window", None)
+        try:
+            login_ok = getattr(win, "_login_ok", None)
+        except RuntimeError:
+            # 窗口 C++ 对象已回收：登录态未知，按不能领取处理。
+            login_ok = None
+        return claim_ready(
+            claimable, login_ok, has_cookies,
+            syncing=bool(getattr(self, "_syncing", False)),
+            running=self.auto_running(),
+            opening=bool(getattr(self, "_claim_opening", False)),
+            last_sync_ok=bool(getattr(self, "_last_sync_ok", False)),
+        )
+
+    def _sync_claim_card(self) -> None:
+        win = getattr(self, "window", None)
+        try:
+            if win is not None and hasattr(win, "sync_claim_state"):
+                win.sync_claim_state()
+        except RuntimeError:
+            pass
+
+    def _claim_log(self, message: str) -> None:
+        """只写运行日志，不弹 toast、不改状态行、不动任务数据。"""
+        self._log(message)
+        try:
+            win = getattr(self, "window", None)
+            if win is not None:
+                win.log(message)
+        except Exception:
+            pass
+
+    def open_claim_page(self) -> None:
+        """点「可领取」卡：再校验一次 → 后台打开**本实例账号**的官网领取页。
+
+        用后台线程而非系统默认浏览器：多开时日常 Edge 可能登录着另一个账号，
+        `os.startfile` / `xdg-open` 会把用户带到错账号。这里用当前实例加密
+        凭证注入全新空 Edge profile，窗口一直保留到用户手动关闭。
+        """
+        if not self.claim_available():
+            return
+        self._claim_opening = True
+        self._claim_stop.clear()
+        self._sync_claim_card()
+        store = CookieStore()
+        tag = f"{instance_label()}（{instance_id()}）"
+
+        def worker() -> None:
+            try:
+                open_claim_window(
+                    store=store, url=CLAIM_URL, stop_event=self._claim_stop,
+                    log=lambda a, d: self._claim_log(f"[领取] {tag} {a} {d}".strip()))
+            except Exception as exc:
+                # 会话失效 / 官网已无可领取 / 浏览器启动失败：静默，不弹提示。
+                self._claim_log(f"[领取] {tag} 未打开：{short_claim_error(exc)}")
+            finally:
+                self.claim_finished.emit()
+
+        t = threading.Thread(target=worker, name="claim-window", daemon=True)
+        self._claim_thread = t
+        t.start()
+
+    def _on_claim_finished(self) -> None:
+        self._claim_thread = None
+        self._claim_opening = False
+        self._sync_claim_card()
+
     # ------------------------------------------------------------------ 同步
 
     def sync_now(self, auto: bool = False) -> None:
@@ -656,6 +754,9 @@ class Application(QObject):
 
     def _on_sync_ok(self, payload: dict) -> None:
         self._syncing = False
+        # 「距上次同步过近」的跳过不带新页面，保留上一次的可信标记。
+        if not payload.get("skipped"):
+            self._last_sync_ok = True
         if getattr(self, "_sync_enrich_current", False):
             self._last_page_enrichment = datetime.now()
         self._sync_enrich_current = False
@@ -705,6 +806,8 @@ class Application(QObject):
 
     def _on_sync_fail(self, message: str) -> None:
         self._syncing = False
+        # 读取不完整 / 未登录 / 网络异常：本地可领取值只是旧快照，卡片无动作。
+        self._last_sync_ok = False
         self._sync_enrich_current = False
         self._after_sync.clear()
         self.window.update_running_state()
@@ -757,6 +860,7 @@ class Application(QObject):
             return
         AuthManager().logout()
         self._last_page_enrichment = None
+        self._last_sync_ok = False
         self.set_login_status("已退出登录", False)
         self._toast("已清除本地登录态")
 
@@ -981,6 +1085,12 @@ class Application(QObject):
             return
         if self.tray is not None:
             self.tray.hide()
+        # 领取窗口由后台 daemon 线程持有：通知它关闭 Edge 并清理临时 profile，
+        # 给 1 秒宽限（轮询 0.3 秒一次），避免退出后留下孤儿浏览器进程。
+        self._claim_stop.set()
+        t = getattr(self, "_claim_thread", None)
+        if t is not None and t.is_alive():
+            t.join(timeout=1.0)
         app = self.app or QApplication.instance()
         if app is not None:
             app.quit()

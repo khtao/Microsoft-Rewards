@@ -54,33 +54,45 @@ def _col(row, key, default=None):
 
 
 def _stable_key(item) -> str:
-    """页面卡片的稳定 key：同一张卡跨天 / 跨页可去重，不依赖易变的数组下标。"""
+    """页面卡片的稳定 key：同一张卡跨天 / 跨页可去重，不依赖易变的数组下标。
+
+    基础口径与旧版一致（标题/描述/分值/分组），保证升级后旧任务行仍被原地
+    覆盖，不会因 key 全变而在降级同步时留下一堆同名旧卡。仅当同一次解析里
+    出现**完全相同的基础 key**（同名同描述同分）时，才用 offerId 追加后缀——
+    /earn「日常任务」可能同时下发两天的「你是否知道答案？ +5」，一天未完成、
+    一天已完成，撞 key 会让后写覆盖前写、未完成任务凭空消失。
+    """
     raw = f"{item.name}|{item.description}|{item.points}|{item.section}"
     return "page:" + item.section + ":" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def rows_from_report(report: Report) -> List[dict]:
     """把解析结果转成 ``Store.upsert_task`` 的行。"""
+    all_items = [i for g in report.groups for i in g.items]
+    base_keys = [_stable_key(i) for i in all_items]
+    counts = {k: sum(1 for x in base_keys if x == k) for k in set(base_keys)}
     rows: List[dict] = []
-    for group in report.groups:
-        for item in group.items:
-            if item.source == "counter":
-                key, category = "pc_search", "搜索"
-            else:
-                key = _stable_key(item)
-                category = CATEGORY_MAP.get(item.section, "更多活动")
-            rows.append({
-                "key": key,
-                "name": item.name,
-                "category": category,
-                "points_max": int(item.points),
-                "points_earned": int(item.earned),
-                "complete": bool(item.completed),
-                "link": item.url or "",
-                "title_source": "page",
-                "offer_id": "",
-                "raw_name": item.name,
-            })
+    for item, base in zip(all_items, base_keys):
+        if item.source == "counter":
+            key, category = "pc_search", "搜索"
+        else:
+            key = base
+            if counts[base] > 1 and getattr(item, "offer_id", ""):
+                key = base + ":" + hashlib.sha1(
+                    item.offer_id.encode("utf-8")).hexdigest()[:6]
+            category = CATEGORY_MAP.get(item.section, "更多活动")
+        rows.append({
+            "key": key,
+            "name": item.name,
+            "category": category,
+            "points_max": int(item.points),
+            "points_earned": int(item.earned),
+            "complete": bool(item.completed),
+            "link": item.url or "",
+            "title_source": "page",
+            "offer_id": getattr(item, "offer_id", "") or "",
+            "raw_name": item.name,
+        })
     return rows
 
 

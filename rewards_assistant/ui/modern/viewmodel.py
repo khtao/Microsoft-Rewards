@@ -205,7 +205,7 @@ def calendar_summary(cells: Sequence[dict], lang: str = "zh") -> dict:
 
 I18N: Dict[str, Dict[str, str]] = {
     "zh": {
-        "app_title": "拟人搜索助手", "settings": "设置",
+        "app_title": "积分管理助手", "settings": "设置",
         "settings_sub": "常用设置",
         "today_tasks": "今日任务", "all_done": "已完成", "pending": "待完成",
         "sync_desktop": "同步与桌面", "sync_interval": "自动刷新",
@@ -225,7 +225,7 @@ I18N: Dict[str, Dict[str, str]] = {
         "schedule": "定时运行", "schedule_hint": "点 + 从 08:00 起每 30 分钟追加",
         "schedule_on": "定时运行", "search_cap": "搜索次数上限",
         "default_summary": "拟人搜索默认设置",
-        "default_summary_hint": "强度可切换，其余按推荐值固定",
+        "default_summary_hint": "强度可切换；搜索轮数按任务进度自适应，其余按推荐值固定",
         "start_times": "启动时间", "calendar": "积分赚取日历",
         "logs": "记录运行日志", "desktop": "桌面版", "autostart": "开机自动启动",
         "reset": "恢复默认设置", "signed_in": "已登录", "signed_out": "未登录",
@@ -269,7 +269,7 @@ I18N: Dict[str, Dict[str, str]] = {
         "auto_sync": "Auto sync", "off": "Off", "on": "On",
         "schedule": "Timed runs", "schedule_hint": "+ adds 08:00, 08:30, 09:00…",
         "default_summary": "Human-like search defaults",
-        "default_summary_hint": "Adjust intensity; others use recommended values",
+        "default_summary_hint": "Adjust intensity; rounds follow task progress, others are fixed",
         "schedule_on": "Timed auto-run", "search_cap": "Search cap",
         "start_times": "Start times", "calendar": "Points calendar",
         "logs": "Run log", "desktop": "Desktop", "autostart": "Launch at login",
@@ -727,6 +727,8 @@ def managed_group_keys(key: str) -> Sequence[str]:
 #
 # 设置页底部只展示 6 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
 # 滚动屏数 / 地址栏搜索），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」
+# 统一控制。其中「搜索轮数」显示为「至多 N 轮，根据任务进度，目前搜索 M 轮」：
+# N 是档位上限，M 由 pending.planned_rounds() 按官方快照算出、执行链路同源取小。
 # 这一个控件统一控制。切换强度时 pref_to_settings() 一次性把整组参数写进经典
 # ``search_panel``，经典 SearchPanel._collect() 再把它们透传给
 # api.run_human_search()，所以显示值就是真实执行值，不是摆设。
@@ -794,16 +796,37 @@ def intensity_upgrade_patch(settings) -> dict:
     return {"search_panel": merged, INTENSITY_MARKER: True}
 
 
-def default_settings_summary(prefs: dict, lang: str = "zh") -> list[tuple[str, str]]:
-    """6 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。"""
+def repeat_cap(prefs: dict) -> int:
+    """当前强度档位写入 ``search_panel.repeat`` 的「至多 N 轮」上限。
+
+    摘要与经典 ``SearchRunner.for_pending()`` 都从这里取 cap，保证设置页
+    显示的上限就是执行链路真正使用的上限。
+    """
+    params = intensity_profile(prefs.get("ui_search_level", "中"))
+    params.update(prefs.get("ui_intensity_params") or {})
+    return max(0, _safe_int(params.get("repeat", 12), 12))
+
+
+def default_settings_summary(prefs: dict, lang: str = "zh",
+                             current_rounds: Optional[int] = None) -> list[tuple[str, str]]:
+    """6 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。
+
+    ``current_rounds`` 由界面按官方任务快照算出（``pending.planned_rounds``），
+    即「根据任务进度，目前搜索 M 轮」。首行不再写死「16 轮」——那只是上限，
+    实际每轮按剩余搜索次数取小，写死会与实际日志里的 12 / 7 / 4 / 2 轮冲突。
+    """
     en = lang == "en"
     params = intensity_profile(prefs.get("ui_search_level", "中"))
     params.update(prefs.get("ui_intensity_params") or {})
+    cap = _safe_int(params.get("repeat", 12), 12)
+    cur = (max(0, _safe_int(current_rounds, 0)) if current_rounds is not None else 0)
     rows: list[tuple[str, str]] = []
     for key, zh, english in DEFAULT_SUMMARY_ROWS:
         label = english if en else zh
         if key == "repeat":
-            value = f"{_safe_int(params.get('repeat', 12), 12)} " + ("rounds" if en else "轮")
+            value = (f"Up to {cap} rounds, {cur} planned now based on task progress"
+                     if en else
+                     f"至多 {cap} 轮，根据任务进度，目前搜索 {cur} 轮")
         elif key == "round_seconds":
             lo, hi = _range_pair(params.get("round_seconds"), (16.0, 29.0))
             value = f"{_num(lo)}–{_num(hi)} " + ("sec" if en else "秒")

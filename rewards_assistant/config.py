@@ -21,8 +21,8 @@ import re
 from typing import Optional
 
 APP_NAME = "MSRewardsAssistant"
-APP_TITLE = "积分活动管理助手"
-APP_VERSION = "1.3.0"
+APP_TITLE = "积分管理助手"
+APP_VERSION = "2.0.0"
 
 # search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 6 项参数
 # （含默认的 address_bar_rate = 25% 地址栏搜索概率）。

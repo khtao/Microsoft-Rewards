@@ -10,7 +10,8 @@ import pytest
 
 from rewards_assistant.config import Settings, normalize_run_times
 from rewards_assistant.pending import (
-    all_reward_tasks_done, outstanding, pending_activity_links, pending_desktop_rounds,
+    all_reward_tasks_done, outstanding, pending_activity_links,
+    pending_desktop_rounds, planned_rounds,
 )
 from rewards_assistant.storage import Store
 
@@ -107,7 +108,8 @@ def test_search_runner_uses_only_pc_remaining():
         def defaults():
             return {"repeat": 5, "level": 2}
 
-    scope = dict(date=date, SearchRunner=FakeRunner, pending_desktop_rounds=pending_desktop_rounds)
+    scope = dict(date=date, SearchRunner=FakeRunner,
+                 planned_rounds=planned_rounds)
     exec(_read_method("rewards_assistant/ui/legacy.py", "for_pending", "SearchRunner"), scope)
     run_config = scope["for_pending"]
 

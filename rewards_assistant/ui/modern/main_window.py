@@ -24,7 +24,7 @@ from __future__ import annotations
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction
@@ -39,6 +39,7 @@ from ...browser import browser_error_hint
 from ...config import (Settings, data_dir, instance_label,
                        is_default_instance, normalize_run_times, window_title)
 from ...notifier import Notifier
+from ...pending import planned_rounds
 from ...session import ALLOWED_PATHS, default_fetcher, redact
 from ...storage import Store, day_str
 from ...sync import sync_once
@@ -130,16 +131,42 @@ class CaptureRunner(QThread):
     def run(self) -> None:
         try:
             pages = default_fetcher().fetch_many(ALLOWED_PATHS)
-            html = {p: r.html for p, r in pages.items() if r.usable and r.html}
-            if not html:
-                self.fail.emit("两页都没读到可用内容（可能未登录或网络异常），未生成文件。")
-                return
+            notes = ["只读抓取的页面源码。可能含账户信息，请勿公开分享。"]
+            entries: List[Tuple[str, str]] = []
+            usable_count = 0
+            for path in ALLOWED_PATHS:
+                r = pages.get(path)
+                name = path.strip("/").replace("/", "_") + ".html"
+                if r is None:
+                    text = f"<!-- 本次未返回 {path} 的结果，未生成页面源码。 -->"
+                    state = "未返回结果"
+                elif r.html:
+                    text = r.html
+                    if r.usable:
+                        usable_count += 1
+                        state = f"HTTP {r.status or '-'} · 已登录可用 · {len(r.html)} 字节"
+                    else:
+                        # 保留原始返回内容供诊断，但不把它伪装成正常的已登录页。
+                        why = "识别为登录页 / 公开页" if r.signin_page else (
+                            r.error or f"状态 {r.kind}")
+                        state = (f"HTTP {r.status or '-'} · 未读到可用内容"
+                                 f"（{redact(str(why))[:80]}）· {len(r.html)} 字节")
+                else:
+                    why = redact(str(r.error or r.kind or "空响应"))[:80]
+                    text = (f"<!-- {path} 本次未读到页面源码：{why}；"
+                            f"不伪造内容，仅保留此说明。 -->")
+                    state = f"HTTP {r.status or '-'} · 空内容 · {why}"
+                entries.append((name, text))
+                notes.append(f"  {path} → {name}  [{state}]")
+            notes.insert(1, (f"本次写入 {len(entries)} 个页面条目，"
+                             f"其中 {usable_count} 个是已登录可用页面。"))
+            notes.append("")
+            notes.append("不可用或空内容的页面只保留原始返回/说明，不参与积分与任务解析；")
+            notes.append("若「已登录可用页面」少于 2，请先在「登录」里重新登录后再导出。")
             with zipfile.ZipFile(self.target, "w", zipfile.ZIP_DEFLATED) as z:
-                for path, text in html.items():
-                    z.writestr(path.strip("/").replace("/", "_") + ".html", text)
-                z.writestr("README.txt",
-                           "只读抓取 /dashboard 与 /earn 的页面源码。"
-                           "可能含账户信息，请勿公开分享。")
+                for name, text in entries:
+                    z.writestr(name, text)
+                z.writestr("README.txt", "\n".join(notes) + "\n")
             self.done.emit(str(self.target))
         except Exception as exc:
             self.fail.emit(redact(str(exc))[:220])
@@ -149,6 +176,9 @@ class CaptureRunner(QThread):
 
 class HomePage(QWidget):
     """截图 1：顶部栏、圆环、三张积分卡、主按钮、今日任务卡。"""
+
+    # 「可领取」卡请求打开官网领取页；是否真的可领取由控制器再判一次。
+    claim_requested = Signal()
 
     def __init__(self, app) -> None:
         super().__init__()
@@ -207,6 +237,7 @@ class HomePage(QWidget):
         self.card_available = StatCard(tr(self._lang, "available"))
         self.card_today = StatCard(tr(self._lang, "today"))
         self.card_claimable = StatCard(tr(self._lang, "claimable"))
+        self.card_claimable.clicked.connect(self.claim_requested.emit)
         for c in (self.card_available, self.card_today, self.card_claimable):
             cards.addWidget(c, 1)
         lay.addLayout(cards)
@@ -334,6 +365,10 @@ class HomePage(QWidget):
     def set_login_badge(self, ok: Optional[bool]) -> None:
         key = "unknown" if ok is None else ("signed_in" if ok else "signed_out")
         self.login_badge.setText("🏅  " + tr(self.app.lang, key))
+
+    def set_claim_available(self, available: bool) -> None:
+        """只有控制器确认「此刻确实能领取」才让这张卡响应点击。"""
+        self.card_claimable.set_clickable(bool(available))
 
     def update_data(self, points: dict, tasks: list, prog: dict) -> None:
         self.card_available.set_value(points_text(points.get("available")))
@@ -611,21 +646,40 @@ class SettingsPage(QWidget):
                 row.addWidget(btn)
             self.env_rows.addLayout(row)
 
+    def current_search_rounds(self) -> int:
+        """「目前搜索 M 轮」：与 SearchRunner.for_pending() 完全同源。
+
+        强度档位的 repeat 只是上限；这里按官方同步快照里尚缺的电脑端搜索
+        次数取小，因此显示的数字就是下一次点「自动完成任务」真正会跑的轮数。
+        """
+        try:
+            tasks = list(self.app.store.tasks_of_day(day_str()))
+        except Exception:
+            return 0
+        return planned_rounds(tasks, vm.repeat_cap(self.app.prefs))
+
     def refresh_defaults_summary(self) -> None:
-        """6 行拟人参数只读展示；强度切换后由 sync_from_settings 调用。
+        """6 行拟人参数只读展示；强度切换、每次同步后都会刷新。
 
         旧 QLabel 必须先 setParent(None)：deleteLater() 只是排队删除，控件在
         事件循环处理前仍挂在父级上被绘制，连续切档会让新旧两行文字叠在一起
         （设置页长图里「16–29 秒 / 35%」的重影就是这个原因）。
         """
         _clear_layout(self.defaults_grid)
-        rows = vm.default_settings_summary(self.app.prefs, self.app.lang)
+        rows = vm.default_settings_summary(
+            self.app.prefs, self.app.lang,
+            current_rounds=self.current_search_rounds())
         for i, (label, value) in enumerate(rows):
             cell = QLabel(f"{label} · <b>{value}</b>")
             cell.setTextFormat(Qt.TextFormat.RichText)
             cell.setObjectName("muted")
             cell.setWordWrap(True)
-            self.defaults_grid.addWidget(cell, i // 2, i % 2)
+            if i == 0:
+                # 首行「至多 N 轮，根据任务进度，目前搜索 M 轮」较长，
+                # 单独占满一整行，避免两列网格把它挤成多行重叠。
+                self.defaults_grid.addWidget(cell, 0, 0, 1, 2)
+            else:
+                self.defaults_grid.addWidget(cell, (i + 1) // 2, (i - 1) % 2)
 
     def refresh_times(self) -> None:
         _clear_layout(self.times_grid)
@@ -758,11 +812,13 @@ class ModernMainWindow(QWidget):
             self.stack.removeWidget(w)
             w.deleteLater()
         self.home = HomePage(self)
+        self.home.claim_requested.connect(self._on_claim_requested)
         self.settings_page = SettingsPage(self)
         self.stack.addWidget(self.home)
         self.stack.addWidget(self.settings_page)
         self.stack.setCurrentIndex(1 if index == 1 else 0)
         self.home.set_login_badge(self._login_ok)
+        self.sync_claim_state()
         self.setStyleSheet(theme.stylesheet())
         # 对齐插件版 .enter：逐项淡入、依次错开（动画恒定开启）
         effects.stagger_enter(self.stack.currentWidget().enter_widgets())
@@ -792,6 +848,29 @@ class ModernMainWindow(QWidget):
             lambda msg: self.set_status_message("运行失败：" + browser_error_hint(msg)))
         self.runner.running_changed.connect(lambda _a: self.update_running_state())
 
+    # ------------------------------------------------------------ 可领取卡
+
+    def _on_claim_requested(self) -> None:
+        """卡片只发请求；闸门在控制器里再判一次，防状态竞态。"""
+        ctl = self.controller
+        if ctl is None:
+            return
+        opener = getattr(ctl, "open_claim_page", None)
+        if opener is not None:
+            opener()
+
+    def sync_claim_state(self) -> None:
+        """同步 / 登录态 / 运行态每次变化都重算这张卡是否可点。"""
+        ctl = self.controller
+        allowed = False
+        if ctl is not None and hasattr(ctl, "claim_available"):
+            try:
+                allowed = bool(ctl.claim_available())
+            except Exception:
+                allowed = False
+        if hasattr(self, "home"):
+            self.home.set_claim_available(allowed)
+
     # ------------------------------------------------------------ 数据绑定
 
     def refresh(self) -> None:
@@ -803,6 +882,7 @@ class ModernMainWindow(QWidget):
             self.home.update_data(points, tasks, prog)
         except Exception as exc:
             self.home.set_status("读取本地数据失败：" + redact(str(exc))[:120])
+        self.sync_claim_state()
         self.refresh_calendar()
 
     def refresh_calendar(self) -> None:
@@ -833,6 +913,12 @@ class ModernMainWindow(QWidget):
 
     def refresh_all(self) -> None:
         self.refresh()
+        # 官方任务进度变了，「目前搜索 M 轮」必须跟着变；强度档位的
+        # 「至多 N 轮」不变，但 M 每次同步后都要重新按剩余搜索次数计算。
+        try:
+            self.settings_page.refresh_defaults_summary()
+        except Exception:
+            pass
         try:
             self.quick.update(self.store)
         except Exception:
@@ -860,6 +946,7 @@ class ModernMainWindow(QWidget):
         self._login_ok = ok
         if hasattr(self, "home"):
             self.home.set_login_badge(ok)
+        self.sync_claim_state()
         self.log("登录状态：" + str(text))
 
     def update_running_state(self) -> None:
@@ -886,6 +973,7 @@ class ModernMainWindow(QWidget):
             # 用户主动停止都走这里，不必给每种结束方式单独挂信号）。
             if prev_running and not running:
                 QTimer.singleShot(0, ctl._on_auto_run_finished)
+        self.sync_claim_state()
 
     def run_pending_tasks(self, settings=None) -> bool:
         """逐字沿用 MainWindow.run_pending_tasks：仅执行未完成的电脑端搜索。"""

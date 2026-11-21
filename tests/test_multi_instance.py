@@ -64,7 +64,7 @@ def test_all_data_paths_are_per_instance(monkeypatch):
     assert str(api.default_log_path()) == str(home / "search_actions.jsonl")
     assert config.single_instance_key().endswith("_acct-2")
     assert config.autostart_name() == "MSRewardsAssistant_acct-2"
-    assert "积分活动管理助手" in config.window_title()
+    assert "积分管理助手" in config.window_title()
 
 
 def test_two_instances_never_share_a_path():

@@ -510,12 +510,21 @@ class Card(QFrame):
 
 
 class StatCard(QFrame):
-    """三项积分卡：大数字 + 小标签。"""
+    """三项积分卡：大数字 + 小标签。
+
+    ``clicked`` 只在 ``set_clickable(True)`` 后由左键触发，用于「可领取」卡：
+    未登录 / 无可领取积分 / 同步或自动运行中 / 会话失效时闸门关闭，卡片连
+    手型光标都没有，点击完全无动作（不弹提示、不打开浏览器）。
+    """
+
+    clicked = Signal()
 
     def __init__(self, label: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self.setMinimumHeight(82)
+        self._clickable = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 14, 8, 12)
         lay.setSpacing(4)
@@ -532,6 +541,20 @@ class StatCard(QFrame):
         lay.addWidget(self._value)
         lay.addWidget(self._label)
         lay.addStretch(1)
+
+    def set_clickable(self, enabled: bool) -> None:
+        self._clickable = bool(enabled)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self._clickable
+                       else Qt.CursorShape.ArrowCursor)
+
+    def is_clickable(self) -> bool:
+        return self._clickable
+
+    def mousePressEvent(self, event) -> None:
+        if (self._clickable
+                and event.button() == Qt.MouseButton.LeftButton):
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def set_value(self, text: str) -> None:
         self._value.setText(text)

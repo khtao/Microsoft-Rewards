@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from ..api import default_log_path, run_human_search
 from ..browser import browser_error_hint, find_edge_binary, is_root
-from ..pending import pending_desktop_rounds
+from ..pending import planned_rounds
 from ..trends import HTTP_SOURCES
 from .controls import NoWheelComboBox, NoWheelSpinBox
 
@@ -128,10 +128,16 @@ class SearchRunner(QObject):
             return None
         tasks = store.tasks_of_day(day)
         # 只运行电脑端搜索：Edge 桌面浏览器不能冒充移动搜索进度。
-        need = pending_desktop_rounds(tasks)
-        if need <= 0:
+        # 「至多 N 轮」是强度档位写入的 repeat 上限；实际轮数按尚缺的搜索
+        # 次数取小。与设置页摘要「目前搜索 M 轮」共用 planned_rounds()。
+        try:
+            cap = max(1, min(200, int(p.get("repeat", 12) or 12)))
+        except (TypeError, ValueError, OverflowError):
+            cap = 12
+        repeat = planned_rounds(tasks, cap)
+        if repeat <= 0:
             return None
-        p["repeat"] = min(need, 200)
+        p["repeat"] = repeat
         return p
 
     def is_running(self) -> bool:
@@ -221,7 +227,7 @@ class SearchPanel(QWidget):
         self.cmb_level.setCurrentIndex(1)
         self.edt_keywords = QLineEdit()
         self.edt_keywords.setPlaceholderText("可选：额外关键词，用逗号分隔；留空则使用热搜")
-        g.addWidget(QLabel("搜索轮数"), 0, 0)
+        g.addWidget(QLabel("搜索轮数上限"), 0, 0)
         g.addWidget(self.spin_repeat, 0, 1)
         g.addWidget(QLabel("搜索节奏"), 0, 2)
         g.addWidget(self.cmb_level, 0, 3)

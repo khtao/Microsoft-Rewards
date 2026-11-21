@@ -28,6 +28,26 @@ def pending_desktop_rounds(tasks) -> int:
                for t in tasks if t["key"] == "pc_search" and outstanding(t))
 
 
+def planned_rounds(tasks, cap: int, *, hard_limit: int = 200) -> int:
+    """本轮实际计划轮数 = min(任务剩余搜索次数, 强度档位上限)。
+
+    设置页第一行写「至多 N 轮，根据任务进度，目前搜索 M 轮」：
+
+    * ``cap``（N）来自拟人强度档位写入 ``search_panel.repeat`` 的上限；
+    * ``M`` 是官方同步快照里尚缺的电脑端搜索次数；
+    * 两者取小，所以「至多」是硬约束，而「目前」就是本轮真正会跑的次数。
+
+    这是设置页摘要与 ``SearchRunner.for_pending()`` 共用的唯一口径，
+    避免显示 16 轮、实际按任务进度只跑 12 轮（或反过来跑超上限）。
+    """
+    need = pending_desktop_rounds(tasks)
+    try:
+        limit = max(0, min(int(cap or 0), int(hard_limit)))
+    except (TypeError, ValueError, OverflowError):
+        limit = 0
+    return max(0, min(need, limit))
+
+
 def pending_activity_items(tasks) -> list:
     """Playwright 活动卡片的候选集合：无需 API 提供落地 URL。"""
     return [t for t in tasks

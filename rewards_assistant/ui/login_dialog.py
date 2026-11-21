@@ -177,8 +177,7 @@ class LoginDialog(QDialog):
             "</ol>"
             "<p>登录窗口<b>不会自动关闭</b>；应用不代填密码，会话 Cookie 只"
             "<b>加密保存在本机</b>，不上传、不打印、不写成明文。</p>"
-            "<p style='color:#c92a2a'>同步只读取 /dashboard 与 /earn 两个页面，"
-            "不搜索、不点击活动卡、不代领积分；奖励搜索与领取请在官网手动完成。</p>"
+            "<p style='color:#c92a2a'>同步只读取 /dashboard 与 /earn 两个页面。</p>"
         )
         tip.setWordWrap(True)
         tip.setOpenExternalLinks(True)

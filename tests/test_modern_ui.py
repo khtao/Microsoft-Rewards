@@ -262,7 +262,7 @@ def test_primary_button_runs_the_same_classic_entrypoint():
     # 经典执行内核沿用同一份实现
     legacy = (ROOT / "rewards_assistant" / "ui" / "legacy.py").read_text(encoding="utf8")
     for name in ("class SearchRunner", "class SearchWorker", "class SearchPanel",
-                 "class QuickPanel", "run_human_search", "pending_desktop_rounds"):
+                 "class QuickPanel", "run_human_search", "planned_rounds"):
         assert name in legacy, name
     # 控制器仍使用经典 SyncWorker / ActivityWorker
     for name in ("SyncWorker(self.store", "ActivityWorker(", "_run_pending_from_snapshot",

@@ -75,7 +75,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: MS Rewards Assistant Project <noreply@localhost>
 Depends: libglib2.0-0 | libglib2.0-0t64, libdbus-1-3 | libdbus-1-3t64, libfontconfig1, libfreetype6, libx11-6, libx11-xcb1, libxext6, libxi6, libxrender1, libxrandr2, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-util1, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1
-Description: 积分活动管理助手（独立项目）
+Description: 积分管理助手（独立项目）
  Microsoft Rewards desktop task viewer, activity clicker and search helper.
 EOF
 cat > "$PKG/usr/bin/ms-rewards-assistant" <<'SHLAUNCH'
@@ -92,7 +92,7 @@ chmod 755 "$PKG/usr/bin/ms-rewards-assistant"
 cat > "$PKG/usr/share/applications/ms-rewards-assistant.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=积分活动管理助手
+Name=积分管理助手
 Comment=非官方积分活动管理桌面程序
 Exec=ms-rewards-assistant
 Icon=ms-rewards-assistant
