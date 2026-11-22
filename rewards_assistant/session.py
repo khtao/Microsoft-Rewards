@@ -18,11 +18,11 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
-import os
 import re
 import sys
 import threading
 import time
+from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -72,7 +72,7 @@ def redact(text: str) -> str:
 
     注意：不要对任意「40+ 字符」做通用替换——Playwright 启动日志里全是
     ``--disable-features=...`` 这类长命令行参数，通用替换会把错误日志切得
-    支离破碎（旧版就这样把中文提示插进了 command line 中间）。
+    支离破碎，也可能把中文提示插进 command line 中间。
     """
     t = str(text or "")
     t = re.sub(r"(?i)(set-cookie|cookie|authorization)\s*[:=]\s*[^\r\n;]+",
@@ -217,7 +217,7 @@ def profile_guard(profile_dir, timeout: float = 30.0):
 
 # ---------------------------------------------------------------- 数据结构
 
-@dataclass
+@dataclass(slots=True)
 class PageResult:
     path: str
     ok: bool = False
@@ -232,7 +232,7 @@ class PageResult:
         return self.ok and not self.signin_page and bool(self.html)
 
 
-@dataclass
+@dataclass(slots=True)
 class SessionStatus:
     state: str = UNKNOWN
     reason: str = ""
@@ -265,16 +265,29 @@ def _requests_session_factory():
 
         'lazy_import' object is not callable
 
-    旧版同步链路直接 ``requests.Session()``，于是整轮同步被这个导入层异常
-    击垮，界面显示「同步失败: 'lazy_import' object is not callable」，而积分
-    只能停留在上次快照。这里做一次**真实构造预检**（不发网络请求），失败就
-    整体切到标准库 ``urllib`` 后端，绝不把导入层异常抛给同步层。
+    这里做一次**真实构造预检**（不发网络请求），失败就整体切到标准库
+    ``urllib`` 后端，绝不把导入层异常抛给同步层。
     """
     try:
         import requests
         factory = getattr(requests, "Session", None)
         if not callable(factory):
             return None
+        return _probe_requests_class(factory)
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=4)
+def _probe_requests_class(factory):
+    """按 ``requests.Session`` 类对象缓存构造预检（一次约 0.6 ms）。
+
+    缓存键是类对象本身：单测把 ``requests.Session`` monkeypatch 成代理 /
+    伪类时会得到不同的键，预检照常重新执行，不会被上一次结果污染；
+    ``maxsize=4`` 有界，不会随替换次数增长。预检成功返回原类，失败返回
+    None（调用方据此切到标准库后端）。
+    """
+    try:
         probe = factory()                       # 真实构造，拦住代理对象
         if not callable(getattr(probe, "get", None)):
             return None
@@ -330,20 +343,39 @@ _STDLIB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "Chrome/124.0.0.0 Safari/537.36")
 
 
+# 两页并发共用一个模块级固定 2 线程池：托盘应用按小时反复同步，复用
+# 常驻线程可避免反复创建/销毁线程与栈内存抖动。线程池只服务白名单里的
+# 两个 GET，任务短且有超时，不会无限堆积。仅当调用方显式把 max_workers
+# 调到 1、或一次请求超过 2 个路径时，才退回临时线程池以保留串行语义。
+_SHARED_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def _shared_executor():
+    global _SHARED_EXECUTOR
+    ex = _SHARED_EXECUTOR
+    if ex is None:
+        with _EXECUTOR_LOCK:
+            ex = _SHARED_EXECUTOR
+            if ex is None:
+                ex = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix="rewards-http")
+                _SHARED_EXECUTOR = ex
+    return ex
+
+
 class HttpFetcher(ReadOnlyFetcher):
     """纯 HTTP 只读抓取器：不启动浏览器，只用加密凭证并发 GET 两页。
 
     ``rewards.bing.com/dashboard`` 与 ``/earn`` 是服务端渲染的 HTML，不需要 JS
     执行；要的只是带 Cookie 的两个 GET。凭证由 :class:`CookieStore` 提供，
-    ``probe()`` / ``sync_once()`` / ``readonly_report`` 一行都不用改。
-
     每页用独立的会话（Session / opener 本身不保证线程安全），两页在线程池里
     并发；单页异常只影响自己，返回 transient 而不会误判登录失效。
 
     **双后端**：优先 ``requests``（做构造预检），不可用时自动切到标准库
-    ``urllib.request``。这样系统环境里即使装了会污染 ``requests`` 的
-    lazy-import 代理，同步也不会再报 ``'lazy_import' object is not callable``；
-    运行时若仍遇到 ``not callable``，该页会再用标准库重试一次。
+    ``urllib.request``。系统环境里即使装了会污染 ``requests`` 的 lazy-import
+    代理，同步也能正常运行；运行时若仍遇到 ``not callable``，该页会再用
+    标准库重试一次。
     """
 
     def __init__(self, store: Optional[CookieStore] = None,
@@ -435,6 +467,8 @@ class HttpFetcher(ReadOnlyFetcher):
                                           kind="transient")
             return self._one_stdlib(path, cookies)
 
+        if len(paths) <= 2 and self.max_workers >= 2:
+            return {r.path: r for r in _shared_executor().map(one, paths)}
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(self.max_workers, len(paths))) as ex:
             return {r.path: r for r in ex.map(one, paths)}
@@ -501,7 +535,7 @@ class BrowserSessionFetcher(ReadOnlyFetcher):
         return out
 
     def _fetch_serial(self, paths: Sequence[str]) -> Dict[str, PageResult]:
-        """无异步 API / 已有事件循环时的兼容路径：保持旧版逐页 GET 行为。"""
+        """无异步 API / 已有事件循环时的兼容路径：保持逐页 GET 行为。"""
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -597,7 +631,7 @@ class BrowserSessionFetcher(ReadOnlyFetcher):
     def clear_session(self) -> None:
         """清除**本应用独立 profile** 内的登录态，不动用户日常 Edge 配置。
 
-        同时删除旧版明文 cookies.txt。历史积分数据库不受影响。
+        同时删除遗留的明文 cookies.txt。历史积分数据库不受影响。
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -621,7 +655,7 @@ class BrowserSessionFetcher(ReadOnlyFetcher):
         except ProfileBusyError:
             raise  # 登录窗口还开着时不能清 profile，交给 UI 提示
         except Exception:
-            pass  # 环境不可用时仍继续清理旧版文件
+            pass  # 环境不可用时仍继续清理遗留文件
         legacy = _default_data_dir() / "cookies.txt"
         try:
             legacy.unlink(missing_ok=True)
@@ -683,9 +717,8 @@ def login_poll_state(html: str, elapsed_sec: int, confirmed_polls: int,
                      url: str = ""):
     """登录窗口轮询的**纯逻辑**：返回 (detected, confirmed_polls, 提示文案)。
 
-    刻意不返回「是否关闭窗口」：旧版一发现页面不是登录页就 ``return`` +
-    ``ctx.close()``，用户刚看到窗口就被关掉（MFA 中间页、已登录首页都会
-    误判）。现在窗口只由用户点「我已完成登录」或超时结束。
+    刻意不返回「是否关闭窗口」：窗口只由用户点「我已完成登录」或超时
+    结束，避免 MFA 中间页、已登录首页被误判后立刻关闭。
 
     ``url`` 可选：认证域（login.live.com 等）或跳转中的空白页一律当「仍在登录」，
     避免短信验证中间页被当成已登录而给出错误提示。
@@ -703,37 +736,17 @@ def login_poll_state(html: str, elapsed_sec: int, confirmed_polls: int,
 
 
 
-# ---------------------------------------------------------------- 路径兜底
-# 合入仓库时优先使用 config.profile_dir()/data_dir()；独立运行/单测时自带等价实现。
+# ---------------------------------------------------------------- 路径装配
+# 与 credentials.data_dir() 共用 config 这一唯一真源，不再复制平台分支。
 
 def _default_data_dir() -> Path:
-    try:
-        from .config import data_dir  # type: ignore
-        return Path(data_dir())
-    except Exception:
-        pass
-    override = os.environ.get("MS_REWARDS_HOME")
-    if override:
-        base = Path(override)
-    elif sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MSRewardsAssistant"
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "MSRewardsAssistant"
-    else:
-        base = Path.home() / ".local" / "share" / "msrewardsassistant"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    from .config import data_dir
+    return Path(data_dir())
 
 
 def _default_profile_dir() -> Path:
-    try:
-        from .config import profile_dir  # type: ignore
-        return Path(profile_dir())
-    except Exception:
-        pass
-    p = _default_data_dir() / "browser_profile"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    from .config import profile_dir
+    return Path(profile_dir())
 
 
 # ---------------------------------------------------------------- 默认装配
@@ -742,8 +755,8 @@ def default_fetcher() -> ReadOnlyFetcher:
     """同步链路默认装配：纯 HTTP + 本机加密凭证，**不启动浏览器**。
 
     登录窗口是唯一还会打开 Edge 的地方（本人登录 / MFA / 导出凭证）。因此
-    同步、登录态复查、HTML 导出都不再受浏览器冷启动、profile 锁、Edge 版本
-    和安装路径影响。旧版明文 ``cookies.txt`` 在这里一次性迁移为加密文件后删除。
+    同步、登录态复查、HTML 导出都不受浏览器冷启动、profile 锁、Edge 版本
+    和安装路径影响。遗留明文 ``cookies.txt`` 在这里一次性迁移为加密文件后删除。
     """
     store = CookieStore()
     try:

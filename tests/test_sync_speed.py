@@ -168,7 +168,7 @@ class _CountingH2:
 
 
 def test_heading_lookup_scans_html_only_once():
-    """旧版每张卡都 finditer(html[:index])；现在整页只扫一次。"""
+    """整页只扫一次 h2，卡片查找走二分。"""
     from rewards_assistant.readonly_report import _H2_RE, visible_cards_from
 
     html = ("<h2>每日活动</h2>" +

@@ -80,7 +80,7 @@ ACCEPT_LANGUAGE = {
 
 
 
-@dataclass
+@dataclass(slots=True)
 class GeoProfile:
     """一整套自洽的地理/区域参数。"""
     ip: str = ""

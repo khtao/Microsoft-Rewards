@@ -1,0 +1,5 @@
+# 测试依赖 = 运行时依赖 + pytest。
+# 用法：python -m pip install -r requirements-dev.txt && python -m pytest -q
+# 构建机只装 requirements-build.txt，不需要 pytest；运行时只装 requirements.txt。
+-r requirements.txt
+pytest>=8.0

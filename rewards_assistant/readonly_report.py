@@ -41,7 +41,7 @@ CATEGORY_MAP: Dict[str, str] = {
 
 
 
-@dataclass
+@dataclass(slots=True)
 class Card:
     name: str
     description: str = ""
@@ -54,7 +54,7 @@ class Card:
     offer_id: str = ""           # RSC offerId：同名卡去重/落库不互相覆盖
 
 
-@dataclass
+@dataclass(slots=True)
 class SearchCounter:
     max: Optional[int] = None
     progress: Optional[int] = None
@@ -68,7 +68,7 @@ class SearchCounter:
         return self.known and self.progress >= self.max  # type: ignore[operator]
 
 
-@dataclass
+@dataclass(slots=True)
 class Group:
     key: str
     label: str
@@ -77,7 +77,7 @@ class Group:
     total: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class Report:
     points: Dict[str, Optional[int]] = field(default_factory=dict)
     groups: List[Group] = field(default_factory=list)
@@ -96,10 +96,44 @@ class Report:
 
 
 # ---------------------------------------------------------------- 基础工具
+# 解析两页 HTML 时这些正则会对每张卡片 / 每个字段反复调用。统一在模块级
+# 编译一次，避免依赖 re 模块的内部缓存查表（缓存有 512 条上限，且每次
+# 调用仍要做一次 dict 查找与字符串哈希）。
+
+_NUM_RE = re.compile(r"-?[\d,.\s]+\d|-?\d+")
+_NON_DIGIT_RE = re.compile(r"[^\d-]")
+_TAG_RE = re.compile(r"<[^>]+>")
+_AMP_RE = re.compile(r"\\u0026|&amp;", re.I)
+_NBSP_RE = re.compile(r"&nbsp;|&#160;", re.I)
+_LINEBREAK_RE = re.compile(r"\\n|\\r")
+_WS_RE = re.compile(r"\s+")
+_RSC_TITLE_RE = re.compile(r'"title"\s*:\s*"([^"]*)"', re.I)
+_RSC_POINTS_RE = re.compile(r'"points"\s*:\s*"?(\d+)"?', re.I)
+_RSC_DESC_RE = re.compile(r'"description"\s*:\s*"([^"]*)"', re.I)
+_RSC_OFFER_RE = re.compile(r'"offerId"\s*:\s*"([^"]*)"', re.I)
+_RSC_URL_RE = re.compile(r'"(?:destination|url|href)"\s*:\s*"([^"]*)"', re.I)
+_COMPLETED_RE = re.compile(r'"isCompleted"\s*:\s*true', re.I)
+_MAX_RE = re.compile(r'"max"\s*:\s*(\d+)')
+_PROGRESS_RE = re.compile(r'"progress"\s*:\s*(\d+)')
+
+
+def _first_group(rx: re.Pattern, text: str) -> Optional[str]:
+    """取第一个捕获组，供卡片字段提取复用。"""
+    m = rx.search(text)
+    return m.group(1) if m else None
+
 
 def decode_payload(html: str) -> str:
-    """RSC payload 里的 ``\\"`` / ``\\\\"`` 还原成普通引号。"""
-    return str(html or "").replace('\\\\"', '"').replace('\\"', '"')
+    """RSC payload 里的 ``\\"`` / ``\\\\"`` 还原成普通引号。
+
+    整页 HTML 常有数百 KB。``str.replace`` 走 C 层实现，无匹配时返回原对象、
+    不复制；普通 HTML 里没有任何转义引号时直接短路，省掉两次全串扫描并
+    避免生成整页解码副本。
+    """
+    s = str(html or "")
+    if '\\"' not in s:          # '\\\\"' 也一定含这个子串，判断不会漏
+        return s
+    return s.replace('\\\\"', '"').replace('\\"', '"')
 
 
 def _finite(v) -> bool:
@@ -108,11 +142,11 @@ def _finite(v) -> bool:
 
 def num_from(text) -> Optional[int]:
     """从 '1,234 分' / '-5' 之类的文本里取整数；取不到返回 None。"""
-    m = re.search(r"-?[\d,.\s]+\d|-?\d+", str(text or ""))
+    m = _NUM_RE.search(str(text or ""))
     if not m:
         return None
     try:
-        return int(re.sub(r"[^\d-]", "", m.group(0)))
+        return int(_NON_DIGIT_RE.sub("", m.group(0)))
     except ValueError:
         return None
 
@@ -129,11 +163,11 @@ def pick_number(clean: str, patterns: Iterable[re.Pattern]) -> Optional[int]:
 
 
 def clean_text(s) -> str:
-    t = re.sub(r"<[^>]+>", " ", str(s or ""))
-    t = re.sub(r"\\u0026|&amp;", "&", t, flags=re.I)
-    t = re.sub(r"&nbsp;|&#160;", " ", t, flags=re.I)
-    t = re.sub(r"\\n|\\r", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
+    t = _TAG_RE.sub(" ", str(s or ""))
+    t = _AMP_RE.sub("&", t)
+    t = _NBSP_RE.sub(" ", t)
+    t = _LINEBREAK_RE.sub(" ", t)
+    t = _WS_RE.sub(" ", t).strip()
     return t[:160]
 
 
@@ -255,8 +289,8 @@ _EXCLUDE_H2_RE = re.compile(r"升级活动|连续打卡|任务集|punch card|str
 def _heading_sections(html: str) -> Tuple[List[int], List[str]]:
     """一次扫描出所有 <h2> 的结束位置与分组；供卡片二分查找。
 
-    旧实现对每张卡都执行 ``_H2_RE.finditer(html[:index])``，卡片多时是
-    O(卡片数 × HTML 长度)。现在整页只扫一次，单卡查找 O(log 标题数)。
+    整页只扫一次，单卡查找 O(log 标题数)，避免卡片数量增长时反复回扫
+    整段 HTML。
     """
     ends: List[int] = []
     sections: List[str] = []
@@ -375,17 +409,13 @@ def structured_items_from(html: str,
     seen = set()
     for key, sec in specs:
         for obj in json_array_objects(clean, key):
-            def grab(pattern: str) -> Optional[str]:
-                m = re.search(pattern, obj, re.I)
-                return m.group(1) if m else None
-
-            title = clean_text(grab(r'"title"\s*:\s*"([^"]*)"'))
-            points = num_from(grab(r'"points"\s*:\s*"?(\d+)"?')) or 0
+            title = clean_text(_first_group(_RSC_TITLE_RE, obj))
+            points = num_from(_first_group(_RSC_POINTS_RE, obj)) or 0
             if not title or points <= 0:
                 continue
-            desc = clean_text(grab(r'"description"\s*:\s*"([^"]*)"'))
-            completed = bool(re.search(r'"isCompleted"\s*:\s*true', obj, re.I))
-            offer_id = grab(r'"offerId"\s*:\s*"([^"]*)"') or ""
+            desc = clean_text(_first_group(_RSC_DESC_RE, obj))
+            completed = bool(_COMPLETED_RE.search(obj))
+            offer_id = _first_group(_RSC_OFFER_RE, obj) or ""
             # 同名卡（如两天的「你是否知道答案？」）靠 offerId + 描述区分，
             # 不能只按标题去重，否则未完成的那张会被已完成的同名卡吃掉。
             dedup = "|".join((title, desc, str(points), offer_id))
@@ -395,7 +425,7 @@ def structured_items_from(html: str,
             out.append(Card(
                 name=title, description=desc, section=sec, points=points,
                 earned=points if completed else 0, completed=completed,
-                url=grab(r'"(?:destination|url|href)"\s*:\s*"([^"]*)"') or "",
+                url=_first_group(_RSC_URL_RE, obj) or "",
                 source="rsc", offer_id=offer_id,
             ))
     return out
@@ -519,8 +549,8 @@ def parse_search_counter(html: str, clean: Optional[str] = None
     block = _COUNTER_RE.search(clean)
     if not block:
         return None
-    mx = re.search(r'"max"\s*:\s*(\d+)', block.group(1))
-    pg = re.search(r'"progress"\s*:\s*(\d+)', block.group(1))
+    mx = _MAX_RE.search(block.group(1))
+    pg = _PROGRESS_RE.search(block.group(1))
     if not (mx and pg):
         return None
     return SearchCounter(max=int(mx.group(1)), progress=int(pg.group(1)))
@@ -549,26 +579,29 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
     if degraded:
         warnings.append("仅部分页面可用：只采用能读到的字段，其余保留上次快照")
 
-    # 登录页不能参与积分解析；整页只解码一次，后续解析全部复用。
+    # 登录页不能参与积分解析。DOM 卡要用**原始** HTML，RSC / 积分卡要用
+    # 解码后的 HTML。按页「解码 → 解析 → 立即释放」，任何时刻最多只有
+    # 一份解码副本。
     d_html = "" if dash_signin else dash
     e_html = "" if earn_signin else earn
-    d_clean = decode_payload(d_html) if d_html else ""
-    e_clean = decode_payload(e_html) if e_html else ""
-
-    trio = merge_trio(
-        parse_points_trio(d_html, d_clean) if d_html else None,
-        parse_points_trio(e_html, e_clean) if e_html else None,
-    )
     logs.append("三项积分：卡片「标签→数值」解析 /dashboard + /earn → 合并取值")
 
+    trio_by_page: Dict[str, Optional[dict]] = {}
+    counter_by_page: Dict[str, Optional[SearchCounter]] = {}
     page_cards: List[Card] = []
     rsc_hits = dom_hits = 0
-    for page_name, page_html, page_clean in (("/dashboard", d_html, d_clean),
-                                             ("/earn", e_html, e_clean)):
+    for page_name, page_html in (("/dashboard", d_html), ("/earn", e_html)):
         if not page_html:
             logs.append(page_name + "：本次不可用，跳过")
+            trio_by_page[page_name] = None
+            counter_by_page[page_name] = None
             continue
-        page_items, stats = cards_from_rewards_html(page_html, page_clean)
+        clean = decode_payload(page_html)
+        trio_by_page[page_name] = parse_points_trio(page_html, clean)
+        counter_by_page[page_name] = parse_search_counter(page_html, clean)
+        page_items, stats = cards_from_rewards_html(page_html, clean)
+        # 上面所有结果都是标量 / 新字符串 / Card，不再引用整页解码串。
+        del clean
         rsc_hits += sum(1 for x in page_items if x.source == "rsc")
         dom_hits += sum(1 for x in page_items if x.source == "dom")
         promo_rsc = sum(1 for x in page_items
@@ -577,6 +610,7 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
             f"{page_name}：徽章卡 {stats['domCards']} 张，无徽章推广卡 {stats['noBadge']} 张，"
             f"其它版块卡 {stats['otherSeen']} 张，日常任务 RSC 卡 {promo_rsc} 张")
         page_cards.extend(page_items)
+    trio = merge_trio(trio_by_page.get("/dashboard"), trio_by_page.get("/earn"))
     # 两页统一去重：/dashboard 与 /earn 的同一张卡合并，服务端 offerId
     # 不同的同名卡分别保留（未完成的那张不会被已完成的吞掉）。
     items = dedup_cards(page_cards)
@@ -584,8 +618,8 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
                 f"可见 DOM 徽章卡命中 {dom_hits} 张")
     logs.append(f"两页去重后保留 {len(items)} 张有积分任务卡")
 
-    counter = (parse_search_counter(e_html, e_clean) if e_html else None) or (
-        parse_search_counter(d_html, d_clean) if d_html else None)
+    # /earn 的 pointsCounters 优先，/dashboard 兜底。
+    counter = counter_by_page.get("/earn") or counter_by_page.get("/dashboard")
     if counter and counter.known:
         logs.append(f"搜索进度 pointsCounters {counter.progress}/{counter.max}"
                     + ("（已满）" if counter.completed else ""))
@@ -604,18 +638,25 @@ def build_report(dash_html: Optional[str], earn_html: Optional[str]) -> Report:
         ))
     all_items.extend(i for i in items if i.section != "search")
 
+    # 一次遍历完成分桶与合计，其它 section 只计入合计、不进组。
+    buckets: Dict[str, List[Card]] = {"search": [], "daily": [], "promo": []}
+    total = earned = 0
+    for i in all_items:
+        total += i.points
+        earned += i.earned
+        bucket = buckets.get(i.section)
+        if bucket is not None:
+            bucket.append(i)
+
     groups: List[Group] = []
     for key in ("search", "daily", "promo"):
-        lst = [i for i in all_items if i.section == key]
+        lst = buckets[key]
         if not lst:
             continue
         groups.append(Group(
             key=key, label=SECTION_LABEL[key], items=lst,
             earned=sum(i.earned for i in lst), total=sum(i.points for i in lst),
         ))
-
-    total = sum(i.points for i in all_items)
-    earned = sum(i.earned for i in all_items)
     logs.append(f"任务合计 {earned} / {total} 分（与「今日积分」不必相等：周任务 / 额外奖励分）")
 
     return Report(

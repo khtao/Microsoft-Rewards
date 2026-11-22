@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestContext:
     """一次会话的请求上下文（头部 + 导航策略）。"""
     extra_headers: dict = field(default_factory=dict)

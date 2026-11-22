@@ -22,7 +22,7 @@ RESULTS_RESERVE = 3.0
 CLICK_RESERVE = 6.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Engine:
     name: str
     home: str

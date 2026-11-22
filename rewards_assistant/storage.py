@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS daily (
     level            INTEGER NOT NULL DEFAULT 0,
     streak           INTEGER NOT NULL DEFAULT 0,
     official_streak  INTEGER NOT NULL DEFAULT 0,
-    official_points_earned INTEGER,  -- 旧版字段，保留用于数据库兼容，不再参与计算
+    official_points_earned INTEGER,  -- 兼容字段，不再参与计算
     available_synced_at TEXT,       -- 仅 API 真正返回余额时记录，0 也有效
     baseline_points INTEGER,       -- 差值所使用的昨日账户余额
     points_source TEXT NOT NULL DEFAULT 'task_fallback',
@@ -97,7 +97,7 @@ class Store:
                 conn.execute("ALTER TABLE daily ADD COLUMN points_source TEXT NOT NULL DEFAULT 'task_fallback'")
             if "available_synced_at" not in cols:
                 conn.execute("ALTER TABLE daily ADD COLUMN available_synced_at TEXT")
-                # 旧版仅能确认正余额快照；0 可能是无同步记录的默认值，不能猜。
+                # 仅正余额快照可确认；0 可能是无同步记录的默认值，不能猜。
                 conn.execute("UPDATE daily SET available_synced_at=synced_at "
                              "WHERE available_points>0 AND synced_at IS NOT NULL")
             if "baseline_points" not in cols:
@@ -128,7 +128,7 @@ class Store:
                 conn.execute("ALTER TABLE tasks ADD COLUMN raw_name TEXT NOT NULL DEFAULT ''")
 
     def _migrate_legacy_points(self) -> None:
-        """一次性迁移旧版 Earn/估算记录到统一的日差或任务回退规则。"""
+        """一次性迁移既有 Earn/估算记录到统一的日差或任务回退规则。"""
         with self._connect() as conn:
             marks = ",".join("?" for _ in ALL_SOURCES)
             legacy = conn.execute(
@@ -182,9 +182,9 @@ class Store:
     def tx(self):
         """可重入事务：外层统一提交，内层调用只借用同一个连接。
 
-        同步一次会写任务明细、余额、页面真值并刷新汇总；旧版每一步都单独
-        commit，Windows 上每笔都要 fsync。外层 ``with store.tx():`` 包住
-        整段写入后只提交一次，嵌套的 ``tx()`` 不再重复提交。
+        同步一次会写任务明细、余额、页面真值并刷新汇总；外层
+        ``with store.tx():`` 包住整段写入后只提交一次，嵌套的 ``tx()``
+        不再重复提交。
         """
         conn = self._connect()
         if getattr(self._local, "in_tx", False):

@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """经典「自动完成未完成任务」的执行内核，供唯一界面复用。
 
-从 1.3.0 的 ``ui/main_window.py`` 抽出 ``SearchRunner`` / ``SearchWorker`` /
-``SearchPanel`` 与 ``QuickPanel``：它们是 ``Application.run_pending_tasks()``
-链路真正调用的代码。经典多标签主窗口 ``MainWindow`` 已删除，本模块只保留
+包含 ``SearchRunner`` / ``SearchWorker`` / ``SearchPanel`` 与 ``QuickPanel``：
+它们是 ``Application.run_pending_tasks()`` 链路真正调用的代码。本模块只保留
 执行与设置所需部分，界面统一到 ``ui/modern``。
 """
 from __future__ import annotations
@@ -73,10 +72,8 @@ class SearchWorker(QThread):
             self.sig.finished.emit(self.report)
         except Exception as e:
             raw = f"{type(e).__name__}: {e}"
-            # 旧版只发多行 traceback，界面把它截到 200 字符，最后一行的
-            # 「异常类型: 原因」永远看不到，日志里只剩两帧文件路径 —— 这正是
-            # 反复靠猜根因的元凶。现在先发一条单行完整原因，再把堆栈压成
-            # 一行短帧，保证任何截断长度下都留得下有用信息。
+            # 先发一条单行完整原因，再把堆栈压成一行短帧，保证任何截断
+            # 长度下都留得下有用信息。
             from ..session import redact
             reason = redact(raw).replace("\n", " ").replace("\r", " ")[:300]
             self.sig.log.emit("error", reason)
@@ -433,7 +430,7 @@ class QuickPanel(QWidget):
     """经典「自动完成未完成任务 / 停止」按钮。
 
     唯一界面把它作为隐藏代理：托盘菜单的 ``quick.tasks_btn.click`` 与主页主按钮
-    最终都落到 ``Application.run_pending_tasks()``，与 1.3.0 完全一致。
+    最终都落到 ``Application.run_pending_tasks()``，与经典链路完全一致。
     """
 
     run_pending_requested = Signal()

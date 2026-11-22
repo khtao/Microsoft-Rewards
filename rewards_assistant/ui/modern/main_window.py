@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""唯一界面：按截图复刻的单列窗口，直接驱动 1.3.0 的经典应用控制器。
+"""唯一界面：按截图复刻的单列窗口，直接驱动经典应用控制器。
 
 架构
 ----
@@ -771,7 +771,7 @@ class ModernMainWindow(QWidget):
         self.setMinimumHeight(560)
         self.resize(392, 760)
 
-        # ---- 经典控制器要求的窗口接口（逐字沿用 1.3.0 的类与信号） ----
+        # ---- 经典控制器要求的窗口接口（逐字沿用约定的类与信号） ----
         self.runner = SearchRunner(self)
         self.quick = QuickPanel(self)
         self.quick.hide()
@@ -909,7 +909,7 @@ class ModernMainWindow(QWidget):
             pass
 
     # ------------------------------------------------------------ 门面方法
-    # 这些方法名与 1.3.0 MainWindow 一致，Application 无需改动即可驱动本窗口。
+    # 这些方法名与控制器约定一致，Application 可直接驱动本窗口。
 
     def refresh_all(self) -> None:
         self.refresh()
