@@ -1,3 +1,4 @@
+[![Build packages](https://github.com/khtao/Microsoft-Rewards/actions/workflows/build.yml/badge.svg)](https://github.com/khtao/Microsoft-Rewards/actions/workflows/build.yml)
 # 积分活动管理助手 2.0
 
 一个**独立开发、非官方**的桌面小工具，用 Python + Qt 在本机查看 Microsoft Rewards 的积分、每日任务与历史记录，并设置提醒。当前版本 **2.0**。
