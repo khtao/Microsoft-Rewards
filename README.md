@@ -175,6 +175,8 @@ spec 会把 `shiboken6` / `libshiboken6` 动态库**显式平铺**到 `_internal
 
 **构建一律使用系统 Python（不创建虚拟环境）**：四个构建脚本都直接调用系统解释器（Windows 可用 `set PYTHON=py -3.13` 指定，Linux 用 `PYTHON=python3.13 ./build_ubuntu.sh`，macOS 用 `PYTHON=python3.13 bash build_macos.sh`），只安装缺失依赖、不升级系统 pip。统一使用系统解释器这一单一来源，可避免自建虚拟环境与系统 `site-packages` 混用引入的导入层污染：`requests.Session` 被 `lazy_import` 代理对象替换时会出现 `'lazy_import' object is not callable`，同步链路另备标准库 `urllib` 后端兜底。源码**运行**时仍可照常用 `python3 -m venv .venv`，两者互不冲突。
 
+Windows 构建脚本与构建期 Python 工具的输出保持纯 ASCII：CI 通过管道捕获 stdout，管道编码为 cp1252，`chcp` 只改控制台代码页、不影响管道重定向。`tools/normalize_bundle.py` 的消息全部用英文，并对 stdout / stderr 设置 `backslashreplace` 兜底——路径含中文时退化为转义序列而不会中断构建。Shell 的 `echo` 输出 UTF-8 字节，不受此限制。
+
 构建脚本会打印实际使用的 Python 版本。常见问题：
 
 - **`No matching distribution found for PySide6`**：镜像未同步对应 wheel，或 Python 版本过新。确认清单已按 `python_version` 分段后，换官方源重试：

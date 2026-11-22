@@ -1,7 +1,9 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 cd /d "%~dp0"
+REM Keep this file pure ASCII + CRLF. Do NOT call chcp: CI captures stdout
+REM through a pipe whose cp1252 encoding is unaffected by the console code
+REM page; every Python build tool emits ASCII and guards its own streams.
 
 REM Build with the SYSTEM interpreter only. Set PYTHON before running to pick a
 REM specific one (e.g. "set PYTHON=py -3.13"); never create/reuse a venv here.

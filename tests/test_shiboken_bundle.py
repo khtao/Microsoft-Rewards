@@ -120,7 +120,7 @@ def test_normalize_bundle_replaces_symlink_with_real_file(tmp_path):
     lines = normalize(tmp_path)
     assert not link.is_symlink() and link.is_file()
     assert link.read_bytes() == b"ELF-SHIBOKEN"
-    assert any("复制为真实文件" in x for x in lines)
+    assert any("copied as real file" in x for x in lines)
 
 
 def test_normalize_bundle_recovers_from_dangling_symlink(tmp_path, monkeypatch):
