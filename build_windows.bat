@@ -22,29 +22,6 @@ if not exist "assets\icons\app.ico" (
     echo [WARN] assets\icons\app.ico missing; the EXE will use the default icon.
 )
 
-REM Locate Inno Setup Compiler. ISCC_EXE can be set to a custom path.
-set "ISCC="
-if defined ISCC_EXE if exist "%ISCC_EXE%" set "ISCC=%ISCC_EXE%"
-if defined ISCC goto :iscc_found
-
-for /f "delims=" %%I in ('where ISCC.exe 2^>nul') do if not defined ISCC set "ISCC=%%I"
-if defined ISCC goto :iscc_found
-
-if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"   set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe"         set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
-if exist "%ProgramFiles(x86)%\Inno Setup 7\ISCC.exe"   set "ISCC=%ProgramFiles(x86)%\Inno Setup 7\ISCC.exe"
-if exist "%ProgramFiles%\Inno Setup 7\ISCC.exe"         set "ISCC=%ProgramFiles%\Inno Setup 7\ISCC.exe"
-if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
-if exist "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe"
-
-if not defined ISCC (
-    echo [ERROR] Inno Setup 6 compiler ^(ISCC.exe^) was not found.
-    echo         Install Inno Setup 6.3+, or set ISCC_EXE to the full path of ISCC.exe.
-    echo         Official download: https://jrsoftware.org/isdl.php
-    goto :fail
-)
-:iscc_found
-
 
 if exist ".venv-build-win" (
     echo [NOTE] Found stale .venv-build-win from older builds; it is NOT used.
@@ -94,8 +71,6 @@ if not defined SB_OK (
 )
 echo.
 echo Build complete: %CD%\dist\MSRewardsAssistant\MSRewardsAssistant.exe
-echo [4/4] Creating the single-file Windows installer...
-"%ISCC%" /DAppVersion=%APP_VERSION% "installer\windows.iss" || goto :fail
 echo Keep all files inside dist\MSRewardsAssistant together when distributing.
 exit /b 0
 
