@@ -1,0 +1,38 @@
+<!--
+  clean_sandbox.wsb - Windows Sandbox config for verifying the installer.
+
+  HOW TO USE
+    1. Create C:\MRA_TEST on the host and put these files in it:
+         MSRewardsAssistantSetup.exe
+         verify_setup.ps1
+         dist_manifest.json   (optional, generated on the build machine)
+    2. Edit <HostFolder> below if you used a different folder.
+    3. Double-click this .wsb file. Each launch is a pristine Windows.
+    4. Inside the sandbox, open PowerShell and run the command in
+       installer\verify_clean_vm.md (section "One-shot verification").
+
+  NOTES
+    - Networking is disabled: proves the installer needs no network.
+    - The mapped folder is READ-ONLY: proves the setup exe needs no
+      companion files written next to it.
+    - Windows Sandbox requires Windows Pro / Enterprise / Education,
+      1903+, and virtualization enabled in BIOS. It is NOT available on
+      Home edition, and often unavailable inside a VM without nested
+      virtualization. In that case use a VMware / VirtualBox snapshot
+      instead (see verify_clean_vm.md).
+    - Everything is discarded when you close the sandbox window.
+-->
+<Configuration>
+  <Networking>Disable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\MRA_TEST</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\MRA_TEST</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+</Configuration>

@@ -1,0 +1,8 @@
+# 打包依赖 = 运行时依赖 + PyInstaller。
+# `-r requirements.txt` 继承其中的 python_version 分段，构建机用哪个
+# Python 就装对应版本的 PySide6-Essentials，无需在此重复声明。
+# 测试用的 pytest 不在此列（见 requirements-dev.txt）。
+# 构建脚本 build_ubuntu.sh / build_windows.bat 会安装本文件；
+# .deb 的 CONTROL Depends 另由 build_deb.sh 生成（系统运行库，非 pip 包）。
+-r requirements.txt
+pyinstaller>=6.0
