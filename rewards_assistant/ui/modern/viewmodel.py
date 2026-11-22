@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import calendar as _calendar
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from ...row_access import get_field as _get
 
 # 数据库分类 → 截图上的分组名
 CATEGORY_LABELS: Dict[str, str] = {
@@ -17,15 +19,6 @@ CATEGORY_LABELS: Dict[str, str] = {
     "更多活动": "日常任务",
 }
 GROUP_ORDER: Sequence[str] = ("搜索", "每日活动", "日常任务")
-
-
-def _get(row: Any, key: str, default=None):
-    if row is None:
-        return default
-    try:
-        return row[key]
-    except (KeyError, IndexError, TypeError):
-        return getattr(row, key, default)
 
 
 def points_text(value: Optional[int]) -> str:
@@ -98,7 +91,6 @@ def _points_by_day(rows: Iterable[Any]) -> Dict[str, int]:
 
 
 def _week_monday(d: date) -> date:
-    from datetime import timedelta
     return d - timedelta(days=d.weekday())
 
 
@@ -125,8 +117,6 @@ def calendar_week(rows: Iterable[Any], today: date) -> List[dict]:
     每个格子是一个圆角矩形三排卡片：``W3  11/9-11/15`` / 周合计 / 7 个圆点，
     圆点依次对应该周周一至周日是否有积分（与截图样式一致）。
     """
-    from datetime import timedelta
-
     by = _points_by_day(rows)
     first = date(today.year, today.month, 1)
     last_day = _calendar.monthrange(today.year, today.month)[1]
@@ -139,9 +129,12 @@ def calendar_week(rows: Iterable[Any], today: date) -> List[dict]:
     while cursor <= week_end_of_month:
         number += 1
         end = cursor + timedelta(days=6)
-        days = [cursor + timedelta(days=i) for i in range(7)]
-        dots = [by.get(d.isoformat(), 0) > 0 for d in days]
-        total = sum(by.get(d.isoformat(), 0) for d in days)
+        dots: List[bool] = []
+        total = 0
+        for i in range(7):
+            pts = by.get((cursor + timedelta(days=i)).isoformat(), 0)
+            dots.append(pts > 0)
+            total += pts
         if total > 0:
             out.append({
                 "key": cursor.isoformat(),
@@ -154,8 +147,6 @@ def calendar_week(rows: Iterable[Any], today: date) -> List[dict]:
 
 def calendar_months(rows: Iterable[Any], today: date) -> List[dict]:
     """「月」视图：只显示有积分的月份，不再铺满最近 6 个月。"""
-    from datetime import timedelta
-
     by = _points_by_day(rows)
     totals: Dict[str, int] = {}
     for day, pts in by.items():
@@ -318,7 +309,7 @@ def tr(lang: str, key: str) -> str:
 
 # ---------------------------------------------------------------- 设置绑定
 #
-# 界面控件键 → 经典控制器真正读取的 Settings 键（1.3.0 语义）。
+# 界面控件键 → 经典控制器真正读取的 Settings 键。
 # 只有带 ui_ 前缀且不在 CLASSIC_BINDING 里的才是纯界面偏好。
 
 UI_DEFAULTS: Dict[str, Any] = {
@@ -462,7 +453,7 @@ def settings_values(settings) -> Dict[str, Any]:
                            str(minutes) if minutes in (15, 30, 60) else "60")
     out["ui_remind_mode"] = bool(settings.get("remind_time", "09:00")) or bool(
         settings.get("evening_remind_time", "20:30"))
-    # 旧配置没有新键时回退到对应的 1.3.0 键：以前关过「后台与通知」组的
+    # 既有配置没有新键时回退到对应的经典键：关过「后台与通知」组的
     # 用户，拆分后依然保持关闭；全新安装两个开关都默认打开。
     out["ui_tray_mode"] = bool(settings.get(
         "tray_enabled", settings.get("close_to_tray", True)))
@@ -474,7 +465,7 @@ def settings_values(settings) -> Dict[str, Any]:
 def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
     """界面控件的一次改动 → 经典 Settings 的写入补丁（纯函数，可离线单测）。
 
-    所有会改变运行行为的项都落到 1.3.0 控制器真正读取的键上；
+    所有会改变运行行为的项都落到经典控制器真正读取的键上；
     ``Application.apply_settings(patch)`` 随后负责持久化与重排定时器。
     """
     p = dict(prefs)
@@ -551,11 +542,11 @@ def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
         }
     if key == "ui_tray_mode":
         on = bool(value)
-        # 托盘运行：同时写总开关与 1.3.0 的 close_to_tray，切换即时生效。
+        # 托盘运行：同时写总开关与经典键 close_to_tray，切换即时生效。
         return {"tray_enabled": on, "close_to_tray": on}
     if key == "ui_messages_mode":
         on = bool(value)
-        # 消息通知：同时写总开关与 1.3.0 的 notify_after_sync。
+        # 消息通知：同时写总开关与经典键 notify_after_sync。
         # silent_when_all_done 是「全部完成跳过提醒」的推荐默认，不受影响。
         return {"messages_enabled": on, "notify_after_sync": on}
     return {key: value}
@@ -649,8 +640,7 @@ SWITCH_ANIM_MS = 240
 def progress_fill(percent: int, width: int) -> int:
     """进度条填充像素：严格按容器宽度的百分比。
 
-    旧实现用 ``percent * 2.6`` 的固定像素，30/30 分（100%）也只画 260px，
-    容器变宽就填不满。这里 100% 一定等于容器宽度，不再有溢出细线。
+    100% 一定等于容器宽度，容器变宽也能填满，且不会有溢出细线。
     """
     w = max(0, int(width))
     p = max(0, min(100, int(percent or 0)))
@@ -677,19 +667,19 @@ def ease_out_cubic(t: float) -> float:
 
 # ---------------------------------------------------------------- 设置项精简
 #
-# 旧版有 24 个控件，其中大多数「一般不会改 / 不推荐改」：拟人强度、搜索轮数、
-# 关键词、热搜来源、趋势图天数、日志开关、同步间隔数值、早晚提醒各自的时间、
-# 4 个后台开关……现在一律按 defaults_patch() 写成推荐默认并移除控件。
+# 不常改或不推荐改的项目（拟人强度、搜索轮数、关键词、热搜来源、趋势图
+# 天数、日志开关、同步间隔数值、早晚提醒各自的时间、后台开关等）一律由
+# defaults_patch() 写成推荐默认值，不单独提供控件。
 #
 # 能统一管理的合并成一个控件（一次写齐一组经典键）：
 #   自动同步   = 开关 + 间隔（关 / 15 / 30 / 60 分钟）
 #   任务提醒   = 早间 + 晚间（含 HH:MM）
-#   已拆开的两项各自独立：托盘运行（图标 + 关闭窗口隐藏）/ 消息通知
-#   （关闭后只保留严重错误提醒）。休眠保持关闭，属不推荐改动项。
+#   托盘运行（图标 + 关闭窗口隐藏）/ 消息通知（关闭后只保留严重错误提醒）
+#   两项各自独立。休眠保持关闭，属不推荐改动项。
 #
-# 最终可见控件 11 个键，且每个都真实生效；「减少动画」已删除，动画恒定开启。
+# 可见控件 11 个键，每个都真实生效；动画恒定开启，不提供「减少动画」开关。
 
-# 兼容常量：旧版控件键，已不再显示；保留供既有配置读取与回归测试。
+# 兼容常量：既有配置里的控件键，界面不再显示；保留供配置读取与回归测试。
 SWITCH_KEYS: Sequence[str] = (
     "ui_notify_after_sync",
     "ui_silent_all_done",

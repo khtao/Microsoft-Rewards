@@ -107,7 +107,7 @@ EARN_HTML = (
 )
 
 # 已登录的 /dashboard：页脚带「登录 / 创建帐户」推广链接，但 payload 里有
-# pointsCounters / dailySetItems。旧版只看文案组合会误判成登录页。
+# pointsCounters / dailySetItems。仅按文案组合判定会误判成登录页。
 DASH_LIKE = (
     '<a href="#">登录</a><a href="#">创建帐户</a>'
     '<p>了解微软积分商城的优势</p>'
@@ -360,8 +360,8 @@ def test_dashboard_promo_footer_does_not_cause_intermittent_task_loss(tmp_path,
                                                                       monkeypatch):
     """「有时候显示不全」的根因：已登录 /dashboard 页脚偶尔带推广文案。
 
-    旧版会把它判成登录页 → 两页只采用一页 → DEGRADED → 本次不替换当日任务
-    集合，只沿用上次快照，于是任务时多时少。现在带不带文案都必须 SIGNED_IN，
+    若把它判成登录页 → 两页只采用一页 → DEGRADED → 本次不替换当日任务
+    集合，只沿用上次快照，于是任务时多时少。带不带文案都必须 SIGNED_IN，
     两次同步落库结果完全一致。
     """
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))

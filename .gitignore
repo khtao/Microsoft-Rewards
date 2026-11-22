@@ -10,7 +10,12 @@ __pycache__/
 build/
 dist/
 deb-dist/
+macos-dist/
+.macos-build/
 *.spec.bak
+*.app/
+*.dmg
+*.icns
 
 # 本地数据：可能含登录态、积分历史与运行日志，绝不入库
 cookies.txt
@@ -22,9 +27,13 @@ browser_profile/
 *.db
 run.log
 search_actions.jsonl
+*.jsonl
 *.log
 *.zip
 *.deb
+
+# Windows 单文件安装包（Inno Setup 构建产物，不入库）
+MSRewardsAssistantSetup.exe
 
 # 编辑器 / 系统
 .vscode/

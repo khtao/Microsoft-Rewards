@@ -16,13 +16,12 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from copy import deepcopy
 import re
 from typing import Optional
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分管理助手"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0"
 
 # search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 6 项参数
 # （含默认的 address_bar_rate = 25% 地址栏搜索概率）。
@@ -33,7 +32,6 @@ SEARCH_PANEL_KEYS = (
     "enter_rate", "click_prob", "scroll_screens", "address_bar_rate",
 )
 
-REWARDS_DASHBOARD = "https://rewards.bing.com/"
 SYNC_MIN_INTERVAL_SEC = 900        # 自动同步的最短间隔，避免频繁打扰服务端
 LOGIN_WINDOW_SECONDS = 300         # 「打开浏览器登录」窗口保持时长
 
@@ -98,7 +96,7 @@ def instances_root() -> Path:
 
 
 def instance_home(ident: Optional[str] = None) -> Path:
-    """某个实例独占的数据目录；默认实例与 1.3.0 路径完全一致。
+    """某个实例独占的数据目录；默认实例沿用既有数据目录。
 
     传 ident 可查询「别的实例」的目录（不切换当前进程环境），供环境管理
     界面列目录用；不传则用当前进程实例。
@@ -196,7 +194,7 @@ DEFAULT_SETTINGS = {
     # 当天全部任务完成时是否静默（不再提醒）
     "silent_when_all_done": True,
     # 独立的“自动完成未完成任务”时间表，0~10 个且互不重复。
-    # 旧版 auto_run_pending/auto_open_time 会在加载时迁移。
+    # 既有 auto_run_pending/auto_open_time 会在加载时迁移。
     "auto_run_enabled": False,
     "auto_run_times": ["09:00"],
     "auto_run_fired_day": "",
@@ -206,11 +204,11 @@ DEFAULT_SETTINGS = {
     # 消息通知总开关（默认开）。关闭后除同步/登录失败等严重错误外，
     # 跨天、早晚提醒、积分变化、设置已保存等一律只写日志、不弹系统消息。
     "messages_enabled": True,
-    # 同步后是否弹出通知；与 messages_enabled 同值写入，兼容 1.3.0 语义。
+    # 同步后是否弹出通知；与 messages_enabled 同值写入，兼容经典语义。
     "notify_after_sync": True,
     # 托盘运行总开关（默认开）。关闭后不创建托盘图标，关闭窗口即彻底退出。
     "tray_enabled": True,
-    # 主窗口关闭时最小化到托盘而不是退出；与 tray_enabled 同值，兼容 1.3.0。
+    # 主窗口关闭时最小化到托盘而不是退出；与 tray_enabled 同值，兼容经典语义。
     "close_to_tray": True,
     # 在官方任务全部完成后低内存休眠：进程仍运行，次日自动恢复托盘。
     "sleep_when_all_done": False,
@@ -239,11 +237,26 @@ def normalize_run_times(times) -> list[str]:
     return sorted(times)
 
 
+def _copy_defaults(value):
+    """按内建容器递归复制设置默认值，标量直接返回。
+
+    DEFAULT_SETTINGS 由标量、字符串列表与一两层嵌套字典组成；只处理
+    dict / list / tuple 即可让返回的副本与模块常量完全隔离。
+    """
+    if isinstance(value, dict):
+        return {k: _copy_defaults(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_defaults(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_defaults(v) for v in value)
+    return value
+
+
 class Settings:
-    """JSON 设置存储：合并更新、原子替换、旧版本设置兼容。"""
+    """JSON 设置存储：合并更新、原子替换、既有版本设置兼容。"""
 
     def __init__(self) -> None:
-        self._data = deepcopy(DEFAULT_SETTINGS)
+        self._data = _copy_defaults(DEFAULT_SETTINGS)
         self.load()
 
     def load(self) -> None:
@@ -252,7 +265,7 @@ class Settings:
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    # 已取消浏览器选择，下次保存时自动丢弃旧版字段。
+                    # 已取消浏览器选择，下次保存时自动丢弃废弃字段。
                     for obsolete in ("browser_name", "earn_browser_fallback", "streak_rule",
                                      "auto_open_gap_min", "auto_open_gap_max"):
                         loaded.pop(obsolete, None)
@@ -273,7 +286,7 @@ class Settings:
                             and loaded.get("close_to_tray") is False):
                         loaded["tray_enabled"] = False
                         loaded["messages_enabled"] = False
-                    # 从旧版“到点自动运行”开关迁移，保留原有时间。
+                    # 从既有的「到点自动运行」开关迁移，保留原有时间。
                     if "auto_run_times" not in loaded:
                         old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
                         loaded["auto_run_times"] = [old_time] if _TIME_RE.fullmatch(str(old_time)) else ["09:00"]

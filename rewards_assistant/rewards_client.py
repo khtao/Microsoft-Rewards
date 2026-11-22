@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .task_labels import _CJK_RE, humanize_task
 
 
-@dataclass
+@dataclass(slots=True)
 class TaskItem:
     key: str
     name: str
@@ -27,7 +27,7 @@ class TaskItem:
     title_source: str = "guess"  # api=接口自带可读标题 / page=页面回填 / guess=兜底
 
 
-@dataclass
+@dataclass(slots=True)
 class Snapshot:
     """一次同步拿到的完整状态。"""
 
@@ -315,7 +315,7 @@ def parse_dashboard(data: Dict[str, Any], today: Optional[str] = None) -> Snapsh
 
 
 def keeps_task(task: "TaskItem") -> bool:
-    """任务是否值得留在列表里：只保留能拿到积分的（自定义任务已移除）。
+    """任务是否值得留在列表里：只保留能拿到积分的。
 
     搜索类任务即使当前上限为 0 也先保留（部分地区接口分早晚两次下发），
     其余活动只要上限和已得分都为 0，就认为它不给分。

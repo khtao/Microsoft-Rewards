@@ -40,7 +40,7 @@ DEFAULT_LOG = default_log_path()
 
 
 # ------------------------------------------------------------------ 数据结构
-@dataclass
+@dataclass(slots=True)
 class RoundReport:
     index: int
     engine: str
@@ -58,7 +58,7 @@ class RoundReport:
         return asdict(self)
 
 
-@dataclass
+@dataclass(slots=True)
 class SearchReport:
     sid: str
     started_at: str
@@ -133,8 +133,7 @@ class ActionLogger:
     log = __call__
 
     def close(self, status: str = "ok", reason: str = "") -> None:
-        """失败时必须写明原因；旧版无条件写 ``session_end done``，让「浏览器
-        启动失败」看起来像正常收尾，日志里只剩一段被截断的 traceback。"""
+        """失败时必须写明原因，避免「浏览器启动失败」看起来像正常收尾。"""
         detail = status if not reason else f"{status}: {reason}"
         self("session_end", detail)
         if self.fp:
@@ -293,9 +292,8 @@ def run_human_search(
                 policy_dir=policy_dir, verbose=verbose, geo=geo,
                 log=lambda a, d: logger("browser", f"{a} {d}"))
         except BaseException as exc:
-            # 关键：先把异常的完整原因写进日志，再收尾。旧版只写
-            # session_end done，UI 又把 traceback 截断到 200 字符，
-            # 真正的原因（最后一行）永远看不到，只能靠猜。
+            # 关键：先把异常的完整原因写进日志，再收尾，保证任何截断
+            # 长度下都留得下有用信息。
             from .session import redact
             reason = redact(f"{type(exc).__name__}: {exc}").replace("\n", " ")
             logger("browser_error", reason[:400])
@@ -467,8 +465,7 @@ def run_human_search(
                 # 进程已退出后再删快照；删不掉留给下次 prune，不影响本次运行。
                 if automation_snapshot is not None:
                     cleanup_automation_profile(automation_snapshot)
-        # finally 里同样要区分成功与异常：旧版无条件写 session_end ok，
-        # 主循环中途失败也被记成正常收尾，日志里看不到原因。
+        # finally 里同样要区分成功与异常，主循环中途失败也必须写明原因。
         import sys
         pending_exc = sys.exc_info()[1]
         if pending_exc is not None:

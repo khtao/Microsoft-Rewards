@@ -40,7 +40,7 @@ FALLBACK = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class Keyword:
     text: str
     source: str

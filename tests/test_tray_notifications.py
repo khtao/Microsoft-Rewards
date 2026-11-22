@@ -56,9 +56,9 @@ def test_reset_patch_restores_both_switches_to_on():
 
 
 def test_legacy_background_group_off_stays_off_after_split(tmp_path, monkeypatch):
-    """旧配置里关过「后台与通知」的用户，拆分后两个开关仍保持关闭。"""
+    """既有配置里关过「后台与通知」的用户，拆分后两个开关仍保持关闭。"""
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
-    # 直接写一份「旧版」文件：那时还没有两个新键，关组开关会写三键 False。
+    # 直接写一份不含两个新键的既有配置：关组开关会写三键 False。
     (tmp_path / "settings.json").write_text(
         json.dumps({"notify_after_sync": False,
                     "silent_when_all_done": False,
