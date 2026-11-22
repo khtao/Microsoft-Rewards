@@ -104,13 +104,14 @@ def install_flag_warning_policy(policy_dir: Path | None = None, verbose: bool = 
     不影响其它行为；需要 root 才能写 /etc。成功返回 True。
     """
     dirs = [Path(policy_dir)] if policy_dir else list(EDGE_POLICY_DIRS)
+    payload = json.dumps(FLAG_WARNING_POLICY, indent=2)  # 只序列化一次
     last_err = None
     ok = False
     for d in dirs:                      # 全部写一遍：不同发行版/渠道读取的目录不一样
         try:
             d.mkdir(parents=True, exist_ok=True)
             fp = d / "human_search_policy.json"
-            fp.write_text(json.dumps(FLAG_WARNING_POLICY, indent=2), encoding="utf-8")
+            fp.write_text(payload, encoding="utf-8")
             ok = True
             if verbose:
                 print(f"[信息] 已写入策略抑制警告横幅：{fp}")
@@ -221,7 +222,7 @@ def playwright_cookies(store=None) -> list[dict]:
 def inject_saved_cookies(ctx, store=None) -> int:
     """把加密凭证注入刚启动的 context；返回成功注入条数。
 
-    旧版明文 Cookie 头迁移来的项可能带畸形域；批量 ``add_cookies`` 会因一条
+    由明文 Cookie 头迁移来的项可能带畸形域；批量 ``add_cookies`` 会因一条
     不合规格而整批失败，这里退化为逐条注入并跳过坏项。只要核心认证 Cookie
     成功，自动化仍能正常读到已登录页面。
     """
@@ -416,22 +417,26 @@ _RETRYABLE_LAUNCH_ERRORS = (
 )
 
 
-def is_profile_conflict_error(exc) -> bool:
-    """启动期因配置目录占用 / handoff 失败，值得换一个全新目录重试。"""
-    low = str(exc).lower()
-    return any(k in low for k in _RETRYABLE_LAUNCH_ERRORS)
-
-
 _LAUNCH_ARG_ERRORS = (
     "unexpected", "no_viewport", "unknown option", "unrecognized",
     "not supported", "invalid argument", "permissions", "ignore_default_args",
 )
 
 
+def _error_matches(exc, keywords) -> bool:
+    """异常文本小写后是否命中任一关键词；错误分类共用这一份判定。"""
+    low = str(exc).lower()
+    return any(k in low for k in keywords)
+
+
+def is_profile_conflict_error(exc) -> bool:
+    """启动期因配置目录占用 / handoff 失败，值得换一个全新目录重试。"""
+    return _error_matches(exc, _RETRYABLE_LAUNCH_ERRORS)
+
+
 def is_launch_arg_error(exc) -> bool:
     """Playwright / Edge 版本差异导致可选启动参数被拒绝，值得降级重试。"""
-    low = str(exc).lower()
-    return any(k in low for k in _LAUNCH_ARG_ERRORS)
+    return _error_matches(exc, _LAUNCH_ARG_ERRORS)
 
 
 def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
@@ -440,7 +445,7 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
                            **kwargs):
     """在**全新空目录**启动 Edge，再注入指定凭证；返回 ``(ctx, snapshot)``。
 
-    ``user_data_dir`` / ``source_profile`` 是旧版兼容参数，**一律忽略**：新版
+    ``user_data_dir`` / ``source_profile`` 是兼容参数，**一律忽略**：应用
     不复制、不读取任何已有 profile，因此不存在被独占的锁文件、``shutil.Error``
     或 handoff 到残留实例。``store`` 显式传入当前实例的 ``CookieStore``，多开时
     不会误注入另一个账号的会话；``profile_prefix`` 让领取窗口与自动化目录族

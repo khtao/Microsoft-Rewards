@@ -3,6 +3,11 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
+REM Build with the SYSTEM interpreter only. Set PYTHON before running to pick a
+REM specific one (e.g. "set PYTHON=py -3.13"); never create/reuse a venv here.
+if not defined PYTHON set "PYTHON=python"
+set "PYCMD=%PYTHON%"
+
 if not "%OS%"=="Windows_NT" (
     echo [ERROR] Please run this script on Windows.
     exit /b 1
@@ -24,10 +29,10 @@ if exist ".venv-build-win" (
 )
 
 echo [1/3] Using system Python (no venv)...
-python -c "import sys;print('[INFO] Interpreter:',sys.executable)" || goto :fail
-python -c "import sys;print('[INFO] Build Python: {}.{}'.format(*sys.version_info[:2]))" || goto :fail
+%PYCMD% -c "import sys;print('[INFO] Interpreter:',sys.executable)" || goto :fail
+%PYCMD% -c "import sys;print('[INFO] Build Python: {}.{}'.format(*sys.version_info[:2]))" || goto :fail
 
-python -c "import sys;sys.exit(0 if sys.version_info >= (3,15) else 1)"
+%PYCMD% -c "import sys;sys.exit(0 if sys.version_info >= (3,15) else 1)"
 if not errorlevel 1 (
     echo [NOTE] Python 3.15+ needs PySide6 6.12+; requirements.txt selects it automatically.
     echo        This combination is not fully regression-tested. Python 3.12/3.13 is recommended.
@@ -36,16 +41,16 @@ if not errorlevel 1 (
 REM Do NOT upgrade system pip: building against the system environment must not
 REM modify the machine-wide package manager. Only install what is missing.
 echo [2/3] Installing runtime and packaging dependencies into SYSTEM Python...
-python -m pip install --disable-pip-version-check -r requirements-build.txt || goto :depfail
-python -c "import importlib.metadata as m;print('[INFO] requests',m.version('requests'))" || goto :depfail
+%PYCMD% -m pip install --disable-pip-version-check -r requirements-build.txt || goto :depfail
+%PYCMD% -c "import importlib.metadata as m;print('[INFO] requests',m.version('requests'))" || goto :depfail
 
 REM Icons / fonts / Playwright driver / PySide6 / hiddenimports are all
 REM collected by MSRewardsAssistant.spec (SPECPATH is this directory).
 echo [3/3] Building Windows desktop application from spec...
-python -m PyInstaller --noconfirm --clean MSRewardsAssistant.spec || goto :fail
+%PYCMD% -m PyInstaller --noconfirm --clean MSRewardsAssistant.spec || goto :fail
 REM PyInstaller 6.x may emit a symlink / relocate the shiboken6 DLL; force a
 REM real file in _internal root before the guard below.
-python tools\normalize_bundle.py dist\MSRewardsAssistant || goto :fail
+%PYCMD% tools\normalize_bundle.py dist\MSRewardsAssistant || goto :fail
 
 if not exist "dist\MSRewardsAssistant\MSRewardsAssistant.exe" (
     echo [ERROR] Build output missing.

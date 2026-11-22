@@ -461,7 +461,7 @@ def test_repeat_default_is_12_everywhere():
     assert "REPEAT_DEFAULT = 12" in (ROOT / "rewards_assistant" / "ui" / "modern" / "viewmodel.py").read_text("utf8")
     assert "repeat=12" in LEGACY.read_text(encoding="utf8")
     assert "repeat: int = 12" in (ROOT / "rewards_assistant" / "api.py").read_text("utf8")
-    # 死类 TaskConfig 已删除：默认值只保留在真正生效的三处
+    # 默认值只保留在真正生效的三处
     assert "class TaskConfig" not in CONFIG.read_text(encoding="utf8")
 
 

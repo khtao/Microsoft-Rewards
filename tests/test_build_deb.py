@@ -1,11 +1,7 @@
 """依赖清单 / .deb 构建脚本的静态回归（不需要 root、不需要打包环境）。
 
-核验时发现的几类问题：
-* 元包 PySide6 会连带装 QtWebEngine 等扩展，spec 的 collect_all 会把 400MB
-  无用二进制打进包；
-* 构建脚本原先直接对 __main__.py 跑 PyInstaller，手写 spec 的 icons、
-  search_actions.jsonl、hiddenimports 全部失效；
-* deb 的 Depends 只列 6 个库，装到干净 Ubuntu 会起不来（缺 libxcb-* 一族）。
+校验三类约束：运行时只装 PySide6-Essentials 核心模块；构建脚本使用统一
+spec 与系统 Python；deb 的 Depends 覆盖 Qt xcb 平台插件所需的系统库。
 """
 from __future__ import annotations
 
@@ -122,12 +118,12 @@ def test_gitignore_and_no_personal_log_sample_in_repo():
     for token in ("cookies.txt", "session_cookies.bin", "browser_profile/", "*.db", "*.log",
                   "search_actions.jsonl", "dist/", "deb-dist/", "*.deb"):
         assert token in ignore, token
-    # 那份历史日志含真实公网 IP 与会话 ID，且包内无人读取，已删除
+    # 运行时日志可能含真实公网 IP 与会话 ID，且包内无人读取，不应入库
     assert not (ROOT / "rewards_assistant" / "search_actions.jsonl").exists()
 
 
 def test_shell_scripts_parse():
-    for name in ("build_deb.sh", "build_ubuntu.sh"):
+    for name in ("build_deb.sh", "build_ubuntu.sh", "build_macos.sh"):
         r = subprocess.run(["bash", "-n", str(ROOT / name)],
                            capture_output=True, text=True)
         assert r.returncode == 0, (name, r.stderr)

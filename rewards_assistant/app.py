@@ -2,7 +2,7 @@
 
 唯一界面的控制器：``_ensure_window()`` 创建 ``ui.modern.ModernMainWindow``，
 托盘「自动完成未完成任务」与主界面主按钮都落到 ``run_pending_tasks()``，
-执行链路与 1.3.0 经典界面完全一致。
+执行链路与经典窗口共用同一份 Python 代码。
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from .storage import Store, day_str
 from .sync import StatusWorker, SyncWorker
 from .ui.icons import app_icon
 from .ui.login_dialog import LoginDialog
-# 兼容旧引用：默认实例的 key 保持 1.3.0 不变；实际监听一律走
+# 兼容既有引用：默认实例的 key 保持不变；实际监听一律走
 # ``single_instance_key()``，让不同环境各有自己的 IPC 通道、可同时运行。
 SINGLE_INSTANCE_KEY = "MSRewardsAssistant_SingleInstance_v1"
 
@@ -187,31 +187,36 @@ class Application(QObject):
                 f"打包模式：内置字体 {info.get('bundle_fonts', 0)} 个，"
                 f"界面 {info.get('qt_family') or '系统默认'}")
 
-    def _prune_zero_tasks(self) -> None:
-        """启动时清掉历史库里不给积分的任务，只跑一次。"""
-        if int(self.settings.get("prune_version", 0) or 0) >= 1:
+    def _run_once_migration(self, key: str, version: int, action,
+                            ok_message: str, fail_message: str) -> None:
+        """一次性数据迁移的公共骨架：版本达标即跳过，异常只记日志不阻断。
+
+        ``self.window`` 在启动早期可能尚未创建，此时只落库、不触发界面刷新；
+        异常只记日志不阻断，版本号照常写入。
+        """
+        if int(self.settings.get(key, 0) or 0) >= version:
             return
         try:
-            n = self.store.prune_zero_point_tasks()
+            n = action()
             if n:
-                self._log(f"已过滤 {n} 条不给积分的任务")
-                self.window.refresh_all()
+                self._log(ok_message.format(n=n))
+                if self.window is not None:
+                    self.window.refresh_all()
         except Exception as exc:
-            self._log(f"过滤零积分任务失败：{exc}")
-        self.settings.set("prune_version", 1)
+            self._log(f"{fail_message}：{exc}")
+        self.settings.set(key, version)
+
+    def _prune_zero_tasks(self) -> None:
+        """启动时清掉历史库里不给积分的任务，只跑一次。"""
+        self._run_once_migration(
+            "prune_version", 1, self.store.prune_zero_point_tasks,
+            "已过滤 {n} 条不给积分的任务", "过滤零积分任务失败")
 
     def _migrate_labels(self) -> None:
         """升级后把库里的旧活动 ID 刷成中文名，只跑一次。"""
-        if int(self.settings.get("labels_version", 0) or 0) >= 2:
-            return
-        try:
-            n = self.store.retranslate_names()
-            if n:
-                self._log(f"已把 {n} 条历史任务名刷新为中文")
-                self.window.refresh_all()
-        except Exception as exc:
-            self._log(f"任务名刷新失败：{exc}")
-        self.settings.set("labels_version", 2)
+        self._run_once_migration(
+            "labels_version", 2, self.store.retranslate_names,
+            "已把 {n} 条历史任务名刷新为中文", "任务名刷新失败")
 
     def _already_running(self) -> bool:
         """单实例：已有进程在跑就把它的窗口唤出来。"""
@@ -308,7 +313,7 @@ class Application(QObject):
         self.notifier.attach(self.tray)
 
         # 设定父窗口并保存引用，避免无父级 QMenu 在函数结束后被释放。
-        # 按需求只保留 4 项，且不再显示任何鼠标悬浮提示（托盘 tooltip 已移除）。
+        # 托盘菜单只保留 4 项，不显示鼠标悬浮提示。
         self._tray_menu = QMenu(self.window)
         menu = self._tray_menu
         menu.addAction("显示主页面").triggered.connect(self.show_window)
@@ -736,7 +741,7 @@ class Application(QObject):
             return
         self._syncing = True
         self.window.set_busy(True, "正在同步 Rewards 数据…")
-        # 兼容旧版「页面补充」冷却字段；两页 HTML 现在每次同步都会并发读取，
+        # 兼容「页面补充」冷却字段；两页 HTML 每次同步都会并发读取，
         # 该开关不再触发任何额外网络请求。
         now = datetime.now()
         last = getattr(self, "_last_page_enrichment", None)
@@ -851,7 +856,7 @@ class Application(QObject):
         ret = QMessageBox.question(
             self.window, "退出登录",
             "将清除本应用独立浏览器配置中的登录会话（Cookie 与本地存储），"
-            "并删除旧版明文 Cookie 文件。\n"
+            "并删除遗留的明文 Cookie 文件。\n"
             "不会改动你日常使用的 Edge 配置，历史记录与统计数据不受影响。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

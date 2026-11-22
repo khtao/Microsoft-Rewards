@@ -27,7 +27,7 @@ class RingProgress(QAbstractButton):
     对齐插件版圆环的 hover 观感：鼠标进入时光晕呼吸、弧线轻微外扩、末端
     出现高光点、中心数字微微放大，同时下方小字由「今日任务」变成「点击刷新」；
     移出即恢复。点击发 ``clicked``，由 HomePage 接到 ``Application.sync_now()``
-    —— 任务卡头部那个「刷新」文字按钮已移除，手动刷新只有这一个显式入口。
+    —— 手动刷新只有这一个显式入口，任务卡头部不设文字按钮。
     运行 / 同步期间 ``setEnabled(False)``，视觉变淡且不响应点击。
     """
 
@@ -140,11 +140,10 @@ class RingProgress(QAbstractButton):
     def paint_geometry(self, phase: float | None = None):
         """一次算出全部绘制几何，保证**任何 hover 相位都不出界**。
 
-        截图里的 bug：旧版 ``inset = 13 - 2*phase`` 在相位 1 时只剩 11px，
-        而 halo 笔宽最大 29.5px（半宽 14.75），加上 100% 满圆时 12 点方向
-        RoundCap 与末端高光点都朝径向外溢，顶端被 widget 边界裁成平边。
+        halo 笔宽最大 29.5px（半宽 14.75），加上 100% 满圆时 12 点方向
+        RoundCap 与末端高光点都朝径向外溢，需要留足边界余量。
 
-        现在相位增大时圆环**向内**收缩（inset 变大），光晕变宽/变亮、弧线
+        相位增大时圆环**向内**收缩（inset 变大），光晕变宽/变亮、弧线
         加粗、高光点变大、字号微增 —— 呼吸感不靠向外顶，边界永远圆润。
         返回值 ``(inset, arc_w, halo_w, tip_r, outer_margin)``，其中
         ``outer_margin`` 是最外侧绘制元素到 widget 边缘的余量，必须 > 0。
@@ -255,9 +254,8 @@ class _StatusDot(QWidget):
 class StatusChip(QWidget):
     """对齐插件版 popup.html 的 ``#status``：圆点 + 文案 + 状态配色。
 
-    旧实现是圆环下一行固定绿色「● 已完成 / 待完成」，待完成也是绿的，
-    且只由任务完成度决定。插件版这行是**运行状态**：就绪灰、进行中蓝、
-    全部完成「已完成，无需动作」绿、出错红，运行中小圆点有呼吸感。
+    这行显示**运行状态**：就绪灰、进行中蓝、全部完成「已完成，无需动作」
+    绿、出错红，运行中小圆点有呼吸感；不由任务完成度单独决定。
     """
 
     def __init__(self, lang: str = "zh", parent=None) -> None:
@@ -611,10 +609,8 @@ class TaskRow(QFrame):
 class ProgressBar(QFrame):
     """按容器宽度比例自绘的细进度条（对齐插件版 --track / --success）。
 
-    旧实现把 ``percent * 2.6`` 当固定像素宽度：30/30 分（100%）也只画 260px，
-    容器一宽就填不满；而且 7px 子控件嵌在带 1px 边框的 7px 容器里会溢出，
-    截图里进度条下方那条绿色细线就是它。这里整条自绘、随 resize 自适应，
-    100% 严格等于容器宽度，并带 680ms ease-out 数值动画。
+    整条自绘、随 resize 自适应，100% 严格等于容器宽度，不产生溢出细线，
+    并带 680ms ease-out 数值动画。
     """
 
     def __init__(self, percent: int = 0, parent=None) -> None:

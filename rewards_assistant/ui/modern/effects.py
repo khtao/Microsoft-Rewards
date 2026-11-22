@@ -64,6 +64,26 @@ def _safe_start(anim: QPropertyAnimation, target: QWidget):
     return _start
 
 
+def _clear_fade(target: QWidget, anim: QPropertyAnimation) -> None:
+    """停动画并清 effect；先停后清，否则 Qt 会打印 "without target" 警告。"""
+    try:
+        anim.setProperty("hsaCancelled", True)
+        anim.stop()
+    except RuntimeError:
+        pass
+    try:
+        target.setGraphicsEffect(None)
+    except RuntimeError:
+        pass
+
+
+def _fade_restore(target: QWidget, anim: QPropertyAnimation):
+    """绑定当次控件与动画的结束回调，循环里不会串到后一个控件。"""
+    def _restore():
+        _clear_fade(target, anim)
+    return _restore
+
+
 def stagger_enter(widgets: Iterable[QWidget]) -> None:
     """对齐插件版 ``.enter``：260ms 淡入，逐项错开 85ms。动画始终开启。"""
     items = [w for w in widgets if w is not None]
@@ -77,19 +97,7 @@ def stagger_enter(widgets: Iterable[QWidget]) -> None:
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        def _restore(target=w, a=anim):
-            # 必须先停动画再清 effect：setGraphicsEffect(None) 会销毁 eff，
-            # 之后任何 anim.stop() 都会让 Qt 打印 "without target" 警告。
-            try:
-                a.setProperty("hsaCancelled", True)
-                a.stop()
-            except RuntimeError:
-                pass
-            try:
-                target.setGraphicsEffect(None)
-            except RuntimeError:
-                pass
-
+        _restore = _fade_restore(w, anim)
         anim.finished.connect(_restore)
         delay = vm.stagger_delay(i)
         if delay:
@@ -114,17 +122,7 @@ def fade_in(widget: QWidget) -> None:
     anim.setEndValue(1.0)
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-    def _restore():
-        try:
-            anim.setProperty("hsaCancelled", True)
-            anim.stop()
-        except RuntimeError:
-            pass
-        try:
-            widget.setGraphicsEffect(None)
-        except RuntimeError:
-            pass
-
+    _restore = _fade_restore(widget, anim)
     anim.finished.connect(_restore)
     QTimer.singleShot(vm.TRANSITION_MS + 150, _restore)
     widget._hsa_fade = anim                 # type: ignore[attr-defined]

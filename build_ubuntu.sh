@@ -28,7 +28,7 @@ SPEC="$ROOT/MSRewardsAssistant.spec"
 [[ -f "$SPEC" ]] || { echo "[ERROR] 缺少 $SPEC" >&2; exit 1; }
 
 if [[ -d "$ROOT/.venv-build-ubuntu" ]]; then
-  echo "[NOTE] 发现旧版 .venv-build-ubuntu；本脚本不再使用它，可安全删除："
+  echo "[NOTE] 发现遗留的 .venv-build-ubuntu 目录，本脚本不再使用它，可安全删除："
   echo "       rm -rf .venv-build-ubuntu"
 fi
 

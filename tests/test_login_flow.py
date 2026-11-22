@@ -27,7 +27,7 @@ LOGGED_IN = "<html><h2>每日活动</h2><p>可用积分 1,234</p></html>"
 # ------------------------------------------------------- 参数顺序（图 2）
 
 def test_login_worker_takes_parent_first():
-    """旧版 LoginWorker(self) 把 LoginDialog 当成 wait_seconds 传入。"""
+    """构造签名回归：LoginWorker(self) 不得把 LoginDialog 当成 wait_seconds。"""
     pytest.importorskip("PySide6")
     from PySide6.QtCore import QObject
     from rewards_assistant.ui.login_dialog import LoginWorker
@@ -54,7 +54,7 @@ def test_login_dialog_source_contract():
     assert "LoginWorker(self)" in src
     assert "我已完成登录" in src
     assert "不在构造时自动探测" in src
-    # 旧版「不是登录页就 return + ctx.close()」的自动关闭逻辑已移除
+    # 窗口只在用户点「我已完成登录」或超时后关闭，不因页面变化自动关闭
     assert "if not is_sign_in_page(html):" not in src
 
 

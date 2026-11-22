@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """登录对话框：由用户本人在浏览器里登录，凭证只加密保存在本机。
 
-旧版让用户在 F12 里复制整行 Cookie 粘贴到文本框，凭证经过剪贴板 / 文本框 /
-明文磁盘 / 日志；本版改成：
+登录流程：
 
 * 「打开浏览器登录」→ 应用用独立持久化 profile 打开可见 Edge 窗口；
 * 账号、密码、MFA 全部由用户本人完成，应用不代填、不读取账号密码；
@@ -69,10 +68,8 @@ class ProbeWorker(QThread):
 class LoginWorker(QThread):
     """打开可见窗口并**保持**它，直到用户点「我已完成登录」或超时。
 
-    注意构造签名：``parent`` 是第一个参数（与 QThread 惯例一致）。
-    旧版写成 ``__init__(wait_seconds, parent)``，而对话框调用 ``LoginWorker(self)``，
-    把 LoginDialog 当成 wait_seconds 传进去，随后 ``self.wait_seconds // 3``
-    直接抛 ``unsupported operand type(s) for //: 'LoginDialog' and 'int'``。
+    注意构造签名：``parent`` 是第一个参数（与 QThread 惯例一致），
+    对话框按 ``LoginWorker(self)`` 调用。
     """
 
     done = Signal(bool, str)

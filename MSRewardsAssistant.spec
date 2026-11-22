@@ -7,6 +7,7 @@
 保持在包内，由 app.Application 驱动，主按钮与托盘共用 run_pending_tasks()。
 """
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -28,9 +29,9 @@ if icons.is_dir():
     datas.append((str(icons), 'assets/icons'))
 
 # 可选字体目录：存在则随包携带，不存在就直接用系统中文字体。
-# 不打包 search_actions.jsonl —— 那是 ActionLogger 写到用户数据目录的运行时
-# 日志（api.DEFAULT_LOG = data_dir()/'search_actions.jsonl'），包内无人读取；
-# 仓库里那份历史样本还含真实 IP / 会话 ID，打包进 .deb 会泄露个人信息。
+# 不打包 *.jsonl —— 那是 ActionLogger 写到用户数据目录的运行时日志
+# （api.DEFAULT_LOG = data_dir()/'search_actions.jsonl'），包内无人读取，
+# 且这类文件可能含真实 IP / 会话 ID，不应进入分发包。
 fonts = ROOT / 'fonts'
 if fonts.is_dir():
     datas.append((str(fonts), 'fonts'))
@@ -80,6 +81,9 @@ hiddenimports += [
     'playwright.async_api', 'playwright.sync_api',
     'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore',
     'PySide6.QtSvg', 'PySide6.QtNetwork',
+    # Essentials 不带 PySide6 元包的 dist-info，Qt hook 的版本探测会漏掉
+    # deprecated；Qt enum flag 的 | / & 组合在冻结包里需要它，显式列出。
+    'PySide6.support.deprecated',
     'rewards_assistant.ui.modern.main_window',
     'rewards_assistant.ui.modern.effects',
     'rewards_assistant.ui.legacy',
@@ -127,3 +131,29 @@ coll = COLLECT(
     upx_exclude=[],
     name='MSRewardsAssistant',
 )
+
+# macOS 上把同一个 COLLECT 结果封成 Finder 里的 .app 应用包。BUNDLE 会按
+# 代码签名规则把二进制放到 Contents/Frameworks、数据放到 Contents/Resources
+# 并做交叉链接，同时完成 ad-hoc 签名；Linux / Windows 不进入这个分支。
+# 图标由 build_macos.sh 用系统自带的 sips + iconutil 从 PNG 生成，放在
+# .macos-build/ 下不入库；文件缺失时 BUNDLE 使用 PyInstaller 默认图标。
+if sys.platform == 'darwin':
+    try:
+        sys.path.insert(0, str(ROOT))
+        from rewards_assistant.config import APP_VERSION
+    except Exception:
+        APP_VERSION = '2.0'
+    app_icns = ROOT / '.macos-build' / 'AppIcon.icns'
+    if not app_icns.is_file():
+        app_icns = ROOT / 'assets' / 'icons' / 'app.icns'
+    app = BUNDLE(
+        coll,
+        name='MSRewardsAssistant.app',
+        icon=str(app_icns) if app_icns.is_file() else None,
+        bundle_identifier='community.msrewardsassistant',
+        version=APP_VERSION,
+        info_plist={
+            'CFBundleVersion': APP_VERSION,
+            'CFBundleDisplayName': '积分管理助手',
+        },
+    )

@@ -207,7 +207,7 @@ def test_ring_never_clips_at_any_hover_phase(home):
         assert inset - halo_w / 2.0 > 0
     # 相位增大时向内收缩，而不是向外顶出边界
     assert ring.paint_geometry(1.0)[0] > ring.paint_geometry(0.0)[0]
-    # 视觉直径基本不变（旧版 176/inset13 → 150）
+    # 视觉直径保持约 150px
     assert abs((188 - 2 * ring.paint_geometry(0)[0]) - 150) < 1
 
 

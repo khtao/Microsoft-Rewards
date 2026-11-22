@@ -1,33 +1,28 @@
 # -*- coding: utf-8 -*-
 """后台同步：两页只读抓取 → 统一解析 → 落库（不推算、不写 0、不删历史）。
 
-与旧版的区别
-------------
-旧链路：``/api/getuserinfo`` 单点 → 只有 available 余额是真值 → 「今日积分」
-靠余额日差或任务合计回退 → HTML 只用来补标题（还要再抓一遍页面）。
-
-新链路：
-
+链路要点
+--------
 * 一次会话里读取 ``/dashboard`` + ``/earn``，两页 HTML 同时喂给
   ``readonly_report.build_report()``：三项积分、任务卡、搜索进度、解析日志
-  一次拿全，不再额外抓页面补标题；
-* 「今日积分」直接取页面显示值（``daily.today_points``），由
-  ``points.calculate_daily_points`` 作为第一优先级，不再用余额日差或任务
-  合计推算（余额日差是净变化，兑换扣分时会为负）；
+  一次拿全，不额外抓页面补标题；
+* 「今日积分」直接取页面显示值，由 ``points.calculate_daily_points`` 作为
+  第一优先级，不用余额日差或任务合计推算（余额日差是净变化，兑换扣分时会为负）；
 * 三项积分 / 搜索进度读不到就是 ``None``：UI 显示「--」，保留上次快照，
   绝不写 0，也绝不伪造「搜索已满」；
 * 网络错误、页面改版、部分页面不可用时保留上次快照并标记 stale，
   不覆盖、不清空任务、不弹「积分归零」提醒；
 * 只有两页都完整可用且解析正常时才替换当日任务集合；
 * ``可领取`` 只生成提醒，不自动领取；全程不搜索、不点击活动卡、不 POST；
-* 两页并发下载、HTML 只解码一次、h2 分组一次扫描、整段落库一次提交。
+* 两页并发下载、HTML 按页解码一次、h2 分组一次扫描、整段落库一次提交。
 
-对外契约保持：``StatusWorker`` / ``SyncWorker`` 的类名、构造签名与
-``progress`` / ``succeeded`` / ``failed`` 信号不变，``app.py`` 无需改动。
+``StatusWorker`` / ``SyncWorker`` 的类名、构造签名与 ``progress`` /
+``succeeded`` / ``failed`` 信号是对外契约，``app.py`` 按这些信号编排界面。
 """
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from datetime import datetime
 from typing import Callable, List, Optional
 
@@ -37,6 +32,7 @@ from .auth import AuthError, AuthManager
 from .config import SYNC_MIN_INTERVAL_SEC
 from .readonly_report import CATEGORY_MAP, Report, build_report, to_legacy_dashboard
 from .rewards_client import parse_dashboard
+from .row_access import get_field as _col
 from .session import (
     ALLOWED_PATHS, DEGRADED, SIGNED_IN, SIGNED_OUT,
     ReadOnlyFetcher, default_fetcher, probe, redact,
@@ -44,20 +40,11 @@ from .session import (
 from .storage import Store, day_str
 
 
-def _col(row, key, default=None):
-    if row is None:
-        return default
-    try:
-        return row[key]
-    except (KeyError, IndexError, TypeError):
-        return getattr(row, key, default)
-
-
 def _stable_key(item) -> str:
     """页面卡片的稳定 key：同一张卡跨天 / 跨页可去重，不依赖易变的数组下标。
 
-    基础口径与旧版一致（标题/描述/分值/分组），保证升级后旧任务行仍被原地
-    覆盖，不会因 key 全变而在降级同步时留下一堆同名旧卡。仅当同一次解析里
+    基础口径按标题/描述/分值/分组，既有任务行仍被原地覆盖，不会因 key
+    全变而在降级同步时留下一堆同名旧卡。仅当同一次解析里
     出现**完全相同的基础 key**（同名同描述同分）时，才用 offerId 追加后缀——
     /earn「日常任务」可能同时下发两天的「你是否知道答案？ +5」，一天未完成、
     一天已完成，撞 key 会让后写覆盖前写、未完成任务凭空消失。
@@ -66,11 +53,26 @@ def _stable_key(item) -> str:
     return "page:" + item.section + ":" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def card_as_dict(item) -> dict:
+    """显式展开 Card，替代 ``dataclasses.asdict``。
+
+    Card 已启用 slots，字段全是 str/int/bool；显式构造返回完整的 9 个键，
+    不产生递归深拷贝与中间副本。
+    """
+    return {
+        "name": item.name, "description": item.description,
+        "section": item.section, "points": item.points, "earned": item.earned,
+        "completed": item.completed, "url": item.url, "source": item.source,
+        "offer_id": item.offer_id,
+    }
+
+
 def rows_from_report(report: Report) -> List[dict]:
     """把解析结果转成 ``Store.upsert_task`` 的行。"""
     all_items = [i for g in report.groups for i in g.items]
     base_keys = [_stable_key(i) for i in all_items]
-    counts = {k: sum(1 for x in base_keys if x == k) for k in set(base_keys)}
+    # Counter 一次遍历统计重复 key，避免逐项回扫。
+    counts = Counter(base_keys)
     rows: List[dict] = []
     for item, base in zip(all_items, base_keys):
         if item.source == "counter":
@@ -163,6 +165,12 @@ def sync_once(
                 "logs": report.logs}
 
     logs = list(report.logs) + list(status.warnings) + list(report.warnings)
+    state = status.state
+    # 两页 HTML 各数百 KB，解析完后只剩几个标量还有用。立刻断开对
+    # SessionStatus.pages / PageResult / 原始 HTML 的引用，让它们在写库与
+    # 兼容桥构造（to_legacy_dashboard / parse_dashboard）之前就能被回收，
+    # 而不是一直占着内存直到本函数返回。
+    del status, pages, dash, earn, dash_html, earn_html
     for line in logs:
         emit(redact(line))
 
@@ -176,11 +184,10 @@ def sync_once(
             row["name"] = _col(old, "name", row["key"])
     emit(f"解析到 {len(rows)} 项任务，正在保存…")
     structure_changed = any("结构可能已变化" in w for w in report.warnings)
-    complete_read = status.state == SIGNED_IN and not report.degraded
+    complete_read = state == SIGNED_IN and not report.degraded
 
-    # 旧版每一步单独 commit（任务逐条 UPSERT、余额、页面真值、刷新汇总），
-    # Windows 上每笔都要 fsync。现在整段写入包在一个可重入事务里，只提交一次；
-    # 语义完全不变：读不到仍保留上次快照、不写 0、不完整读取不替换任务集合。
+    # 整段写入包在一个可重入事务里，只提交一次：读不到仍保留上次快照、
+    # 不写 0、不完整读取不替换任务集合。
     with store.tx():
         store.upsert_tasks(day, rows)
 
@@ -218,7 +225,7 @@ def sync_once(
         messages.append(
             f"有 {claimable} 分可领取，请到 rewards.bing.com 手动领取"
             "（通常 30 天内有效）；应用不代领。")
-    if status.state == DEGRADED:
+    if state == DEGRADED:
         messages.append("部分页面未读到，缺失项显示「--」并沿用上次快照。")
     if structure_changed:
         messages.append("页面结构可能变化，进度与积分以服务端最终记录为准。")
@@ -229,11 +236,11 @@ def sync_once(
 
     return {
         "ok": True, "skipped": False, "stale": False,
-        "state": status.state, "day": day,
+        "state": state, "day": day,
         "points": dict(report.points),
         "groups": [{
             "key": g.key, "label": g.label, "earned": g.earned, "total": g.total,
-            "items": [i.__dict__ for i in g.items],
+            "items": [card_as_dict(i) for i in g.items],
         } for g in report.groups],
         "total": report.total, "earned": report.earned, "percent": report.percent,
         "summary": summary, "snapshot": snap, "official_streak": None,
@@ -261,7 +268,7 @@ class StatusWorker(QThread):
 
 
 class SyncWorker(QThread):
-    """只读同步线程；信号与旧版完全一致。"""
+    """只读同步线程；对外暴露 progress / succeeded / failed 三个信号。"""
 
     progress = Signal(str)
     succeeded = Signal(dict)
@@ -272,8 +279,8 @@ class SyncWorker(QThread):
         super().__init__(parent)
         self.store = store
         self.day = day or day_str()
-        # 兼容 app.py 的 45 分钟「页面补充」冷却参数：两页读取现在始终执行，
-        # 该开关不再触发任何额外网络请求，仅保留字段避免改动调用点。
+        # 兼容 app.py 的「页面补充」冷却参数：两页读取始终执行，该开关
+        # 不触发任何额外网络请求，仅保留字段供调用点使用。
         self.enrich_pages = bool(enrich_pages)
 
     def run(self) -> None:
@@ -291,7 +298,7 @@ class SyncWorker(QThread):
             self.failed.emit(str(exc))
         except Exception as exc:
             # 带上异常类型名，避免只剩一句 'xxx' object is not callable 无从定位；
-            # 标准库兜底已让同步不再因 requests 被污染而失败，这行只作诊断。
+            # 标准库后端兜底，这行只作诊断。
             self.failed.emit("同步失败：" +
                              redact(f"{type(exc).__name__}: {exc}"))
         finally:

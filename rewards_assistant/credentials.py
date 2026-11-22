@@ -10,8 +10,8 @@
 * 只写本机数据目录，**不上传、不打印、不写运行日志**；
 * Windows 用 DPAPI（绑定当前 Windows 用户账户），其余平台用机器绑定密钥
   + PBKDF2 派生 + encrypt-then-MAC，文件权限 0600；
-* 不读取用户日常 Edge 的 Cookie 数据库（新版 app-bound encryption 且运行中
-  被独占，正是历史上「Edge 正在运行，打开失败」的根源）；
+* 不读取用户日常 Edge 的 Cookie 数据库（app-bound encryption 且运行中
+  被独占，无法安全读取）；
 * 「退出登录」删除加密文件并清空应用独立 profile 的登录态。
 
 这不是硬件级密钥库：拿到本机文件 + 同一用户/机器环境仍可解密。目标是
@@ -33,6 +33,7 @@ import os
 import platform
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -64,28 +65,20 @@ def _relevant_domain(domain: str) -> bool:
 
 
 def data_dir() -> Path:
-    """当前实例的数据目录；多开时每个实例一份，互不共享。"""
-    try:
-        from .config import instance_home as _home  # 唯一真源
-        return Path(_home())
-    except Exception:                        # 独立运行 / 单测兜底
-        override = os.environ.get("MS_REWARDS_HOME")
-        if override:
-            base = Path(override)
-        elif sys.platform == "win32":
-            base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MSRewardsAssistant"
-        elif sys.platform == "darwin":
-            base = Path.home() / "Library" / "Application Support" / "MSRewardsAssistant"
-        else:
-            base = Path.home() / ".local" / "share" / "msrewardsassistant"
-        base.mkdir(parents=True, exist_ok=True)
-        return base
+    """当前实例的数据目录；多开时每个实例一份，互不共享。
+
+    平台默认路径、``MS_REWARDS_HOME`` 覆盖与实例隔离只在
+    ``config.instance_home()`` 里定义一次，避免多开时凭证目录与清理目录
+    指向不同位置。
+    """
+    from .config import instance_home  # 延迟导入，避免与 config 形成导入环
+    return Path(instance_home())
 
 
 def _entropy() -> bytes:
     """每个实例用不同的加密熵。
 
-    默认实例沿用 1.3.0 的 ENTROPY，旧凭证零迁移；新实例追加实例 id，
+    默认实例沿用既有 ENTROPY，既有凭证文件零迁移；新实例追加实例 id，
     因此即便把 A 环境的凭证文件拷到 B 环境目录，也解不出 A 的账号会话 ——
     多开的「环境独立」在密钥层同样成立。
     """
@@ -143,8 +136,13 @@ def _dpapi(data: bytes, *, protect: bool) -> Optional[bytes]:
 
 # ------------------------------------------------------- 非 Windows：派生密钥
 
+@lru_cache(maxsize=1)
 def _machine_seed() -> bytes:
-    """机器 / 系统用户绑定；变化时凭证自动失效并提示重新登录。"""
+    """机器 / 系统用户绑定；变化时凭证自动失效并提示重新登录。
+
+    进程内不变，缓存后每次 load/save 不再重复读取 machine-id 文件并拼接
+    字符串（PBKDF2 仍按 nonce 每次重新派生，安全强度不变）。
+    """
     bits = [platform.node(), platform.system(), platform.machine()]
     try:
         import getpass
@@ -160,13 +158,36 @@ def _machine_seed() -> bytes:
     return "|".join(bits).encode("utf-8", "ignore")
 
 
+@lru_cache(maxsize=8)
+def _pbkdf2_key(seed: bytes, nonce: bytes) -> bytes:
+    """按「机器种子 + 实例熵 + 文件自带 nonce」缓存派生结果。
+
+    PBKDF2(120k 轮) 是同步链路里最重的单点 CPU 开销，这里只缓存派生结果：
+    ``load()`` 依然每次读文件、验 HMAC、解密，安全流程一步不减。
+
+    * key 含完整 ``seed``：换机器 / 换用户 / 换实例 → seed 变 → 缓存不命中，
+      重新派生后 HMAC 校验失败，「凭证自动失效」口径不变；
+    * key 含文件里的 ``nonce``：每次 ``save()`` 用新的随机 nonce，不会被旧
+      缓存命中而跳过校验；
+    * ``maxsize=8`` 有界：最多留 8 份 32 字节密钥（256 B），频繁重登录也不会
+      让缓存随保存次数增长。
+    """
+    return hashlib.pbkdf2_hmac("sha256", seed, nonce, PBKDF2_ROUNDS, 32)
+
+
 def _derive_key(nonce: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", _machine_seed() + _entropy(),
-                               nonce, PBKDF2_ROUNDS, 32)
+    return _pbkdf2_key(_machine_seed() + _entropy(), nonce)
 
 
 def _xor_stream(key: bytes, nonce: bytes, length: int) -> bytes:
     return hashlib.shake_256(key + nonce).digest(length)
+
+
+def _xor_bytes(data: bytes, stream: bytes) -> bytes:
+    """整块整数 XOR，避免逐字节 Python 循环（大整数运算在 C 层完成）。"""
+    n = len(data)
+    return (int.from_bytes(data, "big") ^ int.from_bytes(stream[:n], "big")
+            ).to_bytes(n, "big")
 
 
 def _seal(raw: bytes) -> bytes:
@@ -175,7 +196,7 @@ def _seal(raw: bytes) -> bytes:
         return MAGIC + MODE_DPAPI + protected
     nonce = os.urandom(NONCE_LEN)
     key = _derive_key(nonce)
-    ct = bytes(a ^ b for a, b in zip(raw, _xor_stream(key, nonce, len(raw))))
+    ct = _xor_bytes(raw, _xor_stream(key, nonce, len(raw)))
     tag = hmac.new(key, MAGIC + MODE_DERIVED + nonce + ct, hashlib.sha256).digest()
     return MAGIC + MODE_DERIVED + nonce + ct + tag
 
@@ -194,7 +215,7 @@ def _unseal(blob: bytes) -> Optional[bytes]:
     expect = hmac.new(key, MAGIC + MODE_DERIVED + nonce + ct, hashlib.sha256).digest()
     if not hmac.compare_digest(tag, expect):
         return None                       # 被篡改 / 换机器 → 视为无凭证
-    return bytes(a ^ b for a, b in zip(ct, _xor_stream(key, nonce, len(ct))))
+    return _xor_bytes(ct, _xor_stream(key, nonce, len(ct)))
 
 
 # ------------------------------------------------------------------ CookieStore
@@ -308,7 +329,7 @@ class CookieStore:
             pass
 
     def migrate_legacy(self) -> bool:
-        """旧版明文 ``cookies.txt`` 一次性迁移为加密凭证，成功后删除明文。
+        """遗留明文 ``cookies.txt`` 一次性迁移为加密凭证，成功后删除明文。
 
         明文文件是 F12 复制的整条 Cookie 头，没有域信息；迁移后 requests 会把
         它们作为 hostless cookie 发送，仅用于平滑升级。界面会建议重新登录一次
