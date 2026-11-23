@@ -217,8 +217,8 @@ def main() -> int:
     for label in ("搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数",
                   "地址栏搜索"):
         assert any(label in t for t in rows), (label, rows)
-    assert any("至多 12 轮" in t and "目前搜索" in t for t in rows), \
-        "默认中档应显示「至多 12 轮，根据任务进度，目前搜索 N 轮」"
+    assert any("至多 16 轮" in t and "目前搜索" in t for t in rows), \
+        "默认中档应显示「至多 16 轮，根据任务进度，目前搜索 N 轮」"
     assert any("16–29 秒" in t for t in rows)
     assert any("50%" in t for t in rows) and any("35%" in t for t in rows)
     assert any("1.2 屏" in t for t in rows)
@@ -228,13 +228,13 @@ def main() -> int:
     # 低档：整组参数一起变（地址栏 25% 为固定默认），且经典 _collect() 透传
     sp.level_seg.changed.emit("低")
     rows_low = summary_texts(sp)
-    assert any("至多 8 轮" in t and "目前搜索" in t for t in rows_low), rows_low
+    assert any("至多 20 轮" in t and "目前搜索" in t for t in rows_low), rows_low
     assert any("10–18 秒" in t for t in rows_low), rows_low
     assert any("35%" in t for t in rows_low) and any("20%" in t for t in rows_low)
     assert any("0.6 屏" in t for t in rows_low)
     assert any("25%" in t for t in rows_low)
     live = win.settings.get("search_panel")
-    assert live["level"] == 1 and live["repeat"] == 8
+    assert live["level"] == 1 and live["repeat"] == 20
     assert live["enter_rate"] == 0.35 and live["click_prob"] == 0.20
     assert live["scroll_screens"] == 0.6
     collected = win.search._collect()
@@ -246,7 +246,7 @@ def main() -> int:
     # 高档：再切一次，6 行与经典参数同步变化
     sp.level_seg.changed.emit("高")
     rows_high = summary_texts(sp)
-    assert any("至多 16 轮" in t and "目前搜索" in t for t in rows_high), rows_high
+    assert any("至多 12 轮" in t and "目前搜索" in t for t in rows_high), rows_high
     assert any("24–40 秒" in t for t in rows_high), rows_high
     assert any("70%" in t for t in rows_high) and any("55%" in t for t in rows_high)
     assert any("2 屏" in t for t in rows_high)

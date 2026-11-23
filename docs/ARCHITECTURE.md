@@ -47,7 +47,7 @@ flowchart TD
 | 自动刷新 | `sync_interval_minutes` + `sync_interval_value_minutes` |
 | 任务提醒 | `remind_time` / `remind_time_value` / `evening_remind_time` / `evening_remind_time_value` |
 | 后台与通知 | `notify_after_sync` / `silent_when_all_done` / `close_to_tray` |
-| 拟人强度 低/中/高 | 一次写齐 `search_panel` 的 8 个执行参数，默认 12 轮 |
+| 拟人强度 低/中/高 | 一次写齐 `search_panel` 的 8 个执行参数；最多次数 20 / 16 / 12，实际次数 = min(ceil(剩余积分÷3), 上限) |
 | 时间胶囊 | `auto_run_times`（08:00 起每 30 分钟补第一个空档） |
 
 隐藏项由 `defaults_patch()` 一次性写成推荐默认值（带迁移标记，不覆盖用户后续选择）；既有配置由 `intensity_upgrade_patch()` / `repeat_upgrade_patch()` 平滑升级。`config.SEARCH_PANEL_KEYS` 是持久化白名单，`SearchPanel._collect()` 负责把参数透传给 `api.run_human_search()`。

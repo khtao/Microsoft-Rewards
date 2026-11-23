@@ -747,7 +747,7 @@ class ModernMainWindow(QWidget):
                 current_level = 2
             self.settings.update({**vm.defaults_patch(current_level),
                                   vm.SIMPLIFY_MARKER: True})
-        # 旧配置里 5 轮一次性升级为默认的 12 轮（用户自定义过的值不动）。
+        # 把早期默认值对齐到当前档位预设（用户自定义过的值不动）。
         repeat_patch = vm.repeat_upgrade_patch(self.settings)
         if repeat_patch:
             self.settings.update(repeat_patch)

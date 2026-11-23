@@ -100,7 +100,7 @@ class SearchRunner(QObject):
     @staticmethod
     def defaults() -> dict:
         return dict(
-            repeat=12, level=2,
+            repeat=16, level=2,
             round_seconds=(16.0, 29.0),
             gap_seconds=(3.0, 12.0),
             click_prob=0.35,
@@ -125,13 +125,9 @@ class SearchRunner(QObject):
             return None
         tasks = store.tasks_of_day(day)
         # 只运行电脑端搜索：Edge 桌面浏览器不能冒充移动搜索进度。
-        # 「至多 N 轮」是强度档位写入的 repeat 上限；实际轮数按尚缺的搜索
-        # 次数取小。与设置页摘要「目前搜索 M 轮」共用 planned_rounds()。
-        try:
-            cap = max(1, min(200, int(p.get("repeat", 12) or 12)))
-        except (TypeError, ValueError, OverflowError):
-            cap = 12
-        repeat = planned_rounds(tasks, cap)
+        # 次数 = min(剩余积分÷3 的次数, 强度档位的最多次数)，除此之外不设
+        # 任何上限或保底。与设置页摘要「目前搜索 M 轮」共用 planned_rounds()。
+        repeat = planned_rounds(tasks, p.get("repeat", 16))
         if repeat <= 0:
             return None
         p["repeat"] = repeat
@@ -216,8 +212,9 @@ class SearchPanel(QWidget):
         g = QGridLayout(box)
         g.setVerticalSpacing(8)
         self.spin_repeat = NoWheelSpinBox()
-        self.spin_repeat.setRange(1, 200)
-        self.spin_repeat.setValue(12)
+        # 控件只做输入合法性约束；业务上限唯一来源是强度档位，不在这里夹逼。
+        self.spin_repeat.setRange(0, 1000000)
+        self.spin_repeat.setValue(16)
         self.spin_repeat.setSuffix(" 轮")
         self.cmb_level = NoWheelComboBox()
         self.cmb_level.addItems([LEVEL_TIP[i] for i in (1, 2, 3)])
@@ -269,7 +266,7 @@ class SearchPanel(QWidget):
         if not isinstance(values, dict):
             return
         try:
-            self.spin_repeat.setValue(int(values.get("repeat", 12)))
+            self.spin_repeat.setValue(int(values.get("repeat", 16)))
             level = int(values.get("level", 2))
         except (TypeError, ValueError, OverflowError):
             level = 2

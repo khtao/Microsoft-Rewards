@@ -61,7 +61,7 @@ def test_pending_filters_mobile_and_zero_placeholders():
     tasks = [task("pc_search", 55, 30), task("mobile_search", 35, 0),
              task("daily_1", 5, 0), task("daily_2", 10, 10, complete=1),
              task("other", 0, 0)]
-    assert pending_desktop_rounds(tasks) == 5
+    assert pending_desktop_rounds(tasks) == 9      # 25 分剩余 / 3 分一次，向上取整
     assert [t["key"] for t in pending_activity_links(tasks)] == ["daily_1"]
     assert not all_reward_tasks_done(tasks)
     assert outstanding(tasks[-1]) is False
@@ -119,7 +119,8 @@ def test_search_runner_uses_only_pc_remaining():
         def tasks_of_day(self, _day):
             return [task("pc_search", 45, 30), task("mobile_search", 100, 0)]
 
-    assert run_config(StoreStub(), {"level": 3, "repeat": 100}) == {"repeat": 3, "level": 3}
+    # 45 - 30 = 15 分剩余 → 5 次；cap=100 不再被任何全局硬顶截断
+    assert run_config(StoreStub(), {"level": 3, "repeat": 100}) == {"repeat": 5, "level": 3}
     class AllDone(StoreStub):
         def daily(self, _day):
             return {"all_done": 1}

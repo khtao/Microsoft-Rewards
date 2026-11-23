@@ -157,7 +157,7 @@ def fetch_keywords(sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "sina"
 # ------------------------------------------------------------------ 主接口
 def run_human_search(
         *,
-        repeat: int = 12,
+        repeat: int = 16,
         keywords: list | None = None,
         keyword_sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "sina"),
         keyword_limit: int = 40,

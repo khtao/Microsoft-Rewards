@@ -253,7 +253,7 @@ def test_hidden_keys_are_fixed_to_defaults_and_groups_stay_editable():
 
     patch = vm.defaults_patch()
     sp = patch["search_panel"]
-    assert sp["level"] == 2 and sp["repeat"] == vm.REPEAT_DEFAULT == 12
+    assert sp["level"] == 2 and sp["repeat"] == vm.REPEAT_DEFAULT == 16
     assert sp["keywords"] == "" and sp["keyword_sources"] == tuple(vm.DEFAULT_SOURCES)
     # 默认档位必须带齐 6 项拟人参数
     for key in vm.INTENSITY_PARAM_KEYS:
@@ -279,7 +279,7 @@ def test_reset_patch_restores_both_hidden_and_visible():
     assert patch["auto_run_times"] == ["09:00"]
     assert patch["launch_at_login"] is False
     assert patch["sync_interval_minutes"] == 60
-    assert patch["search_panel"]["repeat"] == 12
+    assert patch["search_panel"]["repeat"] == 16
     assert patch["search_panel"]["level"] == 2
     assert "ui_reduce_motion" not in patch
     assert "sleep_until_day" not in patch and "prune_version" not in patch
@@ -344,7 +344,7 @@ def test_middle_profile_matches_api_run_human_search_defaults():
     from rewards_assistant import api
     sig = inspect.signature(api.run_human_search)
     mid = vm.intensity_profile("中")
-    assert sig.parameters["repeat"].default == mid["repeat"] == 12
+    assert sig.parameters["repeat"].default == mid["repeat"] == 16
     assert sig.parameters["level"].default == mid["level"] == 2
     assert sig.parameters["round_seconds"].default == mid["round_seconds"]
     assert sig.parameters["enter_rate"].default == mid["enter_rate"]
@@ -376,11 +376,11 @@ def test_intensity_switch_writes_all_six_params_at_once():
 
 def test_default_settings_summary_is_six_rows_and_follows_intensity():
     # 首行是「至多 N 轮，根据任务进度，目前搜索 M 轮」：N 是档位上限，
-    # M 按官方任务剩余进度算，不再是写死的「12 轮」。
+    # M = min(ceil(剩余积分÷3), N)，随官方任务进度变化。
     zh = dict(vm.default_settings_summary(
-        dict(vm.UI_DEFAULTS), "zh", current_rounds=12))
+        dict(vm.UI_DEFAULTS), "zh", current_rounds=16))
     assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 6
-    assert zh["搜索轮数"] == "至多 12 轮，根据任务进度，目前搜索 12 轮"
+    assert zh["搜索轮数"] == "至多 16 轮，根据任务进度，目前搜索 16 轮"
     assert zh["单轮耗时"] == "16–29 秒"
     assert zh["回车提交"] == "50%"
     assert zh["结果点击"] == "35%"
@@ -389,15 +389,15 @@ def test_default_settings_summary_is_six_rows_and_follows_intensity():
 
     low = dict(vm.default_settings_summary(
         {"ui_search_level": "低", "ui_intensity_params": vm.intensity_profile("低")},
-        "zh", current_rounds=8))
-    assert low == {"搜索轮数": "至多 8 轮，根据任务进度，目前搜索 8 轮", "单轮耗时": "10–18 秒",
+        "zh", current_rounds=20))
+    assert low == {"搜索轮数": "至多 20 轮，根据任务进度，目前搜索 20 轮", "单轮耗时": "10–18 秒",
                    "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏",
                    "地址栏搜索": "25%"}
     high = dict(vm.default_settings_summary(
         {"ui_search_level": "高", "ui_intensity_params": vm.intensity_profile("高")},
         "zh", current_rounds=12))
-    # 强度=高时上限 16，但按任务进度实际只跑 12 轮（对应真实日志 09:00 的 12/12）
-    assert high == {"搜索轮数": "至多 16 轮，根据任务进度，目前搜索 12 轮", "单轮耗时": "24–40 秒",
+    # 强度=高时上限 12，本轮按任务进度计划 12 轮
+    assert high == {"搜索轮数": "至多 12 轮，根据任务进度，目前搜索 12 轮", "单轮耗时": "24–40 秒",
                     "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏",
                     "地址栏搜索": "25%"}
 
@@ -405,14 +405,14 @@ def test_default_settings_summary_is_six_rows_and_follows_intensity():
         {"ui_search_level": "中", "ui_intensity_params": vm.intensity_profile("中")},
         "en", current_rounds=7))
     assert en["Search rounds"] == (
-        "Up to 12 rounds, 7 planned now based on task progress")
+        "Up to 16 rounds, 7 planned now based on task progress")
     assert en["Round length"] == "16–29 sec"
     assert en["Enter submits"] == "50%"
     assert en["Result clicks"] == "35%"
     assert en["Result scrolling"] == "1.2 screens"
     assert en["Address-bar search"] == "25%"
     fallback = dict(vm.default_settings_summary(dict(vm.UI_DEFAULTS), "zh"))
-    assert fallback["搜索轮数"] == "至多 12 轮，根据任务进度，目前搜索 0 轮"
+    assert fallback["搜索轮数"] == "至多 16 轮，根据任务进度，目前搜索 0 轮"
 
 
 def test_intensity_params_are_persisted_and_transmitted_to_classic_chain():
@@ -450,17 +450,34 @@ def test_intensity_upgrade_patch_completes_old_search_panel_without_overwriting(
     assert vm.intensity_upgrade_patch(S({vm.INTENSITY_MARKER: True})) == {}
 
 
-def test_repeat_default_is_12_everywhere():
-    """自动完成任务的默认搜索次数为 12 次。"""
-    assert vm.REPEAT_DEFAULT == 12
-    assert vm.UI_DEFAULTS["ui_repeat"] == 12
-    assert vm.UI_DEFAULTS["ui_search_cap"] == 12
-    assert vm.intensity_profile("中")["repeat"] == 12
-    assert vm.defaults_patch()["search_panel"]["repeat"] == 12
-    assert vm.reset_patch()["search_panel"]["repeat"] == 12
-    assert "REPEAT_DEFAULT = 12" in (ROOT / "rewards_assistant" / "ui" / "modern" / "viewmodel.py").read_text("utf8")
-    assert "repeat=12" in LEGACY.read_text(encoding="utf8")
-    assert "repeat: int = 12" in (ROOT / "rewards_assistant" / "api.py").read_text("utf8")
+def test_repeat_upgrade_patch_only_aligns_early_default():
+    """只把早期默认值 5 对齐到 16；档位写入的 12 / 16 / 20 一律不动。"""
+    class S(dict):
+        def get(self, k, d=None):
+            return dict.get(self, k, d)
+
+    upgraded = vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 5, "level": 2}}))
+    assert upgraded["search_panel"]["repeat"] == vm.REPEAT_DEFAULT == 16
+    assert upgraded[vm.REPEAT_DEFAULT_MARKER] is True
+    for cap in (12, 16, 20, 300, 0):
+        patch = vm.repeat_upgrade_patch(S({"search_panel": {"repeat": cap}}))
+        assert "search_panel" not in patch, cap
+        assert patch[vm.REPEAT_DEFAULT_MARKER] is True
+    assert vm.repeat_upgrade_patch(S({vm.REPEAT_DEFAULT_MARKER: True})) == {}
+
+
+def test_repeat_default_is_16_everywhere():
+    """中档强度的最多次数为 16 次，所有默认值与回退值同源。"""
+    assert vm.REPEAT_DEFAULT == 16
+    assert vm.UI_DEFAULTS["ui_repeat"] == 16
+    assert vm.UI_DEFAULTS["ui_search_cap"] == 16
+    assert vm.intensity_profile("中")["repeat"] == 16
+    assert [vm.intensity_profile(c)["repeat"] for c in ("低", "中", "高")] == [20, 16, 12]
+    assert vm.defaults_patch()["search_panel"]["repeat"] == 16
+    assert vm.reset_patch()["search_panel"]["repeat"] == 16
+    assert "REPEAT_DEFAULT = 16" in (ROOT / "rewards_assistant" / "ui" / "modern" / "viewmodel.py").read_text("utf8")
+    assert "repeat=16" in LEGACY.read_text(encoding="utf8")
+    assert "repeat: int = 16" in (ROOT / "rewards_assistant" / "api.py").read_text("utf8")
     # 默认值只保留在真正生效的三处
     assert "class TaskConfig" not in CONFIG.read_text(encoding="utf8")
 

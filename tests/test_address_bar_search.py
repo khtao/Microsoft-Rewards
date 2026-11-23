@@ -219,5 +219,5 @@ def test_old_search_panel_without_key_falls_back_to_api_default():
         "address_bar_rate"].default == 0.25
     # viewmodel 的迁移补齐逻辑也会用 profile 补键
     merged = dict(vm.intensity_profile("中"))
-    merged.update({"level": 2, "repeat": 12})
+    merged.update({"level": 2, "repeat": 16})
     assert merged["address_bar_rate"] == 0.25

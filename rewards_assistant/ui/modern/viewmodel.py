@@ -321,7 +321,7 @@ UI_DEFAULTS: Dict[str, Any] = {
     # 02 运行设置（全部映射到经典 Settings 键）
     "ui_search_level": "中",          # → search_panel.level 1/2/3
     "ui_auto_sync": True,             # → sync_interval_minutes 0 / ui_sync_interval
-    "ui_repeat": 12,                  # → search_panel.repeat（自动完成任务默认 12 轮）
+    "ui_repeat": 16,                  # → search_panel.repeat（强度档位的最多次数）
     "ui_sync_interval": 60,           # → sync_interval_value_minutes
     "ui_remind_enabled": True,        # → remind_time "" / ui_remind_time
     "ui_remind_time": "09:00",        # → remind_time_value
@@ -338,7 +338,7 @@ UI_DEFAULTS: Dict[str, Any] = {
     # 03 定时计划
     "ui_schedule_enabled": False,     # → auto_run_enabled
     "ui_schedule_times": ["09:00"],  # → auto_run_times
-    "ui_search_cap": 12,             # → search_panel.repeat（与 ui_repeat 同源）
+    "ui_search_cap": 16,             # → search_panel.repeat（与 ui_repeat 同源）
     # 统一管理组：一个控件同时写多个经典键（见 pref_to_settings）
     "ui_sync_mode": "60",            # 关 / 15 / 30 / 60 分钟
     "ui_remind_mode": True,          # 早晚提醒一起开关
@@ -415,9 +415,9 @@ def settings_values(settings) -> Dict[str, Any]:
     except (TypeError, ValueError):
         interval = 60
     try:
-        repeat = int(sp.get("repeat", 12) or 12)
+        repeat = int(sp.get("repeat", REPEAT_DEFAULT) or REPEAT_DEFAULT)
     except (TypeError, ValueError):
-        repeat = 12
+        repeat = REPEAT_DEFAULT
     times = settings.get("auto_run_times", ["09:00"])
     out = dict(UI_DEFAULTS)
     out.update({
@@ -484,8 +484,8 @@ def pref_to_settings(prefs: dict, key: str, value: Any) -> dict:
         # 「统一管理」：一个控件一次写齐 6 项拟人参数（其余参数也随档位联动）。
         return search_patch(**intensity_profile(str(value)))
     if key in ("ui_repeat", "ui_search_cap"):
-        n = int(value)
-        return search_patch(repeat=max(1, min(200, n)))
+        # 上限完全由拟人强度档位决定；这里只做整数转换，不再叠加区间夹逼。
+        return search_patch(repeat=int(value))
     if key == "ui_keywords":
         return search_patch(keywords=str(value))
     if key == "ui_sources":
@@ -562,25 +562,26 @@ def _search_panel_from_prefs(p: dict) -> dict:
     return out
 
 
-REPEAT_DEFAULT = 12      # 「自动完成任务」默认搜索轮数
-REPEAT12_MARKER = "ui_repeat_default_12"
+REPEAT_DEFAULT = 16      # 中档强度的「最多次数」，也是所有回退值
+REPEAT_DEFAULT_MARKER = "ui_repeat_default_16"
 
 
 def repeat_upgrade_patch(settings) -> dict:
-    """旧配置的 5 轮一次性升级为 12 轮；用户自定义过的值不覆盖。
+    """把早期默认值 5 对齐到当前档位预设；用户自定义值原样保留。
 
     ``SIMPLIFY_MARKER`` 已经写过的配置不会再走 ``defaults_patch()``，
-    所以这里用独立标记补一次，且只在 repeat 恰为旧默认 5 时才改。
+    这里用独立标记补一次。只认 5 这一个早期默认值：其余数值（含各档位
+    写入的 12 / 16 / 20）一律视为用户配置，不作改动。
     """
-    if settings.get(REPEAT12_MARKER):
+    if settings.get(REPEAT_DEFAULT_MARKER):
         return {}
     sp = _search_panel(settings)
     repeat = _safe_int(sp.get("repeat", REPEAT_DEFAULT), REPEAT_DEFAULT)
     if repeat != 5:
-        return {REPEAT12_MARKER: True}
+        return {REPEAT_DEFAULT_MARKER: True}
     upgraded = dict(sp)
     upgraded["repeat"] = REPEAT_DEFAULT
-    return {"search_panel": upgraded, REPEAT12_MARKER: True}
+    return {"search_panel": upgraded, REPEAT_DEFAULT_MARKER: True}
 
 
 def defaults_patch(current_level: int = 2) -> dict:
@@ -718,7 +719,9 @@ def managed_group_keys(key: str) -> Sequence[str]:
 # 设置页底部只展示 6 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
 # 滚动屏数 / 地址栏搜索），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」
 # 统一控制。其中「搜索轮数」显示为「至多 N 轮，根据任务进度，目前搜索 M 轮」：
-# N 是档位上限，M 由 pending.planned_rounds() 按官方快照算出、执行链路同源取小。
+# N 是档位的最多次数，M = min(剩余积分÷3 向上取整, N)，由
+# pending.planned_rounds() 按官方快照算出、执行链路同源取小。除此之外没有
+# 全局硬顶、会员等级封顶或「至少 1 轮」保底。
 # 这一个控件统一控制。切换强度时 pref_to_settings() 一次性把整组参数写进经典
 # ``search_panel``，经典 SearchPanel._collect() 再把它们透传给
 # api.run_human_search()，所以显示值就是真实执行值，不是摆设。
@@ -735,15 +738,15 @@ INTENSITY_PARAM_KEYS: Sequence[str] = (
 )
 
 INTENSITY_PROFILES: Dict[str, Dict[str, Any]] = {
-    "低": dict(level=1, repeat=8,
+    "低": dict(level=1, repeat=20,
                round_seconds=(10.0, 18.0), max_round_seconds=20.0,
                gap_seconds=(2.0, 6.0), enter_rate=0.35,
                click_prob=0.20, scroll_screens=0.6, address_bar_rate=0.25),
-    "中": dict(level=2, repeat=12,
+    "中": dict(level=2, repeat=16,
                round_seconds=(16.0, 29.0), max_round_seconds=30.0,
                gap_seconds=(3.0, 12.0), enter_rate=0.50,
                click_prob=0.35, scroll_screens=1.2, address_bar_rate=0.25),
-    "高": dict(level=3, repeat=16,
+    "高": dict(level=3, repeat=12,
                round_seconds=(24.0, 40.0), max_round_seconds=45.0,
                gap_seconds=(6.0, 18.0), enter_rate=0.70,
                click_prob=0.55, scroll_screens=2.0, address_bar_rate=0.25),
@@ -794,7 +797,7 @@ def repeat_cap(prefs: dict) -> int:
     """
     params = intensity_profile(prefs.get("ui_search_level", "中"))
     params.update(prefs.get("ui_intensity_params") or {})
-    return max(0, _safe_int(params.get("repeat", 12), 12))
+    return max(0, _safe_int(params.get("repeat", REPEAT_DEFAULT), REPEAT_DEFAULT))
 
 
 def default_settings_summary(prefs: dict, lang: str = "zh",
@@ -802,13 +805,13 @@ def default_settings_summary(prefs: dict, lang: str = "zh",
     """6 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。
 
     ``current_rounds`` 由界面按官方任务快照算出（``pending.planned_rounds``），
-    即「根据任务进度，目前搜索 M 轮」。首行不再写死「16 轮」——那只是上限，
-    实际每轮按剩余搜索次数取小，写死会与实际日志里的 12 / 7 / 4 / 2 轮冲突。
+    即「根据任务进度，目前搜索 M 轮」。首行写「至多 N 轮」而不是固定次数：
+    M 每次都按「剩余积分 ÷ 3 向上取整」与档位上限取小，任务做完就归零。
     """
     en = lang == "en"
     params = intensity_profile(prefs.get("ui_search_level", "中"))
     params.update(prefs.get("ui_intensity_params") or {})
-    cap = _safe_int(params.get("repeat", 12), 12)
+    cap = _safe_int(params.get("repeat", REPEAT_DEFAULT), REPEAT_DEFAULT)
     cur = (max(0, _safe_int(current_rounds, 0)) if current_rounds is not None else 0)
     rows: list[tuple[str, str]] = []
     for key, zh, english in DEFAULT_SUMMARY_ROWS:
