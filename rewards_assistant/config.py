@@ -27,7 +27,7 @@ from typing import Optional
 
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分管理助手"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 
 # search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 5 项参数。
 # round_seconds / gap_seconds 是 [min, max] 区间，随 JSON 存为 list。

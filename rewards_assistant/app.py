@@ -34,6 +34,7 @@ from .opener import PendingOpener, random_gap
 from .pending import all_reward_tasks_done, pending_activity_links, pending_activity_items
 from .storage import Store, day_str
 from .sync import StatusWorker, SyncWorker
+from .timing import ms_text
 from .ui.icons import app_icon
 from .ui.login_dialog import LoginDialog
 # 兼容既有引用：默认实例的 key 保持不变；实际监听一律走
@@ -56,8 +57,10 @@ def _set_win_app_id() -> None:
 class Application(QObject):
     """把数据层、界面层和系统集成粘在一起的控制器。"""
 
-    # 领取窗口在后台线程里等用户关闭；结束时回到主线程复位卡片闸门。
+    # 领取窗口在后台线程里等用户关闭；结束时回到主线程复位卡片闸门，
+    # 并补一次同步（用户手动关窗即视为领取完成）。
     claim_finished = Signal()
+    claim_sync_requested = Signal()
 
     def __init__(self, argv: list) -> None:
         super().__init__()
@@ -92,6 +95,7 @@ class Application(QObject):
         self._claim_thread: Optional[threading.Thread] = None
         self._claim_stop = threading.Event()
         self.claim_finished.connect(self._on_claim_finished)
+        self.claim_sync_requested.connect(self._on_claim_closed)
 
         # 逐个打开任务页的调度器（第一个立即，之后随机间隔）
         self._opener = PendingOpener(self._gap_seconds,
@@ -415,7 +419,7 @@ class Application(QObject):
         self._next_sync: Optional[datetime] = None
         interval = int(self.settings.get("sync_interval_minutes") or 0)
         if interval:
-            self._next_sync = datetime.now() + timedelta(minutes=interval)
+            self._next_sync = datetime.now() + self._next_sync_delay(interval)
 
     def _tick(self) -> None:
         now = datetime.now()
@@ -436,10 +440,13 @@ class Application(QObject):
         # 自动同步
         interval = int(self.settings.get("sync_interval_minutes") or 0)
         if interval and self._next_sync and now >= self._next_sync:
-            self._next_sync = now + timedelta(minutes=interval)
+            # _tick 可被离线 exec 提取单测，抖动用内置 __import__ 保证作用域自足。
+            jitter_s = round(__import__("random").uniform(-0.25, 0.25), 3)
+            self._next_sync = now + timedelta(minutes=interval, seconds=jitter_s)
             self.sync_now(auto=True)
         elif interval and self._next_sync is None:
-            self._next_sync = now + timedelta(minutes=interval)
+            jitter_s = round(__import__("random").uniform(-0.25, 0.25), 3)
+            self._next_sync = now + timedelta(minutes=interval, seconds=jitter_s)
 
         clock = now.strftime("%H:%M")
         # 各时刻每天只触发一次，最多 10 个且由 Settings 保证去重。
@@ -699,19 +706,24 @@ class Application(QObject):
         self._claim_opening = True
         self._claim_stop.clear()
         self._sync_claim_card()
+        self._show_claim_opening()
         store = CookieStore()
         tag = f"{instance_label()}（{instance_id()}）"
 
         def worker() -> None:
+            opened = False
             try:
-                open_claim_window(
+                opened = bool(open_claim_window(
                     store=store, url=CLAIM_URL, stop_event=self._claim_stop,
-                    log=lambda a, d: self._claim_log(f"[领取] {tag} {a} {d}".strip()))
+                    log=lambda a, d: self._claim_log(f"[领取] {tag} {a} {d}".strip())))
             except Exception as exc:
                 # 会话失效 / 官网已无可领取 / 浏览器启动失败：静默，不弹提示。
                 self._claim_log(f"[领取] {tag} 未打开：{short_claim_error(exc)}")
             finally:
                 self.claim_finished.emit()
+                # 用户手动关闭领取窗口 = 领取完成；应用退出触发的关闭不同步。
+                if opened and not self._claim_stop.is_set():
+                    self.claim_sync_requested.emit()
 
         t = threading.Thread(target=worker, name="claim-window", daemon=True)
         self._claim_thread = t
@@ -721,6 +733,23 @@ class Application(QObject):
         self._claim_thread = None
         self._claim_opening = False
         self._sync_claim_card()
+
+    def _show_claim_opening(self) -> None:
+        """点击后把圆环下状态行改成绿色提示；离线桩窗口没有该方法则跳过。"""
+        win = getattr(self, "window", None)
+        setter = getattr(win, "set_claim_opening", None)
+        if callable(setter):
+            try:
+                setter()
+            except Exception:
+                pass
+
+    def _on_claim_closed(self) -> None:
+        """领取窗口由用户手动关闭：回到主线程自动同步一次积分。"""
+        try:
+            self.sync_now(auto=True)
+        except Exception as exc:
+            self._log(f"领取后自动同步失败：{type(exc).__name__}")
 
     # ------------------------------------------------------------------ 同步
 
@@ -885,15 +914,21 @@ class Application(QObject):
         self._opener.start(list(items))
         self.window.update_running_state()
 
-    def _gap_seconds(self) -> int:
+    def _gap_seconds(self) -> float:
         return random_gap(5, 10)
 
-    def _on_waiting(self, next_name: str, gap: int) -> None:
-        """刚排上队，先给一条带总间隔的记录（随后倒计时每秒覆盖它）。"""
+    @staticmethod
+    def _next_sync_delay(interval: int) -> timedelta:
+        """自动刷新周期也带毫秒级随机抖动，不留固定间隔。"""
+        jitter_s = round(__import__("random").uniform(-0.25, 0.25), 3)
+        return timedelta(minutes=interval, seconds=jitter_s)
+
+    def _on_waiting(self, next_name: str, gap: float) -> None:
+        """刚排上队，先给一条带总间隔的记录（随后倒计时按毫秒刷新）。"""
         total = self._opener.total
         done = self._opener.opened_count
         self._set_open_progress(
-            f"已打开 {done}/{total} · {gap} 秒后打开下一个：{next_name}")
+            f"已打开 {done}/{total} · {ms_text(gap)} 秒后打开下一个：{next_name}")
         self.window.update_running_state()
 
     def _on_opened(self, name: str, index: int, total: int) -> None:
@@ -902,10 +937,11 @@ class Application(QObject):
     def _on_open_failed(self, name: str, url: str) -> None:
         self._log(f"打开任务页失败：{name}（{url}）")
 
-    def _on_countdown(self, next_name: str, left: int, done: int, total: int) -> None:
-        """每秒刷新一次状态栏，显示真实倒计时而不是写死的秒数。"""
+    def _on_countdown(self, next_name: str, left: float, done: int,
+                      total: int) -> None:
+        """刷新状态栏，倒计时精确到毫秒。"""
         self._set_open_progress(
-            f"已打开 {done}/{total} · {left} 秒后打开下一个：{next_name}")
+            f"已打开 {done}/{total} · {ms_text(left)} 秒后打开下一个：{next_name}")
 
     def _on_open_finished(self, total: int) -> None:
         self.window.update_running_state()
@@ -994,7 +1030,7 @@ class Application(QObject):
             return
         interval = int(data.get("sync_interval_minutes") or 0)
         if interval != previous.get("sync_interval_minutes"):
-            self._next_sync = (datetime.now() + timedelta(minutes=interval)
+            self._next_sync = (datetime.now() + self._next_sync_delay(interval)
                                if interval else None)
         for key, marker in (("remind_time", "morning"),
                             ("evening_remind_time", "evening")):
@@ -1056,7 +1092,7 @@ class Application(QObject):
         self._next_sync = None
         interval = int(self.settings.get("sync_interval_minutes") or 0)
         if interval:
-            self._next_sync = datetime.now() + timedelta(minutes=interval)
+            self._next_sync = datetime.now() + self._next_sync_delay(interval)
         self._ensure_window()
         self._build_tray()
         self._migrate_labels()

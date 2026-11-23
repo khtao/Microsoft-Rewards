@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import random
 import time
+
+from .timing import jitter
 from urllib.parse import urlparse
 
 BING_ENTRY = "https://cn.bing.com/?scope=web&FORM=ANNTH1&pc=CNNDDB"
@@ -112,12 +114,17 @@ def _has_task(page, tasks) -> bool:
     return any(locate_activity(page, task) is not None for task in tasks)
 
 
-def open_rewards_panel(page, tasks, *, stop=lambda: False, log=lambda _: None) -> bool:
-    """优先打开所给 Bing 页的侧栏；必要时在 Rewards 官方 UI 内回退。"""
+def open_rewards_panel(page, tasks, *, stop=lambda: False, log=lambda _: None,
+                       rng=None) -> bool:
+    """优先打开所给 Bing 页的侧栏；必要时在 Rewards 官方 UI 内回退。
+
+    每次页面稳定等待都是毫秒精度的随机值，不留下固定节奏。
+    """
+    rng = rng or random.Random()
     if stop():
         return False
     page.goto(BING_ENTRY, wait_until="domcontentloaded", timeout=25000)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(int(jitter(1.2, 1.8, rng) * 1000))
     if _has_task(page, tasks):
         return True
     for selector in REWARDS_TRIGGERS:
@@ -128,7 +135,7 @@ def open_rewards_panel(page, tasks, *, stop=lambda: False, log=lambda _: None) -
             continue
         try:
             target.click(timeout=2500)  # Playwright 生成真实鼠标事件，而非 element.click() 脚本
-            page.wait_for_timeout(1600)
+            page.wait_for_timeout(int(jitter(1.3, 1.9, rng) * 1000))
             if _has_task(page, tasks):
                 log("已打开 Bing Rewards 侧栏")
                 return True
@@ -141,7 +148,7 @@ def open_rewards_panel(page, tasks, *, stop=lambda: False, log=lambda _: None) -
             return False
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(1300)
+            page.wait_for_timeout(int(jitter(1.0, 1.6, rng) * 1000))
             if _has_task(page, tasks):
                 log(f"已在官方页面找到活动卡片：{urlparse(url).path}")
                 return True
@@ -164,9 +171,9 @@ def click_activity(page, task, *, rng=None) -> bool:
     x = box["x"] + box["width"] * rng.uniform(.3, .7)
     y = box["y"] + box["height"] * rng.uniform(.3, .7)
     page.mouse.move(x, y, steps=rng.randint(6, 16))
-    time.sleep(rng.uniform(.08, .2))
+    time.sleep(jitter(.08, .2, rng))
     page.mouse.down()
-    time.sleep(rng.uniform(.04, .1))
+    time.sleep(jitter(.04, .1, rng))
     page.mouse.up()
     return True
 

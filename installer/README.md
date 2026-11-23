@@ -1,6 +1,6 @@
-# Windows 安装包（Inno Setup，2.0）
+# Windows 安装包（Inno Setup，2.1）
 
-`MSRewardsAssistantSetup.exe` 由 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成，是一个**自带图形安装向导**的单文件 exe：双击 → 中文向导 → 自动装完。它自动创建桌面图标、开始菜单程序组、卸载程序、卸载注册项（「设置 → 应用」可见），全程不弹 UAC、不联网、不需要同目录任何其他文件。版本号与 `config.APP_VERSION` 一致，当前为 **2.0**。
+`MSRewardsAssistantSetup.exe` 由 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成，是一个**自带图形安装向导**的单文件 exe：双击 → 中文向导 → 自动装完。它自动创建桌面图标、开始菜单程序组、卸载程序、卸载注册项（「设置 → 应用」可见），全程不弹 UAC、不联网、不需要同目录任何其他文件。版本号与 `config.APP_VERSION` 一致，当前为 **2.1**。
 
 图标、快捷方式、目录树、卸载、注册表全部由 Inno Setup 原生处理：一行 `[Files]` 递归打包整个 `dist`，安装器侧不需要额外的脚本逻辑。
 
@@ -76,7 +76,7 @@ installer\build_inno.bat "D:\Tools\ISCC.exe"    手动指定编译器路径
 
 | 段 | 关键配置 | 效果 |
 | --- | --- | --- |
-| `[Setup]` | `#define MyAppVersion "2.0"` | `AppVersion` / `VersionInfoVersion` / 向导显示版本统一为 2.0 |
+| `[Setup]` | `#define MyAppVersion "2.1"` | `AppVersion` / `VersionInfoVersion` / 向导显示版本统一为 2.1 |
 | | `PrivilegesRequired=lowest` | 当前用户级安装，**不弹 UAC**；卸载信息写 HKCU，「设置 → 应用」能读到 |
 | | `DefaultDirName={localappdata}\Programs\MSRewardsAssistant` | 用户级安装目录 |
 | | `DisableDirPage=yes` / `DisableProgramGroupPage=yes` | 向导不问目录、不问开始菜单组，直接装 |
@@ -109,7 +109,7 @@ installer\build_inno.bat "D:\Tools\ISCC.exe"    手动指定编译器路径
 三种方式，效果一致：
 
 - 开始菜单 → `MSRewardsAssistant` → `卸载 MSRewardsAssistant`
-- 设置 → 应用 → `MSRewardsAssistant 2.0` → 卸载
+- 设置 → 应用 → `MSRewardsAssistant 2.1` → 卸载
 - 命令行：`"%LOCALAPPDATA%\Programs\MSRewardsAssistant\unins000.exe"`
 
 向导本身自带卸载确认页，也可以 `/VERYSILENT` 静默卸载。

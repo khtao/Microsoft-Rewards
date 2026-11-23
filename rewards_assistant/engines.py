@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 
+from .timing import ms_text
+
 # 提交之后至少要留给"看结果"的时间
 RESULTS_RESERVE = 3.0
 # 想点进结果页至少需要这么多剩余时间（点开 + 看一眼 + 返回）
@@ -170,7 +172,7 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
     else:
         goto_home(page, engine, human, log, budget)
         if budget is not None and budget.left <= RESULTS_RESERVE + 1:
-            log("warn", f"打开首页已耗时 {budget.elapsed:.1f}s，本轮压缩后续动作")
+            log("warn", f"打开首页已耗时 {ms_text(budget.elapsed)}s，本轮压缩后续动作")
 
     if detect_captcha(page, engine, log, cfg.on_captcha):
         log("captcha", "验证后继续本轮搜索")
@@ -196,7 +198,7 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
         room = budget.left - RESULTS_RESERVE - 1.0
         paste_seconds = max(0.4, min(3.0, room * 0.2))
     log("paste", f"粘贴关键词：{keyword}"
-                 + (f"（预算 {paste_seconds:.1f}s）" if paste_seconds else ""))
+                 + (f"（预算 {ms_text(paste_seconds)}s）" if paste_seconds else ""))
     human.paste_text(page, box_loc, keyword, seconds=paste_seconds)
     ok_input = human.fix_input(page, box_loc, keyword)
     if not ok_input:
@@ -260,5 +262,5 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
                 log("warn", f"点击结果失败：{e}")
 
     if budget is not None:
-        log("budget", f"本轮耗时 {budget.elapsed:.1f}s / 预算 {budget.total:.1f}s")
+        log("budget", f"本轮耗时 {ms_text(budget.elapsed)}s / 预算 {ms_text(budget.total)}s")
     return {"ok": True, "clicked": clicked, "reason": None}

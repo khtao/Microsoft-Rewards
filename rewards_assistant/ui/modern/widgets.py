@@ -263,6 +263,7 @@ class StatusChip(QWidget):
         self._lang = lang
         self._kind = "ready"
         self._ticks = 0
+        self._claim_hint = False
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
@@ -294,6 +295,7 @@ class StatusChip(QWidget):
         kind = kind if kind in vm.STATUS_KINDS else "ready"
         self._kind = kind
         self._text_key = text_key
+        self._claim_hint = False
         c = theme.current()
         color = QColor(c[vm.status_color_key(kind)])
         self._dot.set_color(color.name())
@@ -327,9 +329,14 @@ class StatusChip(QWidget):
         """由「同步 / 搜索 / 收尾 / 失败」等状态文案自动判色。"""
         self.set_state(vm.status_kind(text), text, "ready")
 
+    def set_green_hint(self, text: str) -> None:
+        """领取卡点击后：圆环下用绿色字提示，直到下一次同步/状态变化。"""
+        self.set_state("done", text, "ready")
+        self._claim_hint = True
+
     def set_from_progress(self, prog: dict, lang: str) -> None:
-        """任务全部完成 → 绿色「已完成，无需动作」；进行中不被覆盖。"""
-        if self._kind == "busy":
+        """任务全部完成 → 绿色「已完成，无需动作」；进行中/领取提示不被覆盖。"""
+        if self._kind == "busy" or self._claim_hint:
             return
         if prog.get("complete"):
             self.set_state("done", vm.tr(lang, "status.all_done"), "all_done")
@@ -522,6 +529,8 @@ class StatCard(QFrame):
         self.setObjectName("card")
         self.setMinimumHeight(82)
         self._clickable = False
+        self._base_label = label
+        self._hover_label = ""
         self.setCursor(Qt.CursorShape.ArrowCursor)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 14, 8, 12)
@@ -544,9 +553,24 @@ class StatCard(QFrame):
         self._clickable = bool(enabled)
         self.setCursor(Qt.CursorShape.PointingHandCursor if self._clickable
                        else Qt.CursorShape.ArrowCursor)
+        if not self._clickable:
+            self._label.setText(self._base_label)
+
+    def set_hover_label(self, text: str) -> None:
+        """可点时鼠标移入显示的文案（「点击领取」）。"""
+        self._hover_label = str(text or "")
 
     def is_clickable(self) -> bool:
-        return self._clickable
+        return bool(self._clickable)
+
+    def enterEvent(self, event: QEvent) -> None:
+        if self._clickable and self._hover_label:
+            self._label.setText(self._hover_label)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._label.setText(self._base_label)
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if (self._clickable
@@ -558,6 +582,7 @@ class StatCard(QFrame):
         self._value.setText(text)
 
     def set_label(self, text: str) -> None:
+        self._base_label = text
         self._label.setText(text)
 
 

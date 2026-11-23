@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..auth import AuthManager
 from ..config import LOGIN_WINDOW_SECONDS
+from ..timing import jitter
 from ..credentials import CookieStore
 from ..session import (
     DEGRADED, SIGNED_IN, SIGNED_OUT, TRANSIENT_ERROR, ProfileBusyError,
@@ -100,8 +101,9 @@ class LoginWorker(QThread):
                         elapsed, confirmed = 0, 0
                         while (elapsed < self.wait_seconds
                                and not self.isInterruptionRequested()):
-                            page.wait_for_timeout(3000)
-                            elapsed += 3
+                            nap = jitter(2.4, 3.6)
+                            page.wait_for_timeout(int(nap * 1000))
+                            elapsed += nap
                             if self.isInterruptionRequested():
                                 break
                             try:

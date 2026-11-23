@@ -29,6 +29,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from .credentials import CookieStore
 from .readonly_report import is_sign_in_page
+from .timing import jitter
 
 BASE = "https://rewards.bing.com"
 ALLOWED_PATHS: Sequence[str] = ("/dashboard", "/earn")
@@ -148,7 +149,7 @@ def cleanup_stale_singleton(profile_dir: Path) -> None:
     for _ in range(4):
         if not live:
             break
-        time.sleep(0.5)
+        time.sleep(jitter(0.35, 0.65))
         live = _live_profile_processes(profile_dir)
     if live:
         raise ProfileBusyError(
@@ -180,7 +181,7 @@ def _acquire_file_lock(fh, timeout: float) -> None:
             if time.monotonic() >= deadline:
                 raise ProfileBusyError(
                     "浏览器配置目录正被另一个操作占用（通常是登录窗口），请稍后重试")
-            time.sleep(0.2)
+            time.sleep(jitter(0.15, 0.25))
 
 
 def _release_file_lock(fh) -> None:

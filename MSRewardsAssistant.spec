@@ -142,7 +142,7 @@ if sys.platform == 'darwin':
         sys.path.insert(0, str(ROOT))
         from rewards_assistant.config import APP_VERSION
     except Exception:
-        APP_VERSION = '2.0'
+        APP_VERSION = '2.1'
     app_icns = ROOT / '.macos-build' / 'AppIcon.icns'
     if not app_icns.is_file():
         app_icns = ROOT / 'assets' / 'icons' / 'app.icns'

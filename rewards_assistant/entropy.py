@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from .timing import jitter
 from datetime import datetime, timezone, timedelta
 
 # ------------------------------------------------------------------ 单段分布
@@ -132,7 +133,7 @@ class Cadence:
             now = time.time()
             if now >= end:
                 break
-            time.sleep(min(0.25, end - now))
+            time.sleep(round(min(jitter(0.05, 0.25), end - now), 3))
             if stop is not None and stop():
                 return time.time() - (end - t)
         return t

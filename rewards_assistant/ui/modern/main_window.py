@@ -239,6 +239,7 @@ class HomePage(QWidget):
         self.card_available = StatCard(tr(self._lang, "available"))
         self.card_today = StatCard(tr(self._lang, "today"))
         self.card_claimable = StatCard(tr(self._lang, "claimable"))
+        self.card_claimable.set_hover_label(tr(self._lang, "claim_hover"))
         self.card_claimable.clicked.connect(self.claim_requested.emit)
         for c in (self.card_available, self.card_today, self.card_claimable):
             cards.addWidget(c, 1)
@@ -357,6 +358,7 @@ class HomePage(QWidget):
         self.card_available.set_label(tr(lang, "available"))
         self.card_today.set_label(tr(lang, "today"))
         self.card_claimable.set_label(tr(lang, "claimable"))
+        self.card_claimable.set_hover_label(tr(lang, "claim_hover"))
         self.primary.setText(self._primary_text(lang))
         self.note.setText(tr(lang, "readonly_note"))
         self.task_title.setText(tr(lang, "today_tasks"))
@@ -371,6 +373,10 @@ class HomePage(QWidget):
     def set_claim_available(self, available: bool) -> None:
         """只有控制器确认「此刻确实能领取」才让这张卡响应点击。"""
         self.card_claimable.set_clickable(bool(available))
+
+    def set_claim_opening(self) -> None:
+        """点击「可领取」后，圆环下状态行显示绿色提示。"""
+        self.status_chip.set_green_hint(tr(self._lang, "claim_opening"))
 
     def update_data(self, points: dict, tasks: list, prog: dict) -> None:
         self.card_available.set_value(points_text(points.get("available")))
@@ -908,6 +914,11 @@ class ModernMainWindow(QWidget):
         self.runner.running_changed.connect(lambda _a: self.update_running_state())
 
     # ------------------------------------------------------------ 可领取卡
+
+    def set_claim_opening(self) -> None:
+        """控制器在启动领取窗口时调用；由主页渲染绿色状态行。"""
+        if hasattr(self, "home"):
+            self.home.set_claim_opening()
 
     def _on_claim_requested(self) -> None:
         """卡片只发请求；闸门在控制器里再判一次，防状态竞态。"""

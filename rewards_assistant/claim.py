@@ -19,7 +19,6 @@
 """
 from __future__ import annotations
 
-import time
 from typing import Any, Callable, Optional
 
 from .browser import (cleanup_automation_profile, launch_automation_edge,
@@ -27,6 +26,7 @@ from .browser import (cleanup_automation_profile, launch_automation_edge,
 from .credentials import CookieStore
 from .readonly_report import parse_points_trio
 from .session import HttpFetcher
+from .timing import sleep_jitter
 
 # 官方说明：可领取积分只能在 rewards.bing.com 领取，右上角「准备领取」面板。
 CLAIM_URL = "https://rewards.bing.com/dashboard"
@@ -136,7 +136,7 @@ def open_claim_window(store=None, url: str = CLAIM_URL, log: LogFn = None,
                             break
                     except Exception:
                         break                 # context 被整体关闭
-                    time.sleep(0.3)
+                    sleep_jitter(0.2, 0.45)
         finally:
             try:
                 ctx.close()

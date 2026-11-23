@@ -7,27 +7,32 @@
 """
 from __future__ import annotations
 
-import random
+import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
+
+try:
+    from .timing import jitter
+except ImportError:  # 离线单测按文件路径独立加载本模块时没有父包
+    from rewards_assistant.timing import jitter
 
 
 class PendingOpener(QObject):
     """按随机间隔依次打开一组链接。
 
-    gap_fn  : () -> int，返回下一次打开的间隔秒数
+    gap_fn  : () -> float，返回下一次打开的基础间隔秒数（最终值再随机到毫秒）
     open_fn : (url) -> bool，真正打开网页的函数
     """
 
     opened = Signal(str, int, int)    # 任务名, 第几个(从1开始), 总数
     failed = Signal(str, str)        # 任务名, 无法打开的 URL
-    waiting = Signal(str, int)        # 下一个任务名, 间隔秒数
-    countdown = Signal(str, int, int, int)  # 下一个任务名, 剩余秒, 已打开, 总数
+    waiting = Signal(str, float)      # 下一个任务名, 间隔秒数（精确到毫秒）
+    countdown = Signal(str, float, int, int)  # 下一个任务名, 剩余秒, 已打开, 总数
     finished = Signal(int)            # 总数
     stopped = Signal(int)             # 已打开数
 
-    def __init__(self, gap_fn: Callable[[], int], open_fn: Callable[[str], bool],
+    def __init__(self, gap_fn: Callable[[], float], open_fn: Callable[[str], bool],
                  parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._gap_fn = gap_fn
@@ -37,7 +42,9 @@ class PendingOpener(QObject):
         self._opened_count = 0
         self._timer: Optional[QTimer] = None
         self._tick: Optional[QTimer] = None
-        self._left = 0
+        self._left = 0.0
+        self._deadline = 0.0
+        self._gap = 0.0
 
     # ------------------------------------------------------------------ 状态
 
@@ -125,37 +132,39 @@ class PendingOpener(QObject):
             self.finished.emit(opened)
             return
 
-        gap = max(1, int(self._gap_fn()))
+        base = float(self._gap_fn())
+        # 即使调用方给了固定值，最终间隔也带一个毫秒级随机抖动，不留固定节奏。
+        gap = max(0.001, round(base + jitter(-0.004, 0.004), 3))
         self.waiting.emit(self._items[self._index][0], gap)
         self._start_countdown(gap)
 
-    def _start_countdown(self, gap: int) -> None:
-        """起两个定时器：一个负责到点打开，另一个每秒刷新倒计时。"""
+    def _start_countdown(self, gap: float) -> None:
+        """起两个定时器：一个按毫秒到点打开，另一个刷新倒计时。"""
+        self._gap = gap
+        self._deadline = time.monotonic() + gap
         self._left = gap
         self._emit_countdown()
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._open_one)
-        self._timer.start(gap * 1000)
+        self._timer.start(max(1, int(round(gap * 1000))))
 
         self._tick = QTimer(self)
-        self._tick.setInterval(1000)
+        self._tick.setInterval(100)       # 倒计时显示到毫秒
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
     def _on_tick(self) -> None:
-        self._left = max(0, self._left - 1)
         self._emit_countdown()
 
     def _emit_countdown(self) -> None:
         if self._index < len(self._items):
+            self._left = max(0.0, round(self._deadline - time.monotonic(), 3))
             self.countdown.emit(self._items[self._index][0], self._left,
                                 self._opened_count, len(self._items))
 
 
-def random_gap(lo: int = 5, hi: int = 10) -> int:
-    """返回 [lo, hi] 区间内的随机秒数（默认 5~10 秒）。"""
-    if hi < lo:
-        lo, hi = hi, lo
-    return random.randint(max(1, lo), max(1, hi))
+def random_gap(lo: float = 5, hi: float = 10) -> float:
+    """返回 [lo, hi] 区间内的随机秒数，精确到毫秒（默认 5~10 秒）。"""
+    return jitter(max(0.001, float(lo)), max(0.001, float(hi)))

@@ -17,6 +17,8 @@ from __future__ import annotations
 import random
 import time
 
+from .timing import jitter, sleep_jitter
+
 PROFILES = {
     1: dict(paste=(0.10, 0.30), overshoot=0.00,
             steps=(4, 10), mouse=(0.004, 0.02), scroll=(0.2, 0.8), read=(1.0, 4.0), wander=0.0),
@@ -57,22 +59,22 @@ class Budget:
 
     def sleep(self, a: float, b: float, reserve: float | None = None,
               share: float = 0.7) -> float:
-        """在 [a,b] 里随机等一会儿，但最多只吃掉剩余可用时间的 share。
+        """在 [a,b] 里随机等一会儿（毫秒精度），但最多只吃掉剩余可用时间的 share。
 
         返回实际睡眠时长（用于日志）。预算耗尽时直接返回 0，不阻塞。
         """
-        want = self.rng.uniform(a, b)
+        want = jitter(a, b, self.rng)
         room = self.usable(reserve)
         if room <= 0:
             return 0.0
-        t = min(want, room * share, room)
+        t = round(min(want, room * share, room), 3)
         if t > 0:
             time.sleep(t)
         return t
 
     def sleep_exact(self, seconds: float) -> float:
         """需要精确耗时的场景，只做上限裁剪，不做比例压缩。"""
-        t = max(0.0, min(seconds, self.left))
+        t = round(max(0.0, min(seconds, self.left)), 3)
         if t > 0:
             time.sleep(t)
         return t
@@ -92,21 +94,21 @@ class Human:
     # ---------- 基础：随机等待 ----------
     def sleep(self, a: float, b: float, reserve=None, share: float = 0.7) -> float:
         if self.budget is None:
-            t = self.rng.uniform(a, b)
+            t = jitter(a, b, self.rng)
             time.sleep(t)
             return t
         return self.budget.sleep(a, b, reserve=reserve, share=share)
 
     def pause(self, a: float, b: float, reserve=None) -> float:
         """带一点走神倾向的停顿，模拟人的反应时间。"""
-        base = self.rng.uniform(a, b)
+        base = jitter(a, b, self.rng)
         if self.rng.random() < 0.15:
-            base += self.rng.uniform(0.3, 1.8)
+            base += jitter(0.3, 1.8, self.rng)
         if self.budget is None:
             time.sleep(base)
             return base
         room = self.budget.usable(reserve)
-        t = min(base, room * 0.7, room) if room > 0 else 0.0
+        t = round(min(base, room * 0.7, room), 3) if room > 0 else 0.0
         if t > 0:
             time.sleep(t)
         return t
@@ -154,8 +156,8 @@ class Human:
             # 按最小急动度的「速度倒数」分配每步间隔：峰速度处间隔小，两端大
             t = (i + 0.5) / n
             v = 30 * t ** 2 - 60 * t ** 3 + 30 * t ** 4      # d(min_jerk)/dt
-            dt = self.rng.uniform(lo, hi) * (1.0 / max(0.25, v * 1.6))
-            time.sleep(min(dt, hi * 3))
+            dt = jitter(lo, hi, self.rng) * (1.0 / max(0.25, v * 1.6))
+            time.sleep(round(min(dt, hi * 3), 3))
 
         # 过冲修正：真人瞄不准会冲过去一点再拉回来，偶尔还会二次微调
         if not quick and self.rng.random() < self.p.get("overshoot", 0.0):
@@ -164,9 +166,9 @@ class Human:
                 ux, uy = (x - from_xy[0]) / dist, (y - from_xy[1]) / dist
                 over = self.rng.uniform(4, 18)
                 page.mouse.move(x + ux * over, y + uy * over)
-                time.sleep(self.rng.uniform(0.02, 0.06))
+                sleep_jitter(0.02, 0.06, self.rng)
                 page.mouse.move(x + self.rng.uniform(-2, 2), y + self.rng.uniform(-2, 2))
-                time.sleep(self.rng.uniform(0.03, 0.10))
+                sleep_jitter(0.03, 0.10, self.rng)
         return (x, y)
 
     def move_to_box(self, page, box: dict, last_xy=None, quick: bool = False) -> tuple:
@@ -183,9 +185,9 @@ class Human:
             return last_xy
         xy = self.move_to_box(page, box, last_xy, quick=quick)
         if before_click_pause:
-            time.sleep(self.rng.uniform(0.05, 0.30))     # 移动到位后的确认停顿
+            sleep_jitter(0.05, 0.30, self.rng)          # 移动到位后的确认停顿
         page.mouse.down()
-        time.sleep(self.rng.uniform(0.02, 0.10))         # 按下时长
+        sleep_jitter(0.02, 0.10, self.rng)              # 按下时长
         page.mouse.up()
         return xy
 
@@ -208,9 +210,10 @@ class Human:
             ty = self.rng.uniform(0.1 * h, 0.9 * h)
             last = self.move_to(page, tx, ty, last)
             if deadline is not None:
-                time.sleep(min(self.rng.uniform(0.05, 0.35), max(0.0, deadline - time.time())))
+                time.sleep(round(min(jitter(0.05, 0.35, self.rng),
+                                    max(0.0, deadline - time.time())), 3))
             else:
-                time.sleep(self.rng.uniform(0.05, 0.35))
+                sleep_jitter(0.05, 0.35, self.rng)
         return last
 
     # ---------- 滚动阅读（受预算约束） ----------
@@ -232,7 +235,8 @@ class Human:
             page.mouse.wheel(0, d)
             moved += abs(d)
             if t_end is not None:
-                time.sleep(min(self.rng.uniform(*self.p["scroll"]), max(0.0, t_end - time.time())))
+                time.sleep(round(min(jitter(*self.p["scroll"], self.rng),
+                                    max(0.0, t_end - time.time())), 3))
             else:
                 self.sleep(*self.p["scroll"], reserve=reserve)
             if self.rng.random() < 0.12:
@@ -251,8 +255,8 @@ class Human:
         seconds 非空时整体压缩到这个时长内。返回是否走通了剪贴板路径。
         """
         lo, hi = self.p["paste"]
-        pre = self.rng.uniform(lo, hi)
-        gap = self.rng.uniform(lo, hi)
+        pre = jitter(lo, hi, self.rng)
+        gap = jitter(lo, hi, self.rng)
         if seconds:
             pre = min(pre, max(0.05, seconds * 0.35))
             gap = min(gap, max(0.05, seconds * 0.35))
@@ -262,7 +266,7 @@ class Human:
             page.evaluate("t => navigator.clipboard.writeText(t)", text)
         except Exception:
             page.keyboard.insert_text(text)          # 剪贴板不可用时的替代
-            time.sleep(self.rng.uniform(0.05, 0.2))
+            sleep_jitter(0.05, 0.2, self.rng)
             return False
         time.sleep(gap)
         try:
@@ -270,7 +274,7 @@ class Human:
         except Exception:
             page.keyboard.insert_text(text)
             return False
-        time.sleep(self.rng.uniform(lo, hi) * 0.5)
+        time.sleep(round(jitter(lo, hi, self.rng) * 0.5, 3))
         return True
 
     # ---------- 输入自检 ----------
@@ -286,9 +290,9 @@ class Human:
             locator.click()
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
-            time.sleep(self.rng.uniform(0.1, 0.3))
+            sleep_jitter(0.1, 0.3, self.rng)
             page.keyboard.insert_text(expected)
-            time.sleep(self.rng.uniform(0.05, 0.2))
+            sleep_jitter(0.05, 0.2, self.rng)
             return locator.input_value() == expected
         except Exception:
             return False
@@ -300,7 +304,7 @@ class Human:
         """
         end = time.time() + seconds
         while time.time() < end:
-            chunk = min(self.rng.uniform(2.0, 8.0), end - time.time())
+            chunk = round(min(jitter(2.0, 8.0, self.rng), end - time.time()), 3)
             if chunk <= 0:
                 break
             time.sleep(chunk)

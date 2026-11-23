@@ -11,6 +11,7 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from .timing import jitter
 from .activity_click import click_activity, locate_activity, open_rewards_panel
 from .browser import (browser_error_hint, cleanup_automation_profile,
                       find_edge_binary, launch_automation_edge)
@@ -83,7 +84,8 @@ class ActivityWorker(QThread):
                     self.progress.emit(
                         f"活动操作失败：{name}（{browser_error_hint(type(exc).__name__ + ': ' + str(exc))}）")
                 if i < len(self.tasks) and not self._stop.is_set():
-                    self._pause(rng.uniform(*sorted(self.gap_range)))
+                    lo, hi = sorted(self.gap_range)
+                    self._pause(jitter(lo, hi, rng))
         except Exception as exc:
             stats["error"] = browser_error_hint(f"{type(exc).__name__}: {exc}")
         finally:

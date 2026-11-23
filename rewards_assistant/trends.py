@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from .timing import jitter
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -225,7 +226,8 @@ BROWSER_SOURCES = {
 
 def _browser_one(page, name: str, url: str, selectors: list, wait_ms: int) -> list[Keyword]:
     page.goto(url, timeout=30000, wait_until="domcontentloaded")
-    page.wait_for_timeout(wait_ms)
+    # 页面稳定等待也是毫秒级随机值，不留固定节奏。
+    page.wait_for_timeout(int(round(jitter(wait_ms * 0.8, wait_ms * 1.2))))
     texts: list[str] = []
     # 头条 hot-board 直接返回 JSON，页面文本优先尝试解析
     if name == "toutiao":

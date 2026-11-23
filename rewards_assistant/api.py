@@ -27,6 +27,7 @@ from .engines import ENGINES, resolve_engine, run_search
 from .human import Budget, Human
 from .trends import Keyword, get_keyword_pool
 from .config import search_log_path
+from .timing import jitter, ms_text
 
 
 def default_log_path() -> str:
@@ -88,7 +89,7 @@ class SearchReport:
     def __str__(self):
         return (f"SearchReport(sid={self.sid}, 成功={self.ok_count}, 失败={self.fail_count}, "
                 f"点击结果={self.clicked_count}, 关键词池={self.keyword_pool_size}"
-                f"[{self.keyword_source}], 用时={self.total_seconds:.1f}s)")
+                f"[{self.keyword_source}], 用时={ms_text(self.total_seconds)}s)")
 
 
 class ActionLogger:
@@ -234,7 +235,8 @@ def run_human_search(
     rng = random.Random(seed)
     sid = uuid.uuid4().hex[:8]
     t_start = time.time()
-    report = SearchReport(sid=sid, started_at=datetime.now().isoformat(timespec="seconds"))
+    report = SearchReport(
+        sid=sid, started_at=datetime.now().isoformat(timespec="milliseconds"))
     logger = ActionLogger(log_file, sid, verbose=verbose, callback=log_callback)
     human = Human(level=level, seed=seed)
     human.rng = rng                                  # 与计划共用随机源，便于复现
@@ -375,15 +377,16 @@ def run_human_search(
                 break
             engine = ENGINES[ename]
             total = min(max_round_seconds,
-                        rng.uniform(min(round_seconds), max(round_seconds)))
+                        jitter(min(round_seconds), max(round_seconds), rng))
             budget = Budget(total, rng)
             rnd = RoundReport(index=i, engine=ename, keyword=kw.text, source=kw.source,
-                              plan_seconds=round(total, 2),
-                              started_at=datetime.now().isoformat(timespec="seconds"))
+                              plan_seconds=round(total, 3),
+                              started_at=datetime.now().isoformat(
+                                  timespec="milliseconds"))
             logger.sink = rnd.events
             logger("search_start", f"第 {i}/{repeat} 次：{kw.text}",
                    engine=ename, keyword=kw.text, source=kw.source,
-                   plan_seconds=round(total, 2))
+                   plan_seconds=round(total, 3))
 
             try:
                 pg = main_page
@@ -403,21 +406,23 @@ def run_human_search(
                 rnd.ok, rnd.reason = False, f"{type(e).__name__}: {e}"
                 logger("error", rnd.reason, engine=ename, keyword=kw.text)
 
-            rnd.duration = round(budget.elapsed, 2)
+            rnd.duration = round(budget.elapsed, 3)
             report.rounds.append(rnd)
             report.ok_count += int(rnd.ok)
             report.fail_count += int(not rnd.ok)
             report.clicked_count += int(bool(rnd.clicked))
-            logger("round_end", f"第 {i} 轮结束：成功={rnd.ok} 用时={rnd.duration}s"
-                                f"（预算 {rnd.plan_seconds}s）", engine=ename, keyword=kw.text)
+            logger("round_end",
+                   f"第 {i} 轮结束：成功={rnd.ok} 用时={ms_text(rnd.duration)}s"
+                   f"（预算 {ms_text(rnd.plan_seconds)}s）",
+                   engine=ename, keyword=kw.text)
             logger.sink = None
 
             if i >= repeat:
                 break
 
             # ---- 轮间隔；顺带按需刷新热搜
-            gap = rng.uniform(min(gap_seconds), max(gap_seconds))
-            logger("idle", f"间隔 {gap:.1f}s")
+            gap = jitter(min(gap_seconds), max(gap_seconds), rng)
+            logger("idle", f"间隔 {ms_text(gap)}s")
             if refresh_every and i % refresh_every == 0:
                 tmp = ctx.new_page()
                 try:
@@ -434,16 +439,17 @@ def run_human_search(
             human.idle(gap, pg, stop=stop_check)
 
         if keep_open:
-            logger("keep_open", f"保持窗口 {keep_open}s")
+            logger("keep_open", f"保持窗口 {ms_text(keep_open)}s")
             until = time.monotonic() + keep_open
             try:
                 while time.monotonic() < until and not (stop_check is not None and stop_check()):
-                    time.sleep(min(0.25, max(0.0, until - time.monotonic())))
+                    time.sleep(round(min(jitter(0.05, 0.25, rng),
+                                        max(0.0, until - time.monotonic())), 3))
             except KeyboardInterrupt:
                 pass
     finally:
-        report.ended_at = datetime.now().isoformat(timespec="seconds")
-        report.total_seconds = round(time.time() - t_start, 2)
+        report.ended_at = datetime.now().isoformat(timespec="milliseconds")
+        report.total_seconds = round(time.time() - t_start, 3)
         if own_context and close_browser:
             try:
                 ctx.close()
@@ -492,7 +498,7 @@ def run_human_search(
 
     if verbose:
         print(f"\n完成：成功 {report.ok_count} / 失败 {report.fail_count}，"
-              f"点击结果 {report.clicked_count} 次，用时 {report.total_seconds:.1f}s")
+              f"点击结果 {report.clicked_count} 次，用时 {ms_text(report.total_seconds)}s")
         if report.log_path:
             print(f"行为日志：{report.log_path}")
     return report

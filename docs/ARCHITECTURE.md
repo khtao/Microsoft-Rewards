@@ -1,6 +1,6 @@
-# 架构说明（2.0）
+# 架构说明（2.1）
 
-面向维护者的简要说明，描述当前版本的分层、数据流与设计约束。用户向导读 [README.md](../README.md)。
+面向维护者的简要说明，描述当前版本的分层、数据流与设计约束。简介与安装说明见 [README.md](../README.md)。
 
 ## 分层
 
@@ -52,7 +52,33 @@ flowchart TD
 
 隐藏项由 `defaults_patch()` 一次性写成推荐默认值（带迁移标记，不覆盖用户后续选择）；既有配置由 `intensity_upgrade_patch()` / `repeat_upgrade_patch()` 平滑升级。`config.SEARCH_PANEL_KEYS` 是持久化白名单，`SearchPanel._collect()` 负责把参数透传给 `api.run_human_search()`。
 
+## 节奏与领取
+
+`timing.jitter()` 是全链路唯一的随机时间来源：在 `[lo, hi]` 内取样并量化到 0.001 秒。搜索轮时长与轮间隔（`api.py`）、鼠标与粘贴停顿（`human.py`）、活动卡片点击与页面稳定等待（`activity_click.py` / `activity_worker.py`）、任务页打开间隔与倒计时（`opener.py`）、领取窗口关闭轮询（`claim.py`）、自动刷新周期（`app.py`）都走它；倒计时定时器按毫秒启动，日志与状态行用 `ms_text()` 显示三位小数，报告时间戳与耗时也保留毫秒。
+
+「可领取」卡由 `claim_ready()` 统一把关（积分 > 0、登录态、凭证、无同步/运行/已有领取窗口、最近同步成功）。放行时 `StatCard` 变手形并在 `enterEvent` 把标签换成「点击领取」；点击后 `Application.open_claim_page()` 调 `StatusChip.set_green_hint()`，圆环下用完成态绿色显示「正在打开浏览器...」。领取窗口在后台线程里等用户关闭；正常关闭后 `claim_sync_requested` 回到主线程触发 `sync_now(auto=True)`，`claim_finished` 负责复位闸门。`stop_event` 被设置（应用退出）或窗口启动失败时不发同步信号。
+
 纯界面偏好只有 `ui_language` / `ui_theme` / `ui_calendar_view`。
+
+## 搜索次数与强度档位
+
+「拟人强度」不是摆设：切换档位会一次写齐经典 `SearchPanel` 的真实执行参数，中档的最多次数为 **16 轮**。每次自动完成任务的搜索次数只有一个公式：
+
+```
+次数 = min( ceil(搜索任务剩余积分 ÷ 3), 强度档位的最多次数 )
+```
+
+电脑端搜索每次计 3 分，剩余积分按官方同步快照的 `points_max - points_earned` 计算，向上取整。例如强度=中（最多 16 次）时：还剩 51 分 → `min(17, 16) = 16` 次；还剩 6 分 → `min(2, 16) = 2` 次。除此之外不叠加任何封顶、保底或按会员等级的额外限制；任务做完归 0，不启动浏览器。设置页首行「至多 N 轮，根据任务进度，目前搜索 M 轮」的 M 就是这个结果，显示值即执行值。
+
+低 / 中 / 高 的最多次数分别为 **20 / 16 / 12 次**：强度越高单轮越慢、抖动越大，因此单次运行覆盖的轮数更少；剩余积分不足时一律按进度收敛。
+
+| 展示项 | 低 | 中（默认） | 高 |
+| --- | --- | --- | --- |
+| 搜索轮数上限 | 至多 20 轮 | 至多 16 轮 | 至多 12 轮 |
+| 单轮耗时 | 10–18 秒 | 16–29 秒 | 24–40 秒 |
+| 回车提交 | 35% | 50% | 70% |
+| 结果点击 | 20% | 35% | 55% |
+| 滚动屏数 | 0.6 屏 | 1.2 屏 | 2 屏 |
 
 ## 同步链路：凭证与浏览器解耦
 
@@ -109,11 +135,11 @@ Microsoft Rewards 要求奖励搜索由本人手动进行，不建议用它获�
 
 ## 构建
 
-`build_ubuntu.sh` / `build_windows.bat` / `build_deb.sh` / `build_macos.sh` 都使用统一的 `MSRewardsAssistant.spec`：图标、可选字体、Playwright 驱动由 spec 收集，Qt 模块交给 PyInstaller 官方 hook 按 import 图收集；`shiboken6` 动态库显式平铺到 `_internal` 根目录并由 `normalize_bundle.py` 校验。`.deb` 的版本号取自 `config.APP_VERSION`（当前 `2.0`）。构建一律使用系统 Python（不创建虚拟环境），避免 `site-packages` 混用引入 `lazy_import` 代理污染；源码运行时仍可用虚拟环境。Windows 侧构建脚本与 `tools/normalize_bundle.py` 的输出保持纯 ASCII，并对 stdout / stderr 设 `backslashreplace`：CI 以管道捕获输出（cp1252），`chcp` 不作用于管道，中文路径与消息都不会让构建中断。
+`build_ubuntu.sh` / `build_windows.bat` / `build_deb.sh` / `build_macos.sh` 都使用统一的 `MSRewardsAssistant.spec`：图标、可选字体、Playwright 驱动由 spec 收集，Qt 模块交给 PyInstaller 官方 hook 按 import 图收集；`shiboken6` 动态库显式平铺到 `_internal` 根目录并由 `normalize_bundle.py` 校验。`.deb` 的版本号取自 `config.APP_VERSION`（当前 `2.1`）。构建一律使用系统 Python（不创建虚拟环境），避免 `site-packages` 混用引入 `lazy_import` 代理污染；源码运行时仍可用虚拟环境。Windows 侧构建脚本与 `tools/normalize_bundle.py` 的输出保持纯 ASCII，并对 stdout / stderr 设 `backslashreplace`：CI 以管道捕获输出（cp1252），`chcp` 不作用于管道，中文路径与消息都不会让构建中断。
 
-Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`：图形化中文向导、当前用户级安装（不弹 UAC）、桌面与开始菜单图标、HKCU 卸载项；版本号同为 `2.0`。详见 [installer/README.md](../installer/README.md)。
+Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`：图形化中文向导、当前用户级安装（不弹 UAC）、桌面与开始菜单图标、HKCU 卸载项；版本号同为 `2.1`。详见 [installer/README.md](../installer/README.md)。
 
-macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.0_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
+macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.1_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
 
 依赖按用途分成三份清单，互不夹带：`requirements.txt` 只装运行时（`PySide6-Essentials` / `requests` / `playwright`），`requirements-build.txt` 追加 `pyinstaller`，`requirements-dev.txt` 追加 `pytest`。Qt 只用 Essentials 的核心模块，不安装 `PySide6-Addons`（QtWebEngine / Qt3D / QtCharts / QtMultimedia 均为项目不需要的扩展）。`requests` 是首选 HTTP 后端，缺失时 `HttpFetcher` 自动切到标准库 `urllib`。
 

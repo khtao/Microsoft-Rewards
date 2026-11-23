@@ -55,8 +55,8 @@ def test_requirements_build_still_layers_on_runtime_requirements():
     assert "pyinstaller" in src.lower()
 
 
-def test_readme_documents_system_only_build_and_lazy_import_fix():
-    src = _read("README.md")
+def test_architecture_documents_system_only_build_and_lazy_import_fix():
+    src = _read("docs/ARCHITECTURE.md")
     assert "虚拟环境" in src
     assert "系统" in src
     assert "lazy_import" in src

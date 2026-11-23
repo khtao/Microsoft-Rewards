@@ -15,7 +15,7 @@
 ;     ..\MSRewardsAssistantSetup.exe    <- OutputDir=..
 ; ===========================================================================
 #define MyAppName "MSRewardsAssistant"
-#define MyAppVersion "2.0"
+#define MyAppVersion "2.1"
 #define MyAppPublisher "MS Rewards Assistant"
 #define MyAppExeName "MSRewardsAssistant.exe"
 

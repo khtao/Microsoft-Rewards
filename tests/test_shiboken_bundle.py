@@ -78,8 +78,8 @@ def test_windows_build_guards_shiboken_dll():
     assert "goto :fail" in src
 
 
-def test_readme_documents_the_failure_and_fix():
-    src = _read("README.md")
+def test_architecture_documents_the_failure_and_fix():
+    src = _read("docs/ARCHITECTURE.md")
     assert "libshiboken6" in src or "shiboken6" in src
 
 
