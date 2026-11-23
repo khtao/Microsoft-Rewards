@@ -12,6 +12,10 @@ PySide6-Essentials>=6.6,<6.10; python_version < "3.14"
 PySide6-Essentials>=6.10.1; python_version >= "3.14"
 requests>=2.28
 playwright>=1.40
-# 真实地址栏（omnibox）搜索所需；无图形环境 / 未安装时自动关闭该分支，
-# 其余拟人搜索、同步与界面功能不受影响（omnibox.py 延迟导入 + 降级）。
-pyautogui>=0.9.54
+# 真实地址栏（omnibox）搜索所需：Windows 用 SendInput、macOS 用 Quartz，
+# Linux 默认走 Xlib/XTEST，需要有效的 X11 DISPLAY。Wayland 会话若由
+# XWayland 提供 DISPLAY，应用会自动给 Edge 加 --ozone-platform=x11；无 X
+# server 的纯 Wayland 会话则不加，地址栏分支降级（不依赖截图栈、无全局隐式延时）。
+# 未安装或后端不可用时自动关闭该分支，其余拟人搜索、同步与界面功能不受影响
+# （omnibox.py 延迟导入 + 降级）。可通过 PYNPUT_BACKEND 选择其它后端。
+pynput>=1.7.7

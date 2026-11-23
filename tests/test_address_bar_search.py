@@ -4,7 +4,7 @@
 链路回归：engines.address_bar_url / omnibox.submit / run_search 概率分支 →
 api 签名默认 → viewmodel 三档 profile → config 白名单 → legacy._collect()
 透传 → 设置页摘要。地址栏分支的四步（定位 → 清空 → 粘贴搜索词 → 回车）
-由 PyAutoGUI 真实发给 omnibox；页面搜索框路径逐字保持原有行为。
+由 pynput 原生键盘后端真实发给 omnibox；页面搜索框路径保持原有行为。
 """
 from __future__ import annotations
 
@@ -64,15 +64,35 @@ class _FakeRNG:
         return 0
 
 
-class _FakeGUI:
+class _FakeKey:
+    ctrl, cmd, delete, enter = "CTRL", "CMD", "DELETE", "ENTER"
+
+
+class _Pressed:
+    def __init__(self, ctl, mod):
+        self.ctl, self.mod = ctl, mod
+
+    def __enter__(self):
+        self.ctl.calls.append(("down", self.mod))
+        return self
+
+    def __exit__(self, *a):
+        self.ctl.calls.append(("up", self.mod))
+        return False
+
+
+class _FakeController:
     def __init__(self):
         self.calls = []
 
-    def hotkey(self, *keys):
-        self.calls.append(("hotkey", keys))
+    def pressed(self, mod):
+        return _Pressed(self, mod)
 
     def press(self, key):
         self.calls.append(("press", key))
+
+    def release(self, key):
+        self.calls.append(("release", key))
 
 
 class _FakeHuman:
@@ -146,15 +166,17 @@ class _FakePage:
         raise AssertionError("本用例不应访问 DOM 选择器")
 
 
-def _run(monkeypatch, rate, rolls, omnibox_enabled=True, gui=None):
-    """在完全离线的 fake 页 / fake human / fake PyAutoGUI 上跑一次 run_search。"""
+def _run(monkeypatch, rate, rolls, omnibox_enabled=True, ctl=None):
+    """在完全离线的 fake 页 / fake human / fake 键盘后端上跑一次 run_search。"""
     home_calls = []
     monkeypatch.setattr(engines, "goto_home",
                         lambda *a, **k: home_calls.append(True) or True)
     monkeypatch.setattr(engines, "detect_captcha", lambda *a, **k: False)
     monkeypatch.setattr(engines, "handle_consent", lambda *a, **k: None)
-    fake_gui = gui if gui is not None else _FakeGUI()
-    monkeypatch.setattr(omnibox, "_load_pyautogui", lambda: fake_gui)
+    fake_ctl = ctl if ctl is not None else _FakeController()
+    monkeypatch.setattr(omnibox, "_load_keyboard",
+                        lambda: SimpleNamespace(Key=_FakeKey))
+    monkeypatch.setattr(omnibox, "_controller", lambda: fake_ctl)
     bing = engines.ENGINES["bing"]
 
     def fake_first_visible(page, selectors, timeout_ms=8000):
@@ -174,13 +196,13 @@ def _run(monkeypatch, rate, rolls, omnibox_enabled=True, gui=None):
     result = engines.run_search(
         page, engines.ENGINES["bing"], "广州 天气", human,
         lambda a, d="", **kw: logs.append((a, d)), cfg)
-    return page, human, logs, home_calls, result, fake_gui
+    return page, human, logs, home_calls, result, fake_ctl
 
 
 # ---------------------------------------------------------------- 概率分支
 
 def test_25_percent_roll_hits_address_bar(monkeypatch):
-    page, human, logs, home_calls, result, gui = _run(monkeypatch, 0.25, [0.10])
+    page, human, logs, home_calls, result, ctl = _run(monkeypatch, 0.25, [0.10])
     assert result["ok"] is True
     assert any(a == "address_bar" for a, _ in logs)
     assert home_calls == [], "地址栏路径不打开首页"
@@ -190,9 +212,12 @@ def test_25_percent_roll_hits_address_bar(monkeypatch):
     assert page.clipboard == ["广州 天气"], "粘贴的是搜索词本身"
     assert [a for a, _ in logs if a in ("focus", "clear", "paste", "submit")] == [
         "focus", "clear", "paste", "submit"]
-    assert gui.calls == [
-        ("hotkey", ("ctrl", "l")), ("hotkey", ("ctrl", "a")),
-        ("press", "delete"), ("hotkey", ("ctrl", "v")), ("press", "enter")]
+    assert ctl.calls == [
+        ("down", "CTRL"), ("press", "l"), ("release", "l"), ("up", "CTRL"),
+        ("down", "CTRL"), ("press", "a"), ("release", "a"), ("up", "CTRL"),
+        ("press", "DELETE"), ("release", "DELETE"),
+        ("down", "CTRL"), ("press", "v"), ("release", "v"), ("up", "CTRL"),
+        ("press", "ENTER"), ("release", "ENTER")]
     assert "scroll" in human.events, "两条路径必须共享结果阅读动作"
     assert human.pasted == [], "地址栏不往页面搜索框粘贴"
 
@@ -205,19 +230,21 @@ def test_address_bar_four_steps_only_change_the_input_box(monkeypatch):
 
 def test_non_bing_default_disables_address_bar(monkeypatch):
     """默认引擎非必应：地址栏搜索不会进行，本轮退回页面搜索框。"""
-    page, human, logs, home_calls, result, gui = _run(
+    page, human, logs, home_calls, result, ctl = _run(
         monkeypatch, 1.0, [0.10, 0.9, 0.9], omnibox_enabled=False)
     assert result["ok"] is True
     assert any(a == "address_bar_skip" for a, _ in logs)
     assert not any(a == "address_bar" for a, _ in logs)
-    assert gui.calls == [], "一次 omnibox 按键都不能有"
+    assert ctl.calls == [], "一次 omnibox 按键都不能有"
     assert home_calls, "退回原来的页面搜索框路径"
     assert human.pasted == ["广州 天气"] and "Enter" in page.presses
 
 
-def test_pyautogui_unavailable_never_breaks_the_round(monkeypatch):
-    """GUI 不可用时 submit 明确返回 False，不抛异常、不伪造一次搜索。"""
-    monkeypatch.setattr(omnibox, "_load_pyautogui", lambda: None)
+def test_keyboard_unavailable_never_breaks_the_round(monkeypatch):
+    """键盘后端不可用时 submit 明确返回 False，不抛异常、不伪造一次搜索。"""
+    monkeypatch.setattr(omnibox, "_load_keyboard", lambda: None)
+    monkeypatch.setattr(omnibox, "_controller", lambda: None)
+    monkeypatch.setattr(omnibox, "_KB_ERROR", "ImportError: no X connection")
     page = _FakePage()
     logs = []
     assert omnibox.submit(page, "广州 天气", _FakeHuman([0.9]),
@@ -228,7 +255,7 @@ def test_pyautogui_unavailable_never_breaks_the_round(monkeypatch):
 
 def test_page_path_keeps_original_behavior(monkeypatch):
     """页面搜索框路径与上一轮之前完全一致：50% 概率清空、粘贴自检、可点按钮。"""
-    page, human, logs, home_calls, result, gui = _run(
+    page, human, logs, home_calls, result, ctl = _run(
         monkeypatch, 0.0, [0.90, 0.4, 0.9, 0.9])
     assert result["ok"] is True and home_calls
     assert not any(a == "address_bar" for a, _ in logs)
@@ -237,7 +264,7 @@ def test_page_path_keeps_original_behavior(monkeypatch):
     assert "Enter" in page.presses
     assert "Control+A" in page.presses and "Delete" in page.presses
     assert ("clear" not in [a for a, _ in logs]), "页面路径不新增 clear 日志"
-    assert gui.calls == []
+    assert ctl.calls == []
     assert not any("/search?q=" in u for u in page.gotos)
     assert "scroll" in human.events
     src = (ROOT / "rewards_assistant" / "engines.py").read_text("utf-8")
@@ -302,6 +329,44 @@ def test_settings_page_shows_the_disable_hint():
     assert "self.address_bar_note" in win
     assert "vm.address_bar_hint(omnibox.current_status()" in win
     assert "note.setVisible(bool(hint))" in win
+
+
+LEGACY_GUI_LIB = "py" + "autogui"   # 拼接避免本文件自身被全仓扫描命中
+
+
+def test_legacy_gui_library_is_fully_removed():
+    """源码、依赖、打包配置、文档里都不再出现旧截图型自动化库。"""
+    files = [ROOT / "requirements.txt", ROOT / "MSRewardsAssistant.spec",
+             ROOT / "README.md", ROOT / "docs" / "ARCHITECTURE.md",
+             ROOT / "rewards_assistant" / "omnibox.py",
+             ROOT / "rewards_assistant" / "engines.py",
+             ROOT / "rewards_assistant" / "api.py"]
+    for f in files:
+        assert LEGACY_GUI_LIB not in f.read_text(encoding="utf-8").lower(), f
+    # 全仓（排除缓存 / 构建产物），连测试文件也不该再出现这个名字
+    hits = [p for p in ROOT.rglob("*")
+            if p.is_file() and p.suffix in (".py", ".md", ".txt", ".spec", ".iss", ".bat")
+            and not any(x in p.parts for x in (".git", "__pycache__", ".pytest_cache",
+                                               "dist", "build", "deb-dist"))
+            and LEGACY_GUI_LIB in p.read_text(encoding="utf-8", errors="ignore").lower()]
+    assert hits == [], hits
+
+
+def test_pynput_is_declared_and_collected():
+    req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert "pynput>=1.7.7" in req
+    assert LEGACY_GUI_LIB not in req
+    spec = (ROOT / "MSRewardsAssistant.spec").read_text(encoding="utf-8")
+    assert "find_spec('pynput')" in spec
+    assert "pynput.keyboard._xorg" in spec
+    assert "pynput.keyboard._win32" in spec
+    assert "pynput.keyboard._darwin" in spec
+    assert "hiddenimports += collect_submodules" not in spec, \
+        "不能在无 DISPLAY 构建机上 import pynput"
+    src = (ROOT / "rewards_assistant" / "omnibox.py").read_text(encoding="utf-8")
+    assert "from pynput import keyboard" in src
+    assert "_chord(ctl, mod" in src
+    assert "page.goto(" not in src
 
 
 def test_old_search_panel_without_key_falls_back_to_api_default():

@@ -185,9 +185,9 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
     直接改词**——真人不会每搜一个词都重新打开一次首页，那会产生一串可疑的
     重复首页请求。两条路径共享同一套结果阅读 / 点击 / 滚动拟人动作。
 
-    地址栏分支用 PyAutoGUI 真实操作 omnibox（定位 → 清空 → 粘贴搜索词 →
-    回车），仅把「搜索框」换成了「地址栏」；默认引擎非必应或 PyAutoGUI
-    不可用时该分支整体关闭，本轮退回页面搜索框，其余行为不变。
+    地址栏分支用 pynput 把按键发给前台窗口，真实操作 omnibox（定位 →
+    清空 → 粘贴搜索词 → 回车），仅把「搜索框」换成了「地址栏」；默认引擎
+    非必应或键盘后端不可用时该分支整体关闭，本轮退回页面搜索框，其余行为不变。
     """
     if budget is not None:
         human.bind(budget)
@@ -202,12 +202,12 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
     if allowed is None:
         allowed = omnibox.current_status()["enabled"]
     if via_address_bar and not allowed:
-        log("address_bar_skip", "默认搜索非必应或 PyAutoGUI 不可用，地址栏搜索不会进行")
+        log("address_bar_skip", "地址栏搜索前置条件未满足，本轮退回页面搜索框；具体原因见 omnibox 日志")
         via_address_bar = False
     last_xy = None
     if via_address_bar:
         log("address_bar", f"地址栏搜索命中（{rate:.0%}）：{keyword}")
-        human.pause(0.5, 1.4)                   # 切到地址栏 + 敲入 URL
+        human.pause(0.5, 1.4)                   # 手从页面移到地址栏
         omnibox.submit(page, keyword, human, log, budget)
         try:
             page.wait_for_load_state("networkidle", timeout=6000)

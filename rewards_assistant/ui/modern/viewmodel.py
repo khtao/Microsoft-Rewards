@@ -580,25 +580,38 @@ def _search_panel_from_prefs(p: dict) -> dict:
 
 
 REPEAT_DEFAULT = 16      # 中档强度的「最多次数」，也是所有回退值
-REPEAT_DEFAULT_MARKER = "ui_repeat_default_16"
+# 标记名与预设值绑定：带早期标记的存量配置仍需按当前预设再对齐一次，
+# 独立的新标记负责触发这一步。
+REPEAT_PRESET_MARKER = "ui_repeat_preset_20_16_12"
+REPEAT_DEFAULT_MARKER = REPEAT_PRESET_MARKER   # 兼容旧引用
+# 历史档位预设值（含更早的 5）。与新预设 20/16/12 重合的 12、16 也要
+# 按当前档位重新对齐，否则「中档却显示至多 12 轮」会一直留在存量配置里。
+LEGACY_REPEAT_VALUES = frozenset({5, 8, 12, 16})
 
 
 def repeat_upgrade_patch(settings) -> dict:
-    """把早期默认值 5 对齐到当前档位预设；用户自定义值原样保留。
+    """把历史档位预设值对齐到当前 20 / 16 / 12；用户自定义值原样保留。
 
     ``SIMPLIFY_MARKER`` 已经写过的配置不会再走 ``defaults_patch()``，
-    这里用独立标记补一次。只认 5 这一个早期默认值：其余数值（含各档位
-    写入的 12 / 16 / 20）一律视为用户配置，不作改动。
+    这里用独立标记补一次。只处理落在历史预设集合内的数值：例如存量中档
+    配置里 ``repeat=12`` 会按当前档位改成 16，高档里 ``repeat=16`` 改成
+    12；用户自己填的 7 / 30 / 100 一律不动。
     """
-    if settings.get(REPEAT_DEFAULT_MARKER):
+    if settings.get(REPEAT_PRESET_MARKER):
         return {}
     sp = _search_panel(settings)
     repeat = _safe_int(sp.get("repeat", REPEAT_DEFAULT), REPEAT_DEFAULT)
-    if repeat != 5:
-        return {REPEAT_DEFAULT_MARKER: True}
-    upgraded = dict(sp)
-    upgraded["repeat"] = REPEAT_DEFAULT
-    return {"search_panel": upgraded, REPEAT_DEFAULT_MARKER: True}
+    try:
+        level = int(sp.get("level", 2) or 2)
+    except (TypeError, ValueError):
+        level = 2
+    wanted = intensity_profile(
+        LEVEL_TO_CHOICE.get(max(1, min(3, level)), "中"))["repeat"]
+    if repeat in LEGACY_REPEAT_VALUES and repeat != wanted:
+        upgraded = dict(sp)
+        upgraded["repeat"] = wanted
+        return {"search_panel": upgraded, REPEAT_PRESET_MARKER: True}
+    return {REPEAT_PRESET_MARKER: True}
 
 
 def defaults_patch(current_level: int = 2) -> dict:
@@ -862,7 +875,8 @@ def _intensity_params_from_sp(sp: dict, level: int) -> dict:
 def address_bar_hint(status: dict, lang: str = "zh") -> str:
     """设置页里的地址栏搜索提示；条件满足时返回空串（不显示新行）。
 
-    检测由 ``omnibox.status()`` 完成，这里只负责文案，保持纯函数、可离线单测。
+    ``omnibox.status()`` 会区分「包没装」和「装了但后端不可用」，这里把
+    原因如实写出来，避免用户看到 pip 已安装却仍提示不可用。
     """
     en = lang == "en"
     if not status.get("is_bing", True):
@@ -870,10 +884,40 @@ def address_bar_hint(status: dict, lang: str = "zh") -> str:
         tail = f"（当前：{provider}）" if provider else ""
         return (f"Default search is not Bing; address-bar search will not run{tail}"
                 if en else f"默认搜索非必应，地址栏搜索不会进行{tail}")
-    if not status.get("pyautogui", True):
-        return ("PyAutoGUI unavailable; address-bar search will not run" if en
-                else "PyAutoGUI 不可用，地址栏搜索不会进行")
-    return ""
+    if status.get("keyboard", True):
+        return ""
+
+    why = str(status.get("input_reason") or "import-failed")
+    session = str(status.get("session") or "")
+    err = str(status.get("input_error") or "").strip()
+    if why == "not-installed":
+        return ("pynput is not installed; address-bar search will not run"
+                if en else "未安装 pynput，地址栏搜索不会进行")
+    if why == "missing-dependency":
+        return ("A pynput dependency is missing; address-bar search will not run"
+                if en else "pynput 依赖缺失，地址栏搜索不会进行")
+    if why == "no-x11-display":
+        if session == "wayland":
+            return ("Wayland session has no X11 DISPLAY; address-bar search "
+                    "will not run. Log in with Xorg instead" if en else
+                    "当前为 Wayland 会话（无 X11 DISPLAY），地址栏搜索不会进行；请改用 Xorg 会话登录")
+        if session == "wayland-x11":
+            return ("Wayland via XWayland has a DISPLAY but the X connection "
+                    "failed; check XAUTHORITY and restart the session" if en else
+                    "Wayland 会话已由 XWayland 提供 X11 DISPLAY，但连接失败，"
+                    "地址栏搜索不会进行；请检查 DISPLAY / XAUTHORITY 或重启图形会话")
+        if session == "headless":
+            return ("No X11 DISPLAY detected; address-bar search will not run"
+                    if en else "未检测到 X11 DISPLAY，地址栏搜索不会进行")
+        return ("Cannot connect to the X11 DISPLAY; address-bar search will not run"
+                if en else "X11 DISPLAY 无法连接，地址栏搜索不会进行；请检查 DISPLAY / XAUTHORITY")
+    if why == "controller-failed":
+        return ("Keyboard controller failed to initialize; address-bar search "
+                "will not run" if en else "键盘控制器初始化失败，地址栏搜索不会进行")
+    raw = err[:48] if err else why
+    detail = f" ({raw})" if en else f"（{raw}）"
+    return ("Keyboard backend failed to initialize; address-bar search will not run" + detail
+            if en else "键盘后端运行时初始化失败，地址栏搜索不会进行" + detail)
 
 
 def _range_pair(value, fallback) -> tuple:

@@ -450,36 +450,32 @@ def test_intensity_upgrade_patch_completes_old_search_panel_without_overwriting(
     assert vm.intensity_upgrade_patch(S({vm.INTENSITY_MARKER: True})) == {}
 
 
-def test_repeat_upgrade_patch_only_aligns_early_default():
-    """只把早期默认值 5 对齐到 16；档位写入的 12 / 16 / 20 一律不动。"""
+def test_repeat_upgrade_patch_aligns_legacy_presets_by_level():
+    """存量档位预设按当前 20/16/12 重新对齐；用户自定义值不动。"""
     class S(dict):
         def get(self, k, d=None):
             return dict.get(self, k, d)
 
-    upgraded = vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 5, "level": 2}}))
-    assert upgraded["search_panel"]["repeat"] == vm.REPEAT_DEFAULT == 16
-    assert upgraded[vm.REPEAT_DEFAULT_MARKER] is True
-    for cap in (12, 16, 20, 300, 0):
+    # 用户截图里的场景：中档配置里仍是旧中档 12 → 应变为 16
+    p = vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 12, "level": 2}}))
+    assert p["search_panel"]["repeat"] == 16
+    assert p[vm.REPEAT_PRESET_MARKER] is True
+    assert vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 16, "level": 3}}))[
+        "search_panel"]["repeat"] == 12
+    assert vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 8, "level": 1}}))[
+        "search_panel"]["repeat"] == 20
+    assert vm.repeat_upgrade_patch(S({"search_panel": {"repeat": 5, "level": 2}}))[
+        "search_panel"]["repeat"] == 16
+    # 真正自定义过的值一律保留
+    for cap in (7, 30, 100, 300, 0):
         patch = vm.repeat_upgrade_patch(S({"search_panel": {"repeat": cap}}))
         assert "search_panel" not in patch, cap
-        assert patch[vm.REPEAT_DEFAULT_MARKER] is True
-    assert vm.repeat_upgrade_patch(S({vm.REPEAT_DEFAULT_MARKER: True})) == {}
-
-
-def test_repeat_default_is_16_everywhere():
-    """中档强度的最多次数为 16 次，所有默认值与回退值同源。"""
-    assert vm.REPEAT_DEFAULT == 16
-    assert vm.UI_DEFAULTS["ui_repeat"] == 16
-    assert vm.UI_DEFAULTS["ui_search_cap"] == 16
-    assert vm.intensity_profile("中")["repeat"] == 16
-    assert [vm.intensity_profile(c)["repeat"] for c in ("低", "中", "高")] == [20, 16, 12]
-    assert vm.defaults_patch()["search_panel"]["repeat"] == 16
-    assert vm.reset_patch()["search_panel"]["repeat"] == 16
-    assert "REPEAT_DEFAULT = 16" in (ROOT / "rewards_assistant" / "ui" / "modern" / "viewmodel.py").read_text("utf8")
-    assert "repeat=16" in LEGACY.read_text(encoding="utf8")
-    assert "repeat: int = 16" in (ROOT / "rewards_assistant" / "api.py").read_text("utf8")
-    # 默认值只保留在真正生效的三处
-    assert "class TaskConfig" not in CONFIG.read_text(encoding="utf8")
+        assert patch[vm.REPEAT_PRESET_MARKER] is True
+    # 带早期标记的配置仍需按当前预设再对齐一次
+    old_marked = S({"search_panel": {"repeat": 12, "level": 2},
+                    "ui_repeat_default_16": True})
+    assert vm.repeat_upgrade_patch(old_marked)["search_panel"]["repeat"] == 16
+    assert vm.repeat_upgrade_patch(S({vm.REPEAT_PRESET_MARKER: True})) == {}
 
 
 def test_settings_values_roundtrip_for_managed_groups(tmp_path, monkeypatch):

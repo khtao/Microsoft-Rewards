@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .config import data_dir, profile_dir as _app_profile_dir
 from .fingerprint import STEALTH_MIN_JS, STEALTH_PLUGINS_JS
+from . import platform_env
 
 # Edge on Linux 的管理策略目录（Chromium 是 /etc/chromium/policies/managed）
 EDGE_POLICY_DIRS = (Path("/etc/opt/edge/policies/managed"),
@@ -128,8 +129,15 @@ def install_flag_warning_policy(policy_dir: Path | None = None, verbose: bool = 
 
 
 def build_args(window_size: str | None = None, proxy: str | None = None,
-               lang: str = "zh-CN", suppress_flag_warning: bool = False) -> list:
-    """构造启动参数。这里刻意不含 --no-sandbox —— 沙箱由 chromium_sandbox 控制。"""
+               lang: str = "zh-CN", suppress_flag_warning: bool = False,
+               headless: bool = False, ozone_x11: bool | None = None) -> list:
+    """构造启动参数。这里刻意不含 --no-sandbox —— 沙箱由 chromium_sandbox 控制。
+
+    ``ozone_x11`` 默认 None 表示按图形会话自动判断：Linux Wayland + XWayland
+    有 DISPLAY + 有头窗口时追加 ``--ozone-platform=x11``，让 Edge 窗口走 X11，
+    pynput 的 XTEST 按键才能到达 omnibox。显式传 False 可强制不加（minimal
+    降级路径不带任何 args，天然不含该参数）。
+    """
     args = [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
@@ -147,6 +155,10 @@ def build_args(window_size: str | None = None, proxy: str | None = None,
     if suppress_flag_warning:
         # 兜底：策略文件写不进去时，test-type 也会跳过 bad-flags 提示条
         args.append("--test-type")
+    if ozone_x11 is None:
+        ozone_x11 = platform_env.x11_ozone_needed(headless)
+    if ozone_x11:
+        args.append(platform_env.OZONE_X11_FLAG)
     return args
 
 
@@ -346,7 +358,8 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
         user_data_dir=str(user_data_dir),
         headless=headless,
         args=build_args(window_size, proxy, lang=lang,
-                        suppress_flag_warning=suppress_flag_warning),
+                        suppress_flag_warning=suppress_flag_warning,
+                        headless=headless),
         chromium_sandbox=use_sandbox,   # True 时 Playwright 不会加 --no-sandbox
         ignore_default_args=["--enable-automation"],
         permissions=["clipboard-read", "clipboard-write"],
@@ -367,6 +380,20 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
         except PWError as e:
             msg = str(e)
             low = msg.lower()
+            # XWayland 不可用 / 该 Edge 版本不接受 ozone 参数时，浏览器会
+            # 直接退出。去掉该 flag 再试一次：宁可退回原生 Wayland 并关闭
+            # 地址栏分支，也不能让整个自动完成任务因为一个可选参数挂掉。
+            if platform_env.OZONE_X11_FLAG in (kw.get("args") or []):
+                if any(k in low for k in ("ozone", "x11", "display", "closed",
+                                          "unexpected", "not supported",
+                                          "unknown option", "unrecognized")):
+                    alt = dict(kw)
+                    alt["args"] = [a for a in alt["args"]
+                                   if a != platform_env.OZONE_X11_FLAG]
+                    if verbose:
+                        print("[警告] X11 ozone 启动失败，不带 "
+                              "--ozone-platform=x11 重试（地址栏搜索按降级处理）")
+                    return pw.chromium.launch_persistent_context(**alt)
             if "no_viewport" in msg or "unexpected" in low:
                 kw.pop("no_viewport", None)
                 return pw.chromium.launch_persistent_context(**kw)
@@ -399,7 +426,9 @@ def launch_edge(pw, *, user_data_dir: str, headless: bool = False,
             if verbose:
                 print(f"[警告] 开沙箱启动失败（{str(e)[:120]}），自动改为关沙箱重试")
             kwargs["chromium_sandbox"] = False
-            kwargs["args"] = build_args(window_size, proxy, suppress_flag_warning=True)
+            kwargs["args"] = build_args(window_size, proxy,
+                                        suppress_flag_warning=True,
+                                        headless=headless)
             ctx = _try(**kwargs)
         else:
             raise
@@ -483,6 +512,9 @@ def launch_automation_edge(pw, *, user_data_dir=None, source_profile=None,
             ctx = launch_edge(pw, user_data_dir=str(snap),
                               verbose=verbose, minimal=minimal_next, **kwargs)
             note("edge", "Edge 已启动" + ("（最小参数）" if minimal_next else ""))
+            if platform_env.x11_ozone_needed(bool(kwargs.get("headless", False))):
+                note("ozone", "Wayland 会话：Edge 以 X11 ozone 运行（XWayland），"
+                              "pynput 按键可到达 omnibox")
             injected = inject_saved_cookies(ctx, store)
             note("cookies", f"已注入 {injected}/{len(cookies)} 条会话 Cookie")
             if verbose:

@@ -34,7 +34,7 @@ python -m pip install -r requirements.txt
 python -m rewards_assistant
 ```
 
-运行时依赖四个：`PySide6-Essentials`、`requests`、`playwright`、`pyautogui`。其中 `pyautogui` 只服务于真实地址栏搜索，未安装或处于无图形环境时自动关闭该分支，其余功能不受影响；只安装 Qt 核心模块（QtCore / QtGui / QtWidgets / QtSvg / QtNetwork / QtTest），不安装 `PySide6-Addons`，因此不需要 QtWebEngine / Qt3D / QtCharts / QtMultimedia，也不需要浏览器扩展。
+运行时依赖四个：`PySide6-Essentials`、`requests`、`playwright`、`pynput`。其中 `pynput` 只服务于真实地址栏搜索：按平台走原生输入后端（Windows SendInput / macOS Quartz / Linux Xlib-XTEST），不带截图栈、不引入全局隐式延时；未安装、无图形环境或后端不可用时自动关闭该分支，其余功能不受影响；只安装 Qt 核心模块（QtCore / QtGui / QtWidgets / QtSvg / QtNetwork / QtTest），不安装 `PySide6-Addons`，因此不需要 QtWebEngine / Qt3D / QtCharts / QtMultimedia，也不需要浏览器扩展。
 
 **打包构建建议用 Python 3.12 或 3.13**，这是 Qt for Python 与 PyInstaller 回归最充分的组合。`requirements.txt` 按 `python_version` 分段：3.10~3.13 装经过完整回归的 PySide6-Essentials 6.9.x（`<6.10`），3.14 装 6.10.1+，3.15+ 装 6.12+，由 pip 选择当前解释器支持的最高兼容版本。
 
@@ -110,7 +110,18 @@ python -m rewards_assistant --instance work
 - 识别登录页 / 公开「关于」页直接判定为未登录，不写假的 0 分；429 / 5xx / 超时归类为「网络错误」，不会诱导重新登录。
 - 搜索进度读 `pointsCounters`；读不到显示「未知」，不伪造「已满」。官方每日搜索上限按会员等级为 15 / 30 / 60 分。
 - 只有两页都完整可用时才替换当日任务集合；否则保留上次快照并标记 stale。
-- **地址栏搜索真正操作 omnibox**：每轮以设置页固定的 25% 概率把「页面搜索框」换成「浏览器地址栏」，由 PyAutoGUI 把按键发给前台 Edge 窗口——`Ctrl+L` / macOS `Cmd+L` 定位 → `Ctrl+A` + `Delete` 清空 → 剪贴板粘贴**搜索词本身** → `Enter` 触发 omnibox 搜索。地址栏不属于页面 DOM，Playwright 的键盘事件触达不到它，因此结果页由浏览器自己跳转，代码**不再调用 `page.goto`**；导航目标是默认搜索引擎的 `/search?q=`，`mkt` 与首页一致。因为粘贴的是搜索词而非 URL，**默认搜索引擎必须是 Bing**：`omnibox.status()` 读取 Edge 管理策略与 profile 的 `default_search_provider_data`，非必应（或 PyAutoGUI 不可用）时地址栏分支整体关闭、本轮退回页面搜索框，设置页显示「默认搜索非必应，地址栏搜索不会进行」。页面搜索框路径维持原有行为（50% 概率清空、粘贴自检、可点搜索按钮），后续结果阅读、点击、滚动两条路径完全一致。
+- **地址栏搜索真正操作 omnibox**：每轮以设置页固定的 25% 概率把「页面搜索框」换成「浏览器地址栏」，由 pynput 原生键盘后端把按键发给前台 Edge 窗口（Wayland 会话下自动让 Edge 走 X11 ozone，见下）——`Ctrl+L` / macOS `Cmd+L` 定位 → `Ctrl+A` + `Delete` 清空 → 剪贴板粘贴**搜索词本身** → `Enter` 触发 omnibox 搜索。地址栏不属于页面 DOM，Playwright 的键盘事件触达不到它，因此结果页由浏览器自己跳转，代码**不再调用 `page.goto`**；导航目标是默认搜索引擎的 `/search?q=`，`mkt` 与首页一致。因为粘贴的是搜索词而非 URL，**默认搜索引擎必须是 Bing**：`omnibox.status()` 读取 Edge 管理策略与 profile 的 `default_search_provider_data`，非必应（或键盘后端不可用）时地址栏分支整体关闭、本轮退回页面搜索框，设置页显示「默认搜索非必应，地址栏搜索不会进行」。页面搜索框路径维持原有行为（50% 概率清空、粘贴自检、可点搜索按钮），后续结果阅读、点击、滚动两条路径完全一致。
+
+**地址栏搜索的运行环境**：`pynput` 在 Windows 用 SendInput、macOS 用 Quartz，两者都不需要 X11；Linux 默认走 Xlib/XTEST，需要有效的 X11 DISPLAY。Ubuntu 的 Wayland 会话通常由 **XWayland** 提供 `DISPLAY`，应用会自动给本次自动完成任务的 Edge 加上 `--ozone-platform=x11`，让浏览器窗口走 X11——键盘事件与浏览器落在同一个 X server 上，原生按键就能真正到达 omnibox，**不需要注销去切 Xorg**。这个参数只在「Linux + Wayland 会话 + 有 `DISPLAY` + 有头窗口」时注入：后台无头同步不加，Xorg 会话本来就是 X11 也不加；完全没提供 X server 的纯 Wayland 会话同样不加（否则浏览器会直接退出），此时地址栏分支降级关闭、设置页给出具体原因。若 Edge 因该参数启动失败，启动链路会自动去掉它重试，宁可退回原生 Wayland，也不会让整个自动完成任务挂掉。可用 `MS_REWARDS_NO_OZONE_X11=1` 显式关闭。
+
+「`pip` 里装好了」仍不等于「运行时可用」：无 X server 时 `import pynput` 会抛 `failed to acquire X connection`，`DISPLAY` / `XAUTHORITY` 指向不可达的 X server 同理。高级场景可用 `PYNPUT_BACKEND` 选择 pynput 支持的其它后端（例如 `uinput`，需要 `/dev/uinput` 权限与可用的键盘布局工具，不作默认）。一键查看真实原因（含 `ozone_x11` 与会话类型）：
+
+```bash
+echo "DISPLAY=$DISPLAY  WAYLAND_DISPLAY=$WAYLAND_DISPLAY  XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+python -c "from rewards_assistant import omnibox; print(omnibox.describe())"
+```
+
+会话类型里的 `wayland-x11` 表示 Wayland + XWayland 已提供 DISPLAY。失败结果不缓存：X server 恢复后，应用内下次刷新设置页或同步完成即会自动重试，无需重启。macOS 首次使用需在「系统设置 → 隐私与安全性 → 辅助功能 / 输入监控」里授权。修饰键由 `Controller.pressed()` 上下文管理，异常时也会释放，不会把 Ctrl 卡在按下状态。
 
 登录与同步链路只做两页 GET，不 POST、不注入脚本、不点击活动卡、不代领积分。
 
@@ -144,7 +155,7 @@ docs/previews/                   界面截图
 
 | 文件 | 用途 |
 | --- | --- |
-| `requirements.txt` | 运行时：`PySide6-Essentials>=6.6,<6.10`（Python < 3.14）/ `PySide6-Essentials>=6.10.1`（Python ≥ 3.14）、`requests>=2.28`、`playwright>=1.40`、`pyautogui>=0.9.54`（地址栏搜索，可选降级） |
+| `requirements.txt` | 运行时：`PySide6-Essentials>=6.6,<6.10`（Python < 3.14）/ `PySide6-Essentials>=6.10.1`（Python ≥ 3.14）、`requests>=2.28`、`playwright>=1.40`、`pynput>=1.7.7`（地址栏搜索，可选降级） |
 | `requirements-build.txt` | 在运行时依赖之上加 `pyinstaller>=6.0` |
 | `requirements-dev.txt` | 在运行时依赖之上加 `pytest>=8.0`，仅供本地与 CI 测试 |
 

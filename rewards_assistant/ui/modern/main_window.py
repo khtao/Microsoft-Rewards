@@ -525,7 +525,7 @@ class SettingsPage(QWidget):
         self.defaults_grid = QGridLayout()
         self.defaults_grid.setSpacing(5)
         dsl.addLayout(self.defaults_grid)
-        # 默认引擎非必应 / 缺少 PyAutoGUI 时，用常驻文字说明为何停用地址栏；
+        # 默认引擎非必应 / 键盘后端不可用时，用常驻文字说明为何停用地址栏；
         # 条件满足时整行隐藏，保持设置页原有外观。
         self.address_bar_note = QLabel()
         self.address_bar_note.setObjectName("tiny")
@@ -767,7 +767,7 @@ class ModernMainWindow(QWidget):
                 current_level = 2
             self.settings.update({**vm.defaults_patch(current_level),
                                   vm.SIMPLIFY_MARKER: True})
-        # 把早期默认值对齐到当前档位预设（用户自定义过的值不动）。
+        # 把历史档位预设值对齐到当前 20/16/12（用户自定义过的值不动）。
         repeat_patch = vm.repeat_upgrade_patch(self.settings)
         if repeat_patch:
             self.settings.update(repeat_patch)

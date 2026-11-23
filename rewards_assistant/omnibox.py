@@ -2,22 +2,32 @@
 """浏览器地址栏（omnibox）的真实操作与前置条件检测。
 
 地址栏不属于页面 DOM，Playwright 的键盘事件只发给 renderer，触达不到
-Chromium omnibox。这里用 PyAutoGUI 把按键发给前台 Edge 窗口，真正触发一次
-地址栏搜索：定位 → 清空 → 粘贴搜索词 → 回车。
+Chromium omnibox。这里用 pynput 把按键发给前台 Edge 窗口，真正触发一次
+地址栏搜索：定位 → 清空 → 粘贴搜索词 → 回车，结果页由浏览器自己跳转。
+
+pynput 按平台走原生后端：Windows 用 SendInput，macOS 用 Quartz，Linux 默认
+用 Xlib/XTEST。相比截图型自动化库，它只做输入、不拉截图栈、没有全局隐式
+延时、也没有鼠标角落的 FAILSAFE 中断；``Controller.pressed()`` 上下文保证
+修饰键一定释放，不会把 Ctrl 卡在按下状态。
 
 因为粘贴的是**搜索词本身**（不是 URL），浏览器会用自己的默认搜索引擎解析，
 所以只有默认引擎是 Bing 时这次搜索才等价于一次必应搜索。非必应时地址栏
 搜索整体关闭，运行链路退回页面搜索框，设置页同步给出文本提示。
 
-PyAutoGUI 是可选依赖：无图形环境 / 未安装时优雅降级，不允许 import 异常
-冒到界面层。
+Linux 默认后端仍需有效的 X11 会话；纯 Wayland / 无 DISPLAY / X server 不可达
+时 ``import pynput`` 或 ``Controller()`` 会失败。这里把真实异常分类展示，
+且**失败不缓存**——会话恢复后无需重启应用即可自动生效。用户也可通过
+``PYNPUT_BACKEND`` 显式选择 pynput 支持的其它后端（如 uinput）。
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+from . import platform_env
 
 BING_MARKERS = ("bing.com",)
 # Edge / Chromium 管理策略里强制指定默认搜索引擎的键
@@ -30,24 +40,111 @@ POLICY_DIRS = (
 )
 
 _LAST_STATUS: Optional[dict] = None
-_GUI_CACHE: Any = ...          # ... = 尚未探测；None = 不可用
+# ... = 尚未探测；模块对象 = 可用；None = 上次失败（允许下次重试）
+_KB_CACHE: Any = ...
+_KB_ERROR: str = ""
+_CTRL_CACHE: Any = None
+_CTRL_ERROR: str = ""
 
 
-def _load_pyautogui():
-    """延迟导入并缓存；无 DISPLAY / 未安装时返回 None，绝不抛异常。"""
-    global _GUI_CACHE
-    if _GUI_CACHE is not ...:
-        return _GUI_CACHE
+def session_kind() -> str:
+    """当前图形会话类型；与浏览器 ozone 参数共用同一份判断。"""
+    return platform_env.session_kind()
+
+
+def backend_name() -> str:
+    """当前会使用的 pynput 后端名；尊重用户设置的 PYNPUT_BACKEND。"""
+    override = os.environ.get("PYNPUT_BACKEND_KEYBOARD") or os.environ.get("PYNPUT_BACKEND")
+    if override:
+        return override
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "xorg"
+
+
+def _classify_input_error(error: str) -> str:
+    low = error.lower()
+    if "pynput" in low and ("modulenotfounderror" in low or "no module named 'pynput'" in low):
+        return "not-installed"
+    if any(m in low for m in ("no module named 'xlib'", "no module named 'evdev'",
+                              "no module named 'quartz'", "no module named 'objc'",
+                              "no module named 'pyobjc'", "no module named 'six'")):
+        return "missing-dependency"
+    if any(m in low for m in ("display", "x connection", "xauthority", "xtest",
+                              "xlib.error", "this platform is not supported")):
+        return "no-x11-display"
+    if "controller" in low or "uinput" in low or "permission" in low:
+        return "controller-failed"
+    return "import-failed"
+
+
+def _purge_pynput_modules() -> None:
+    """清掉失败 import 留下的半初始化模块，保证下次重试是全新一条链。"""
+    for name in [k for k in sys.modules
+                 if k == "pynput" or k.startswith("pynput.")]:
+        sys.modules.pop(name, None)
+
+
+def _load_keyboard():
+    """延迟导入 pynput.keyboard；成功缓存，失败保留错误并允许下次重试。
+
+    pynput 在 Linux 的 import 阶段就会选择后端并尝试连 X server，所以是否
+    可用取决于**运行时图形会话**而不是 pip 里装没装。
+    """
+    global _KB_CACHE, _KB_ERROR
+    if _KB_CACHE is not ... and _KB_CACHE is not None:
+        return _KB_CACHE
     try:
-        import pyautogui
-        _GUI_CACHE = pyautogui
-    except Exception:
-        _GUI_CACHE = None
-    return _GUI_CACHE
+        from pynput import keyboard
+        _KB_CACHE, _KB_ERROR = keyboard, ""
+    except Exception as exc:
+        _KB_CACHE = None
+        # pynput 的 Linux 报错带多行「Try one of the following」提示，
+        # 压成单行，避免把一行诊断 / 日志切成好几段。
+        _KB_ERROR = f"{type(exc).__name__}: {' '.join(str(exc).split())[:220]}"
+        _purge_pynput_modules()
+    return _KB_CACHE
 
 
-def pyautogui_available() -> bool:
-    return _load_pyautogui() is not None
+def _controller():
+    """构造并缓存 Controller；X server 掉线后清缓存让下次重新构造。"""
+    global _CTRL_CACHE, _CTRL_ERROR
+    if _CTRL_CACHE is not None:
+        return _CTRL_CACHE
+    kb = _load_keyboard()
+    if kb is None:
+        return None
+    try:
+        _CTRL_CACHE = kb.Controller()
+        _CTRL_ERROR = ""
+    except Exception as exc:
+        _CTRL_CACHE = None
+        _CTRL_ERROR = f"{type(exc).__name__}: {' '.join(str(exc).split())[:220]}"
+    return _CTRL_CACHE
+
+
+def keyboard_status() -> dict:
+    """键盘后端的可用性与真实失败原因（供设置页 / 日志 / 诊断命令）。"""
+    kb = _load_keyboard()
+    if kb is None:
+        return {"available": False,
+                "reason": _classify_input_error(_KB_ERROR),
+                "error": _KB_ERROR, "session": session_kind(),
+                "backend": backend_name()}
+    ctl = _controller()
+    if ctl is None:
+        return {"available": False,
+                "reason": _classify_input_error(_CTRL_ERROR),
+                "error": _CTRL_ERROR, "session": session_kind(),
+                "backend": backend_name()}
+    return {"available": True, "reason": "ok", "error": "",
+            "session": session_kind(), "backend": backend_name()}
+
+
+def keyboard_available() -> bool:
+    return _controller() is not None
 
 
 def _is_bing(text: str) -> bool:
@@ -111,11 +208,19 @@ def _profile_provider(profile: Path) -> tuple[Optional[str], Optional[str]]:
 def status(profile: Optional[Path] = None) -> dict:
     """检测能否进行地址栏搜索；纯本地读取，不启动浏览器、不联网。
 
-    ``is_bing``   默认搜索引擎是否为 Bing（字段缺失按 Edge 出厂默认判定）；
-    ``pyautogui`` PyAutoGUI 是否可用；
-    ``enabled``   两者同时满足，地址栏搜索才会进行；
-    ``reason``    ``ok`` / ``factory-default`` / ``not-bing`` / ``no-pyautogui``；
-    ``provider``  给设置页展示的引擎名。
+    ``is_bing``      默认搜索引擎是否为 Bing（字段缺失按 Edge 出厂默认判定）；
+    ``keyboard``     pynput 键盘后端运行时是否可用（不只是 pip 里装没装）；
+    ``enabled``      两者同时满足，地址栏搜索才会进行；
+    ``reason``       ``ok`` / ``factory-default`` / ``not-bing`` / ``no-keyboard``；
+    ``input_reason`` ``ok`` / ``not-installed`` / ``missing-dependency`` /
+                     ``no-x11-display`` / ``controller-failed`` / ``import-failed``；
+    ``input_error``  真实异常文本，用于诊断；
+    ``session``      ``x11`` / ``wayland-x11`` / ``wayland`` / ``headless`` /
+                     ``native``；``wayland-x11`` 表示 Wayland 会话由 XWayland
+                     提供了 X11 DISPLAY；
+    ``ozone_x11``    本次会给 Edge 注入 ``--ozone-platform=x11``；
+    ``backend``      ``xorg`` / ``win32`` / ``darwin`` 或 PYNPUT_BACKEND 指定值；
+    ``provider``     给设置页展示的引擎名。
     """
     if profile is None:
         from .config import profile_dir
@@ -134,12 +239,15 @@ def status(profile: Optional[Path] = None) -> dict:
         provider = label or url.split("/")[2]
         reason = "ok" if is_bing else "not-bing"
 
-    gui = pyautogui_available()
-    enabled = bool(is_bing and gui)
-    if not gui:
-        reason = "no-pyautogui"
-    return {"is_bing": bool(is_bing), "pyautogui": gui,
-            "enabled": enabled, "reason": reason, "provider": provider}
+    kb = keyboard_status()
+    enabled = bool(is_bing and kb["available"])
+    if not kb["available"]:
+        reason = "no-keyboard"
+    return {"is_bing": bool(is_bing), "keyboard": kb["available"],
+            "enabled": enabled, "reason": reason, "provider": provider,
+            "input_reason": kb["reason"], "input_error": kb["error"],
+            "session": kb["session"], "backend": kb["backend"],
+            "ozone_x11": platform_env.x11_ozone_needed()}
 
 
 def remember(result: dict) -> dict:
@@ -150,53 +258,89 @@ def remember(result: dict) -> dict:
 
 
 def current_status() -> dict:
-    """设置页用：优先显示最近一次运行时的检测结果，否则做一次本地预检。"""
-    return dict(_LAST_STATUS) if _LAST_STATUS is not None else status()
+    """设置页用：成功结果可缓存；失败结果每次重探，环境恢复后自动消失。"""
+    if _LAST_STATUS is not None and _LAST_STATUS.get("enabled"):
+        return dict(_LAST_STATUS)
+    return status()
 
 
-def _hotkey(gui, *keys):
-    gui.hotkey(*keys)
+def describe(result: Optional[dict] = None) -> str:
+    """一行诊断文本，供终端 ``python -c ...`` 直接查看真实原因（纯 ASCII）。"""
+    s = dict(result if result is not None else current_status())
+    return ("address-bar: {state} | provider={provider} | keyboard={kb} "
+            "| backend={be} | ozone_x11={oz} | input_reason={ir} "
+            "| session={sess} | error={err}").format(
+        state="ENABLED" if s.get("enabled") else "DISABLED",
+        provider=s.get("provider", ""), kb=s.get("keyboard"),
+        be=s.get("backend", ""), oz=s.get("ozone_x11", False),
+        ir=s.get("input_reason", ""), sess=s.get("session", ""),
+        err=s.get("input_error", "") or "-")
+
+
+def _chord(ctl, mod, key) -> None:
+    """按下修饰键 + 敲一下键；上下文保证异常时修饰键也会释放。"""
+    with ctl.pressed(mod):
+        ctl.press(key)
+        ctl.release(key)
+
+
+def _reset_controller() -> None:
+    """按键过程中 X server 掉线等：清缓存，下次重新构造。"""
+    global _CTRL_CACHE
+    _CTRL_CACHE = None
 
 
 def submit(page, keyword: str, human, log, budget=None) -> bool:
     """真实执行一次 omnibox 搜索：定位 → 清空 → 粘贴搜索词 → 回车。
 
-    成功后浏览器自己跳到默认引擎的结果页，**不再调用 ``page.goto``**。
-    返回 False 表示该轮未能触发（剪贴板写入失败等），由调用方记录并继续
-    公共的结果阅读段；绝不伪造一次「成功的搜索」。
+    按键由 pynput 的原生后端发出，成功后浏览器自己跳到默认引擎的结果页，
+    **不再调用 ``page.goto``**。返回 False 表示该轮未能触发，由调用方记录并
+    继续公共的结果阅读段；绝不伪造一次「成功的搜索」。
     """
-    gui = _load_pyautogui()
-    if gui is None:
-        log("address_bar_skip", "PyAutoGUI 不可用，本轮不触发地址栏搜索")
+    kb = _load_keyboard()
+    ctl = _controller()
+    if kb is None or ctl is None:
+        log("address_bar_skip",
+            f"地址栏搜索未触发（{_KB_ERROR or _CTRL_ERROR or '键盘后端不可用'}）")
         return False
+
+    key = kb.Key
+    mod = key.cmd if sys.platform == "darwin" else key.ctrl
     try:
         page.bring_to_front()
     except Exception:
         log("warn", "无法把浏览器窗口置前，地址栏按键可能落到其它窗口")
     human.pause(0.2, 0.5)
 
-    cmd = "command" if sys.platform == "darwin" else "ctrl"
-    log("focus", "定位地址栏（Ctrl+L / Cmd+L）")
-    _hotkey(gui, cmd, "l")
-    human.pause(0.15, 0.5)
-
-    log("clear", "清空地址栏内容")
-    _hotkey(gui, cmd, "a")
-    gui.press("delete")
-    human.pause(0.1, 0.3)
-
     try:
-        page.evaluate("t => navigator.clipboard.writeText(t)", keyword)
-    except Exception:
-        log("warn", "剪贴板写入失败，无法向地址栏粘贴搜索词")
-        return False
-    human.pause(0.1, 0.4)
-    log("paste", f"粘贴搜索词：{keyword}")
-    _hotkey(gui, cmd, "v")
-    human.pause(0.2, 0.7)
+        log("focus", "定位地址栏（Ctrl+L / Cmd+L）")
+        _chord(ctl, mod, "l")
+        human.pause(0.15, 0.5)
 
-    log("submit", "回车搜索（omnibox）")
-    gui.press("enter")
+        log("clear", "清空地址栏内容")
+        _chord(ctl, mod, "a")
+        ctl.press(key.delete)
+        ctl.release(key.delete)
+        human.pause(0.1, 0.3)
+
+        try:
+            page.evaluate("t => navigator.clipboard.writeText(t)", keyword)
+        except Exception:
+            log("warn", "剪贴板写入失败，无法向地址栏粘贴搜索词")
+            return False
+        human.pause(0.1, 0.4)
+        log("paste", f"粘贴搜索词：{keyword}")
+        _chord(ctl, mod, "v")
+        human.pause(0.2, 0.7)
+
+        log("submit", "回车搜索（omnibox）")
+        ctl.press(key.enter)
+        ctl.release(key.enter)
+    except Exception as exc:
+        _reset_controller()
+        log("warn", f"键盘事件发送失败，本轮不触发地址栏搜索：{exc}")
+        return False
+
     timeout_ms = 20000
     if budget is not None:
         timeout_ms = int(max(4000, min(timeout_ms, budget.left * 1000 * 0.6)))
