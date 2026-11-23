@@ -16,6 +16,8 @@ import sys
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, quote_plus, urlparse
 
+from . import omnibox
+
 # 提交之后至少要留给"看结果"的时间
 RESULTS_RESERVE = 3.0
 # 想点进结果页至少需要这么多剩余时间（点开 + 看一眼 + 返回）
@@ -68,11 +70,11 @@ def home_url(engine: Engine, geo=None) -> str:
 
 
 def address_bar_url(engine: Engine, keyword: str) -> str:
-    """等价「在浏览器地址栏敲入 Bing 搜索 URL 并回车」的导航目标。
+    """omnibox 回车后的**预期结果页**，不再用于主动导航。
 
-    Playwright 只能操作页面 DOM，无法直接控制 Chromium omnibox；从服务端
-    看，地址栏搜索就是一次对 ``/search?q=...`` 的直接 GET（没有首页表单
-    提交链），这里用 ``page.goto`` 精确表达这个行为。mkt 与首页保持一致。
+    地址栏里粘贴的是搜索词本身，浏览器交给默认搜索引擎；这里按 Bing 的
+    ``/search?q=...`` 构造等价落点，仅用于文档说明与离线校验（mkt 与首页
+    一致）。真正的跳转由 ``omnibox.submit()`` 的回车触发，不调用 ``goto``。
     """
     tpl = getattr(engine, "search", "") or "https://www.bing.com/search?q={q}&mkt={mkt}"
     mkt = "zh-CN"
@@ -83,6 +85,26 @@ def address_bar_url(engine: Engine, keyword: str) -> str:
     except Exception:
         pass
     return tpl.format(q=quote_plus(str(keyword)), mkt=quote_plus(mkt))
+
+
+def on_engine_domain(page, engine: Engine) -> bool:
+    """当前页面是否已经在 Bing 上（决定能否复用 SERP）。"""
+    try:
+        url = page.url or ""
+    except Exception:
+        return False
+    return "bing.com" in url
+
+
+def _first_visible(page, selectors: list, timeout_ms: int = 8000):
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=max(300, timeout_ms))
+            return loc, sel
+        except Exception:
+            continue
+    return None, None
 
 
 def on_engine_domain(page, engine: Engine) -> bool:
@@ -153,7 +175,7 @@ def detect_captcha(page, engine: Engine, log, on_captcha: str = "wait") -> bool:
 
 
 def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None) -> dict:
-    """完整一次搜索：进首页 → 输入 → 提交 → 阅读 → 可选点击结果。
+    """完整一次搜索：进首页 → 输入 → 提交 → 阅读 → 可选点击。
 
     budget 不为 None 时，全程按剩余时间裁剪动作，保证在预算内收尾。
     返回 {"ok": bool, "clicked": str|None, "reason": str|None}
@@ -162,28 +184,33 @@ def run_search(page, engine: Engine, keyword: str, human, log, cfg, budget=None)
     到搜索 URL；其余轮次首轮进首页、后续轮次若已在 Bing 上就**留在 SERP
     直接改词**——真人不会每搜一个词都重新打开一次首页，那会产生一串可疑的
     重复首页请求。两条路径共享同一套结果阅读 / 点击 / 滚动拟人动作。
+
+    地址栏分支用 PyAutoGUI 真实操作 omnibox（定位 → 清空 → 粘贴搜索词 →
+    回车），仅把「搜索框」换成了「地址栏」；默认引擎非必应或 PyAutoGUI
+    不可用时该分支整体关闭，本轮退回页面搜索框，其余行为不变。
     """
     if budget is not None:
         human.bind(budget)
 
     # ---- 默认配置：每轮以 25% 概率走「地址栏搜索」----------------------
     # 真人不会永远在页面搜索框里改词：有时会从地址栏直接发起一次 Bing 搜索。
-    # Playwright 无法操作 omnibox，用等价的直接导航表达；结果阅读 / 点击 /
-    # 滚动等后续拟人动作两条路径完全一致。概率由 api.run_human_search 的
-    # address_bar_rate 传入，设置页「拟人强度」统一写进经典 search_panel。
+    # 概率由 api.run_human_search 的 address_bar_rate 传入，设置页「拟人强度」
+    # 统一写进经典 search_panel。
     rate = max(0.0, min(1.0, float(getattr(cfg, "address_bar_rate", 0.0) or 0.0)))
     via_address_bar = human.rng.random() < rate
+    allowed = getattr(cfg, "omnibox_enabled", None)
+    if allowed is None:
+        allowed = omnibox.current_status()["enabled"]
+    if via_address_bar and not allowed:
+        log("address_bar_skip", "默认搜索非必应或 PyAutoGUI 不可用，地址栏搜索不会进行")
+        via_address_bar = False
     last_xy = None
     if via_address_bar:
-        url = address_bar_url(engine, keyword)
         log("address_bar", f"地址栏搜索命中（{rate:.0%}）：{keyword}")
         human.pause(0.5, 1.4)                   # 切到地址栏 + 敲入 URL
-        timeout = 30000
-        if budget is not None:
-            timeout = int(max(4000, min(timeout, budget.left * 1000 * 0.6)))
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        omnibox.submit(page, keyword, human, log, budget)
         try:
-            page.wait_for_load_state("networkidle", timeout=min(6000, timeout))
+            page.wait_for_load_state("networkidle", timeout=6000)
         except Exception:
             pass
         human.pause(0.3, 0.9)

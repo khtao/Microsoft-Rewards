@@ -109,6 +109,11 @@ def summary_texts(sp) -> list[str]:
 
 
 def main() -> int:
+    # 离屏渲染常在 CI / 沙盒里跑，那里没有 PyAutoGUI。让地址栏前置条件
+    # 显示为「可用」，避免把环境降级提示拍进界面截图。
+    from rewards_assistant import omnibox
+    omnibox.remember({"is_bing": True, "pyautogui": True, "enabled": True,
+                      "reason": "ok", "provider": "Bing"})
     app = QApplication.instance() or QApplication([])
     day = date.today().isoformat()
     settings, store = Settings(), Store()

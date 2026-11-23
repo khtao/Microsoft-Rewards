@@ -133,6 +133,30 @@ def test_resolve_theme_and_language():
     assert vm.tr("en", "available") == "Available"
 
 
+def test_system_language_follows_env_without_deprecated_locale_api(monkeypatch):
+    """「跟随系统」不再触发 DeprecationWarning（Python 3.15 移除 getdefaultlocale）。"""
+    import locale
+
+    src = (ROOT / "rewards_assistant" / "ui" / "modern" /
+           "viewmodel.py").read_text(encoding="utf-8")
+    assert "getdefaultlocale" not in src
+    # 让「无有效环境变量」的回退分支与 runner 的 locale 状态无关
+    monkeypatch.setattr(locale, "getlocale", lambda *a, **k: (None, None))
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG", "LC_CTYPE"):
+        monkeypatch.delenv(name, raising=False)
+    cases = (("zh_CN.UTF-8", "zh"), ("en_US.UTF-8", "en"),
+             ("fr_FR.UTF-8", "zh"), ("C", "zh"), ("", "zh"))
+    for raw, expected in cases:
+        monkeypatch.setenv("LANG", raw)
+        assert vm.resolve_language("跟随系统") == expected, raw
+    monkeypatch.setenv("LANG", "zh_CN.UTF-8")
+    assert vm.system_language_code() == "zh_CN"
+    # 显式选择永远优先于系统语言
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    assert vm.resolve_language("中文") == "zh"
+    assert vm.resolve_language("English") == "en"
+
+
 def test_settings_values_read_classic_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
     s = Settings()

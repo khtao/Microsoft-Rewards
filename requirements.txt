@@ -12,3 +12,6 @@ PySide6-Essentials>=6.6,<6.10; python_version < "3.14"
 PySide6-Essentials>=6.10.1; python_version >= "3.14"
 requests>=2.28
 playwright>=1.40
+# 真实地址栏（omnibox）搜索所需；无图形环境 / 未安装时自动关闭该分支，
+# 其余拟人搜索、同步与界面功能不受影响（omnibox.py 延迟导入 + 降级）。
+pyautogui>=0.9.54

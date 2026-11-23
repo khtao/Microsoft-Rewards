@@ -288,16 +288,33 @@ I18N: Dict[str, Dict[str, str]] = {
 }
 
 
+def system_language_code() -> str:
+    """读系统语言代码，只用当前受支持的 locale 接口。
+
+    优先读环境变量（不受 ``setlocale`` 状态影响），再回退到
+    ``locale.getlocale(LC_CTYPE)``；``C`` / ``POSIX`` 视为无有效语言信息。
+    """
+    import os
+    import locale
+
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG", "LC_CTYPE"):
+        raw = os.environ.get(name, "")
+        if raw and raw.lower() not in ("c", "posix"):
+            return raw.split(".", 1)[0].split("@", 1)[0]
+    try:
+        code, _ = locale.getlocale(locale.LC_CTYPE)
+    except (ValueError, TypeError, OSError):
+        code = None
+    return str(code or "")
+
+
 def resolve_language(choice: str) -> str:
     """「跟随系统」按 locale 猜；测试环境可稳定回退到中文。"""
     if choice in ("中文", "zh", "Chinese"):
         return "zh"
     if choice in ("English", "en"):
         return "en"
-    import locale
-
-    lang, _ = locale.getdefaultlocale()
-    code = str(lang or "").lower()
+    code = system_language_code().lower()
     if not code or code.startswith("zh"):
         return "zh"
     return "en" if code.startswith("en") else "zh"
@@ -840,6 +857,23 @@ def _intensity_params_from_sp(sp: dict, level: int) -> dict:
         if key in sp and sp[key] is not None:
             out[key] = sp[key]
     return out
+
+
+def address_bar_hint(status: dict, lang: str = "zh") -> str:
+    """设置页里的地址栏搜索提示；条件满足时返回空串（不显示新行）。
+
+    检测由 ``omnibox.status()`` 完成，这里只负责文案，保持纯函数、可离线单测。
+    """
+    en = lang == "en"
+    if not status.get("is_bing", True):
+        provider = str(status.get("provider") or "").strip()
+        tail = f"（当前：{provider}）" if provider else ""
+        return (f"Default search is not Bing; address-bar search will not run{tail}"
+                if en else f"默认搜索非必应，地址栏搜索不会进行{tail}")
+    if not status.get("pyautogui", True):
+        return ("PyAutoGUI unavailable; address-bar search will not run" if en
+                else "PyAutoGUI 不可用，地址栏搜索不会进行")
+    return ""
 
 
 def _range_pair(value, fallback) -> tuple:

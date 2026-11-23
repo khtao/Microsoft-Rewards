@@ -249,6 +249,8 @@ def run_human_search(
         # 非法值一律裁剪到 [0, 1]，避免旧配置写进字符串后整轮异常
         address_bar_rate=max(0.0, min(1.0, float(address_bar_rate))),
         reuse_serp=reuse_serp,
+        # 启动浏览器后按「本次窗口的默认引擎 + PyAutoGUI」更新
+        omnibox_enabled=False,
     )
 
     # ---- 地理位置：统一时区 / 语言 / 市场，保证与 IP 归属自洽
@@ -309,6 +311,20 @@ def run_human_search(
         logger("browser", "复用外部传入的 Playwright context/page")
 
     try:
+        # ---- 地址栏搜索前置检测：默认搜索引擎必须是 Bing，且 PyAutoGUI 可用
+        from . import omnibox
+        try:
+            probe = (omnibox.status(automation_snapshot) if automation_snapshot
+                     else omnibox.status())
+            cfg.omnibox_enabled = bool(probe["enabled"])
+            omnibox.remember(probe)
+            logger("omnibox", f"默认搜索引擎 {probe['provider']} / "
+                              f"PyAutoGUI {'可用' if probe['pyautogui'] else '不可用'} → "
+                              f"地址栏搜索 {'开启' if probe['enabled'] else '关闭'}")
+        except Exception as _e:
+            cfg.omnibox_enabled = False
+            logger("warn", f"地址栏前置检测失败，本轮关闭地址栏搜索：{_e}")
+
         main_page = page or (ctx.pages[0] if ctx.pages else ctx.new_page())
 
         # ---- 请求上下文：真实 Client Hints + 与地区一致的 Accept-Language

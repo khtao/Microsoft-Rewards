@@ -18,6 +18,16 @@ datas = []
 binaries = []
 hiddenimports = []
 
+# PyAutoGUI 在函数内部延迟导入（无 DISPLAY 时顶层 import 会抛异常），静态
+# 分析看不到，这里显式登记；构建机未安装则静默跳过，运行时由 omnibox.py
+# 优雅降级并关闭地址栏分支。
+try:
+    import importlib.util
+    if importlib.util.find_spec('pyautogui') is not None:
+        hiddenimports += ['pyautogui']
+except Exception:
+    pass
+
 # Windows 资源管理器 / 任务栏显示的是 EXE 内嵌图标，不是运行时的
 # QApplication.setWindowIcon()。不传 icon= 时 PyInstaller 会用默认空白图标，
 # 这正是「只有运行时窗口有图标、exe 本身没图标」的原因。Linux 忽略此参数。

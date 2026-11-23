@@ -525,6 +525,13 @@ class SettingsPage(QWidget):
         self.defaults_grid = QGridLayout()
         self.defaults_grid.setSpacing(5)
         dsl.addLayout(self.defaults_grid)
+        # 默认引擎非必应 / 缺少 PyAutoGUI 时，用常驻文字说明为何停用地址栏；
+        # 条件满足时整行隐藏，保持设置页原有外观。
+        self.address_bar_note = QLabel()
+        self.address_bar_note.setObjectName("tiny")
+        self.address_bar_note.setWordWrap(True)
+        self.address_bar_note.hide()
+        dsl.addWidget(self.address_bar_note)
         lay.addWidget(ds)
 
         # 运行环境：一键新建并打开一个独立进程，可登录不同账号。
@@ -680,6 +687,19 @@ class SettingsPage(QWidget):
                 self.defaults_grid.addWidget(cell, 0, 0, 1, 2)
             else:
                 self.defaults_grid.addWidget(cell, (i + 1) // 2, (i - 1) % 2)
+        self._refresh_address_bar_note()
+
+    def _refresh_address_bar_note(self) -> None:
+        note = getattr(self, "address_bar_note", None)
+        if note is None:
+            return
+        try:
+            from ... import omnibox
+            hint = vm.address_bar_hint(omnibox.current_status(), self.app.lang)
+        except Exception:
+            hint = ""
+        note.setText(hint)
+        note.setVisible(bool(hint))
 
     def refresh_times(self) -> None:
         _clear_layout(self.times_grid)

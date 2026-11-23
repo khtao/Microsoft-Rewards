@@ -226,12 +226,32 @@ def test_sync_refreshes_current_rounds():
 
 
 def test_readme_documents_cap_not_fixed_rounds():
-    assert "至多 20 轮" in README and "至多 16 轮" in README and "至多 12 轮" in README
-    assert "20 / 16 / 12" in README
+    """期望值从档位真源生成，避免改预设时漏改测试字面量。
+
+    CI 读的是仓库里的 README；本地文档已同步但漏推时，这里会明确列出
+    缺哪个「至多 N 轮」以及残留的旧预设数字，而不是给一个裸 AssertionError。
+    """
+    import re
+
+    caps = [int(vm.INTENSITY_PROFILES[c]["repeat"]) for c in ("低", "中", "高")]
+    expected = [f"至多 {n} 轮" for n in caps]
+    missing = [s for s in expected if s not in README]
+    written = sorted({int(n) for n in re.findall(r"至多 (\d+) 轮", README)})
+    stale = sorted(set(written) - set(caps))
+    assert not missing, (
+        f"README 未与当前档位预设 {caps} 同步：缺少 {missing}；"
+        f"文中出现过 {written}，其中非当前预设的旧值为 {stale}。"
+        "请确认 README.md 已随代码一起提交并推送。"
+    )
+    assert " / ".join(str(n) for n in caps) in README
     assert "根据任务进度" in README
-    assert "搜索轮数 | 8 轮" not in README and "搜索轮数 | 20 轮" not in README
+    # 上限不能写成固定次数
+    for n in caps:
+        assert f"搜索轮数 | {n} 轮" not in README, n
     assert "剩余积分 ÷ 3" in README
-    assert "min(17, 16) = 16" in README and "min(2, 16) = 2" in README
+    mid = caps[1]
+    assert f"min(17, {mid}) = {min(17, mid)}" in README
+    assert f"min(2, {mid}) = 2" in README
 
 
 def test_hidden_classic_panel_label_says_cap():
