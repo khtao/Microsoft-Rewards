@@ -21,20 +21,22 @@
 """
 from __future__ import annotations
 
+import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QFontMetrics, QPalette
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QStackedWidget,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
 from ... import instances
+from ...auth import AuthManager
 from ...browser import browser_error_hint
 from ...config import (Settings, data_dir, instance_label,
                        is_default_instance, normalize_run_times, window_title)
@@ -403,7 +405,7 @@ class HomePage(QWidget):
 # ---------------------------------------------------------------- 设置页
 
 class SettingsPage(QWidget):
-    """精简设置：4 张卡 + 独立区块 + 工具行，共 10 个控件。
+    """精简设置：6 张统一 Card + 工具行。
 
     * 「一般不会改 / 不推荐改」的项由 ``vm.defaults_patch()`` 一次写成推荐默认，
       不再显示控件；
@@ -438,7 +440,7 @@ class SettingsPage(QWidget):
         top.addWidget(t)
         top.addStretch(1)
         sub = QLabel(tr(lang, "settings_sub"))
-        sub.setObjectName("tiny")
+        sub.setObjectName("body")
         top.addWidget(sub)
         lay.addLayout(top)
 
@@ -483,13 +485,26 @@ class SettingsPage(QWidget):
         add_row(c3, tr(lang, "schedule_on"), self.schedule_sw)
         times_head = QHBoxLayout()
         tl = QLabel(tr(lang, "start_times"))
-        tl.setStyleSheet("font-weight:600;font-size:12px;")
+        tl.setObjectName("body")
+        tl.setStyleSheet("font-weight:600;")
         times_head.addWidget(tl)
         times_head.addStretch(1)
+        # 「+」左侧是干净的时间输入框：空态只显示占位 --:--，没有秒段、
+        # 没有上下箭头。直接敲四个数字（如 1530）就自动补成 15:30；留空时
+        # 点 + 仍按「已有最大时间 +30 分钟」追加。最多 10 个时间点。
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("body")
+        self.time_input.setPlaceholderText("--:--")
+        self.time_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.time_input.setMaxLength(5)
+        self.time_input.setFixedWidth(84)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        times_head.addWidget(self.time_input)
         add = QPushButton("+")
         add.setFixedWidth(30)
         add.clicked.connect(app.add_schedule_time)
         times_head.addWidget(add)
+        self.schedule_add_btn = add
         c3.add_layout(times_head)
         self.times_host = QWidget()
         self.times_grid = QGridLayout(self.times_host)
@@ -507,56 +522,31 @@ class SettingsPage(QWidget):
         c4.add(self.calendar)
         lay.addWidget(c4)
 
-        # 拟人搜索默认设置：可编辑的「拟人强度」与全部拟人搜索默认参数
-        # 放在同一张卡里；只读值常驻显示，不弹任何鼠标悬浮提示。
-        ds = QFrame()
-        ds.setObjectName("flat")
-        dsl = QVBoxLayout(ds)
-        dsl.setContentsMargins(12, 10, 12, 10)
-        dsl.setSpacing(6)
-        ds_title = QLabel(tr(lang, "default_summary"))
-        ds_title.setStyleSheet("font-size:13px;font-weight:700;")
-        dsl.addWidget(ds_title)
-        ds_hint = QLabel(tr(lang, "default_summary_hint"))
-        ds_hint.setObjectName("tiny")
-        dsl.addWidget(ds_hint)
+        # 05 拟人搜索默认设置：与 01~04 同为 Card，正文只用 13px 常规字，
+        # 不再叠长说明小字；悬浮提示全部用常驻状态行表达。
+        ds = Card(number="05", title=tr(lang, "default_summary"),
+                  color=theme.current()["purple"])
         self.level_seg = Segmented(["低", "中", "高"], v["ui_search_level"])
-        dsl.addWidget(Row(tr(lang, "intensity"), self.level_seg))
+        ds.add(Row(tr(lang, "intensity"), self.level_seg))
         self.defaults_grid = QGridLayout()
         self.defaults_grid.setSpacing(5)
-        dsl.addLayout(self.defaults_grid)
-        # 默认引擎非必应 / 键盘后端不可用时，用常驻文字说明为何停用地址栏；
-        # 条件满足时整行隐藏，保持设置页原有外观。
-        self.address_bar_note = QLabel()
-        self.address_bar_note.setObjectName("tiny")
-        self.address_bar_note.setWordWrap(True)
-        self.address_bar_note.hide()
-        dsl.addWidget(self.address_bar_note)
+        ds.add_layout(self.defaults_grid)
         lay.addWidget(ds)
 
-        # 运行环境：一键新建并打开一个独立进程，可登录不同账号。
-        # 用常驻文字说明，不挂任何悬浮提示；用 flat 区块，不增加 Card 编号。
-        env = QFrame()
-        env.setObjectName("flat")
-        envl = QVBoxLayout(env)
-        envl.setContentsMargins(12, 10, 12, 10)
-        envl.setSpacing(6)
-        env_title = QLabel(tr(lang, "instance_title"))
-        env_title.setStyleSheet("font-size:13px;font-weight:700;")
-        envl.addWidget(env_title)
-        env_hint = QLabel(tr(lang, "instance_hint"))
-        env_hint.setObjectName("tiny")
-        env_hint.setWordWrap(True)
-        envl.addWidget(env_hint)
+        # 06 运行环境：与 01~05 同为 Card。账号删除与环境删除两个入口都
+        # 放在「当前环境」那一行，不单独成卡、不叠长说明小字。
+        env = Card(number="06", title=tr(lang, "instance_title"),
+                   color=theme.current()["primary"])
         self.env_rows = QVBoxLayout()
         self.env_rows.setSpacing(4)
-        envl.addLayout(self.env_rows)
+        env.add_layout(self.env_rows)
         self.env_name = QLineEdit()
+        self.env_name.setObjectName("body")
         self.env_name.setPlaceholderText(tr(lang, "instance_name_hint"))
-        envl.addWidget(self.env_name)
+        env.add(self.env_name)
         new_env = QPushButton(tr(lang, "instance_new"))
         new_env.clicked.connect(app.new_instance)
-        envl.addWidget(new_env)
+        env.add(new_env)
         lay.addWidget(env)
 
         # 工具：导出 / 抓取 / 恢复默认，都是一次点击的操作，不再是设置项
@@ -582,6 +572,14 @@ class SettingsPage(QWidget):
         self.refresh_times()
         self.refresh_defaults_summary()
         self.refresh_instances()
+        self.sync_placeholder_color()
+
+    def sync_placeholder_color(self) -> None:
+        """套用样式表会重置子控件 palette，这里在 QSS 之后重设占位色。"""
+        pal = self.time_input.palette()
+        pal.setColor(QPalette.ColorRole.PlaceholderText,
+                     QColor(theme.current()["text_muted"]))
+        self.time_input.setPalette(pal)
 
     def enter_widgets(self):
         return list(getattr(self, "_enter_widgets", []))
@@ -630,27 +628,62 @@ class SettingsPage(QWidget):
         self.refresh_instances()
 
     def refresh_instances(self) -> None:
-        """列出所有独立环境；「打开」只拉起另一个进程，不在本进程切换数据。"""
+        """列出所有独立环境：名称旁放删除键，右侧放打开 / 设为默认。
+
+        删除键只对「当前窗口正在使用、且不是内置根目录、也不是默认环境」的
+        那一行显示；默认环境与内置 default 永远没有删除键。
+        """
         _clear_layout(self.env_rows)
         lang = self.app.lang
         for entry in instances.list_instances():
             row = QHBoxLayout()
-            name = (tr(lang, "instance_default") if entry["is_default"]
+            row.setSpacing(4)
+            name = (tr(lang, "instance_default") if entry["is_builtin_default"]
                     else str(entry["label"]))
-            label = QLabel(f"{name}  ({entry['id']})")
-            label.setObjectName("muted")
-            row.addWidget(label, 1)
+            marks = []
+            # 内置 default 本身就叫「默认环境」，不必再叠一个「默认」徽章。
+            if entry["is_preferred_default"] and not entry["is_builtin_default"]:
+                marks.append(tr(lang, "instance_preferred"))
             if entry["current"]:
-                cur = QLabel(tr(lang, "instance_current"))
-                cur.setObjectName("tiny")
-                row.addWidget(cur)
-            else:
-                btn = QPushButton(tr(lang, "instance_open"))
-                btn.setFixedWidth(64)
-                ident = str(entry["id"])
-                btn.clicked.connect(
-                    lambda _checked=False, i=ident: self.app.open_instance(i))
-                row.addWidget(btn)
+                marks.append(tr(lang, "instance_current"))
+            # 名称只显示可读名称，不附带括号里的实例 id；「当前 / 默认」
+            # 用独立短标签，状态标记不会被 elide 吃掉。
+            label = QLabel()
+            label.setObjectName("body")
+            label.setWordWrap(False)
+            label.setText(QFontMetrics(label.font()).elidedText(
+                name, Qt.TextElideMode.ElideRight, 120))
+            row.addWidget(label, 1)
+            if marks:
+                mark = QLabel(" · ".join(marks))
+                mark.setObjectName("body")
+                mark.setWordWrap(False)
+                row.addWidget(mark)
+            ident = str(entry["id"])
+            # 两个删除入口都只出现在「当前环境」这一行，紧贴环境名称：
+            # 账号会话按环境独立保存，环境本身也只能删当前这一个。
+            def add_btn(text, width, slot):
+                b = QPushButton(text)
+                b.setObjectName("envBtn")
+                b.setFixedWidth(width)
+                b.clicked.connect(slot)
+                row.addWidget(b)
+
+            if entry["current"]:
+                add_btn(tr(lang, "account_delete_short"), 70,
+                        self.app.delete_saved_account)
+            if entry["can_delete"]:
+                add_btn(tr(lang, "instance_delete"), 70,
+                        lambda _c=False, i=ident: self.app.delete_instance(i))
+            if not entry["current"]:
+                add_btn(tr(lang, "instance_open"), 52,
+                        lambda _c=False, i=ident: self.app.open_instance(i))
+                # 「把其它环境设为默认」正好由非当前行完成；当前行不再叠
+                # 第三个按钮，避免 392px 窄窗口把名称挤没。
+                if entry["can_set_default"]:
+                    add_btn(tr(lang, "instance_set_default"), 70,
+                            lambda _c=False, i=ident:
+                            self.app.set_default_instance(i))
             self.env_rows.addLayout(row)
 
     def current_search_rounds(self) -> int:
@@ -679,7 +712,7 @@ class SettingsPage(QWidget):
         for i, (label, value) in enumerate(rows):
             cell = QLabel(f"{label} · <b>{value}</b>")
             cell.setTextFormat(Qt.TextFormat.RichText)
-            cell.setObjectName("muted")
+            cell.setObjectName("body")
             cell.setWordWrap(True)
             if i == 0:
                 # 首行「至多 N 轮，根据任务进度，目前搜索 M 轮」较长，
@@ -687,26 +720,30 @@ class SettingsPage(QWidget):
                 self.defaults_grid.addWidget(cell, 0, 0, 1, 2)
             else:
                 self.defaults_grid.addWidget(cell, (i + 1) // 2, (i - 1) % 2)
-        self._refresh_address_bar_note()
-
-    def _refresh_address_bar_note(self) -> None:
-        note = getattr(self, "address_bar_note", None)
-        if note is None:
-            return
-        try:
-            from ... import omnibox
-            hint = vm.address_bar_hint(omnibox.current_status(), self.app.lang)
-        except Exception:
-            hint = ""
-        note.setText(hint)
-        note.setVisible(bool(hint))
+    def _on_time_text_edited(self, text: str) -> None:
+        """四个数字自动补冒号：1530 → 15:30；带冒号的手工输入不干预。"""
+        cleaned = re.sub(r"[^0-9:]", "", text)[:5]
+        digits = cleaned.replace(":", "")
+        if ":" not in cleaned and len(digits) >= 3:
+            cleaned = digits[:2] + ":" + digits[2:4]
+        if cleaned != text:
+            self.time_input.blockSignals(True)
+            try:
+                self.time_input.setText(cleaned)
+                self.time_input.setCursorPosition(len(cleaned))
+            finally:
+                self.time_input.blockSignals(False)
 
     def refresh_times(self) -> None:
+        times = list(self.app.prefs.get("ui_schedule_times", []))
         _clear_layout(self.times_grid)
-        for i, text in enumerate(self.app.prefs.get("ui_schedule_times", [])):
+        for i, text in enumerate(times):
             chip = TimeChip(text)
             chip.removed.connect(self.app.remove_schedule_time)
             self.times_grid.addWidget(chip, i // 3, i % 3)
+        full = len(times) >= vm.SCHEDULE_MAX
+        self.schedule_add_btn.setEnabled(not full)
+        self.time_input.setEnabled(not full)
 
     def set_calendar(self, cells, title, summary, empty_text="") -> None:
         self.calendar.set_cells(cells, title, summary, empty_text)
@@ -813,6 +850,7 @@ class ModernMainWindow(QWidget):
         lay.addWidget(self.stack)
         self.rebuild_ui()
         self.setStyleSheet(theme.stylesheet())
+        self.settings_page.sync_placeholder_color()
         self._wire_runner()
         self.refresh()
 
@@ -840,6 +878,7 @@ class ModernMainWindow(QWidget):
         self.home.set_login_badge(self._login_ok)
         self.sync_claim_state()
         self.setStyleSheet(theme.stylesheet())
+        self.settings_page.sync_placeholder_color()
         # 对齐插件版 .enter：逐项淡入、依次错开（动画恒定开启）
         effects.stagger_enter(self.stack.currentWidget().enter_widgets())
 
@@ -1084,6 +1123,45 @@ class ModernMainWindow(QWidget):
     def _forget_worker(self, worker) -> None:
         self._workers = [w for w in self._workers if w is not worker]
 
+    # -------------------------------------------------- 本机账号删除
+
+    def delete_saved_account(self) -> None:
+        """删除当前环境独立保存的账号会话；两道确认，均默认「否」。"""
+        first = QMessageBox.question(
+            self, tr(self.lang, "account_delete"),
+            "第一步确认：将删除当前环境独立保存的账号会话（加密凭证、遗留明文文件"
+            "与应用独立浏览器配置中的登录态）。\n"
+            "积分记录、设置与其它环境不受影响；删除后需由本人在登录窗口重新登录。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if first != QMessageBox.StandardButton.Yes:
+            return
+        second = QMessageBox.question(
+            self, "再次确认 · 删除账号",
+            "最后确认：此操作不可恢复，将立即清除本机保存的账号会话。\n"
+            "积分记录、设置与其它环境不受影响。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if second != QMessageBox.StandardButton.Yes:
+            self.set_status_message("已取消删除账号")
+            return
+        try:
+            AuthManager().logout()
+        except Exception as exc:
+            self.log(f"删除账号失败：{exc}")
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        self.set_login_status(tr(self.lang, "signed_out"), False)
+        if self.controller is not None:
+            try:
+                self.controller._last_sync_ok = False
+                self.controller.set_login_status("已退出登录", False)
+            except Exception:
+                pass
+        done = tr(self.lang, "account_deleted")
+        self.log(done)
+        self.set_status_message(done)
+
     # ------------------------------------------------------------ 登录
 
     def open_login(self) -> None:
@@ -1135,21 +1213,28 @@ class ModernMainWindow(QWidget):
         self.settings_page.sync_from_settings()
 
     def add_schedule_time(self) -> None:
-        """点一次 + 就追加一个时间点，无需输入 HH:MM。"""
+        """点一次 +：填了时间按填的来，留空从已有最大时间 +30 分钟。"""
         times = list(self.prefs.get("ui_schedule_times", []))
-        candidate = vm.next_schedule_time(times)
-        if candidate is None:
-            msg = ("启动时间最多 10 个" if len(times) >= vm.SCHEDULE_MAX
-                   else "08:00–23:30 已无可用时段")
-            self.set_status_message(msg)
-            self.log("未追加启动时间：" + msg)
-            return
+        page = getattr(self, "settings_page", None)
+        manual = page.time_input.text().strip() if page is not None else ""
+        if manual:
+            candidate = manual
+        else:
+            candidate = vm.next_schedule_time(times)
+            if candidate is None:
+                msg = ("启动时间最多 10 个" if len(times) >= vm.SCHEDULE_MAX
+                       else "一天内已无可用时段")
+                self.set_status_message(msg)
+                self.log("未追加启动时间：" + msg)
+                return
         try:
             new_times = normalize_run_times(times + [candidate])
         except ValueError as exc:
             self.set_status_message(str(exc))
             return
         self.set_pref("ui_schedule_times", new_times)
+        if page is not None:
+            page.time_input.clear()
 
     def remove_schedule_time(self, value: str) -> None:
         times = [t for t in self.prefs.get("ui_schedule_times", []) if t != value]
@@ -1206,6 +1291,67 @@ class ModernMainWindow(QWidget):
         detail = f"已打开环境 {ident}" if ok else f"打开环境 {ident} 失败"
         self.home.set_detail(detail)
         self.log(detail)
+
+    def set_default_instance(self, ident: str) -> None:
+        """把某个环境设为启动默认；只写根目录指针，不动任何环境数据。"""
+        try:
+            entry = instances.set_default_instance(ident)
+        except (ValueError, OSError) as exc:
+            self.home.set_detail(str(exc))
+            self.log(f"设为默认环境失败：{exc}")
+            return
+        detail = (f"已设为默认环境：{entry['label']}（{entry['id']}）· "
+                  + tr(self.lang, "instance_set_default_done"))
+        page = getattr(self, "settings_page", None)
+        if page is not None:
+            page.refresh_instances()
+        self.home.set_detail(detail)
+        self.log(detail)
+
+    def delete_instance(self, ident: str) -> None:
+        """删除当前环境；两道确认，成功后关闭本窗口避免数据目录被重建。"""
+        if self.runner.is_running() or self._syncing:
+            self.set_status_message(tr(self.lang, "instance_busy"))
+            return
+        buttons = (QMessageBox.StandardButton.Yes |
+                   QMessageBox.StandardButton.No)
+        first = QMessageBox.question(
+            self, tr(self.lang, "instance_delete_title"),
+            tr(self.lang, "instance_delete_q1"), buttons,
+            QMessageBox.StandardButton.No)
+        if first != QMessageBox.StandardButton.Yes:
+            return
+        second = QMessageBox.question(
+            self, tr(self.lang, "instance_delete_title"),
+            tr(self.lang, "instance_delete_q2"), buttons,
+            QMessageBox.StandardButton.No)
+        if second != QMessageBox.StandardButton.Yes:
+            self.set_status_message("已取消删除环境")
+            return
+
+        # 删除前先把意图写进日志、关掉本线程的 SQLite 句柄；删除之后绝不
+        # 再调用任何会落到 data_dir() 的接口，否则 instance_home() 的 mkdir
+        # 会把刚删掉的目录原地建回来。
+        self.log(f"准备删除当前环境 {ident}")
+        try:
+            self.store.close_thread_connection()
+        except Exception:
+            pass
+        try:
+            instances.delete_instance(ident)
+        except (ValueError, OSError) as exc:
+            self.home.set_detail(f"删除环境失败：{exc}")
+            QMessageBox.warning(self, tr(self.lang, "instance_delete_title"),
+                                str(exc))
+            return
+        detail = tr(self.lang, "instance_deleted")
+        self.set_status_message(detail)
+        self.home.set_detail(detail)
+        # 不刷新环境列表（list_instances 会重建目录），直接退出当前进程。
+        if self.controller is not None:
+            QTimer.singleShot(0, self.controller.quit)
+        else:
+            QTimer.singleShot(0, self.close)
 
     # ------------------------------------------------------------ 日志 / 抓取
 

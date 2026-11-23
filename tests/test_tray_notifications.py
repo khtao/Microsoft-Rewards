@@ -276,7 +276,7 @@ def test_settings_page_has_two_switches_and_no_background_group():
     assert "background_sw" not in page
     assert 'tr(lang, "tray_group")' in page
     assert 'tr(lang, "messages_group")' in page
-    assert page.count('Card(number="') == 4
+    assert page.count('Card(number="') == 6
     assert "QInputDialog" not in page
 
 

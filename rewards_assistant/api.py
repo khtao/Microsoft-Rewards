@@ -173,7 +173,6 @@ def run_human_search(
         click_prob: float = 0.35,
         enter_rate: float = 0.5,
         scroll_screens: float = 1.2,
-        address_bar_rate: float = 0.25,
         on_captcha: str = "wait",
         user_data_dir: str | None = None,
         copy_profile: bool = False,   # 兼容旧设置键；新版自动化不复制任何 profile
@@ -216,9 +215,6 @@ def run_human_search(
     level             : 拟人强度 1~3
     round_seconds     : 每轮时长随机区间（秒），默认 16~29，配合 max_round_seconds=30
     gap_seconds       : 两轮之间的间隔区间（秒）
-    address_bar_rate  : 每轮改用「地址栏直接导航到搜索 URL」的概率，默认 0.25；
-                        其余轮次走页面搜索框输入。Playwright 无法操作 omnibox，
-                        用等价的 page.goto 表达，结果阅读 / 点击 / 滚动完全一致。
     sandbox           : "on" 开沙箱 / "off" 关沙箱 / None 自动（root 自动关，并抑制警告横幅）
     page / context    : 注入已有的 Playwright 页面或上下文；不传则自行启动 Edge
     close_browser     : 结束时是否关闭浏览器（注入的对象不受影响）
@@ -246,11 +242,7 @@ def run_human_search(
     cfg = SimpleNamespace(
         on_captcha=on_captcha, click_prob=click_prob,
         enter_rate=enter_rate, scroll_screens=scroll_screens, no_back=False,
-        # 非法值一律裁剪到 [0, 1]，避免旧配置写进字符串后整轮异常
-        address_bar_rate=max(0.0, min(1.0, float(address_bar_rate))),
         reuse_serp=reuse_serp,
-        # 启动浏览器后按「本次窗口的默认引擎 + pynput 键盘后端」更新
-        omnibox_enabled=False,
     )
 
     # ---- 地理位置：统一时区 / 语言 / 市场，保证与 IP 归属自洽
@@ -311,24 +303,6 @@ def run_human_search(
         logger("browser", "复用外部传入的 Playwright context/page")
 
     try:
-        # ---- 地址栏搜索前置检测：默认搜索引擎必须是 Bing，且键盘后端可用
-        from . import omnibox
-        try:
-            probe = (omnibox.status(automation_snapshot) if automation_snapshot
-                     else omnibox.status())
-            cfg.omnibox_enabled = bool(probe["enabled"])
-            omnibox.remember(probe)
-            logger("omnibox", f"默认搜索引擎 {probe['provider']} / "
-                              f"键盘后端 {'可用' if probe['keyboard'] else '不可用'}"
-                              f"（{probe.get('backend', '?')} / {probe.get('session', '?')}）"
-                              f"/ ozone-x11 {'开' if probe.get('ozone_x11') else '关'} → "
-                              f"地址栏搜索 {'开启' if probe['enabled'] else '关闭'}"
-                              + (f"：{probe.get('input_error', '')[:120]}"
-                                 if not probe['keyboard'] else ""))
-        except Exception as _e:
-            cfg.omnibox_enabled = False
-            logger("warn", f"地址栏前置检测失败，本轮关闭地址栏搜索：{_e}")
-
         main_page = page or (ctx.pages[0] if ctx.pages else ctx.new_page())
 
         # ---- 请求上下文：真实 Client Hints + 与地区一致的 Accept-Language

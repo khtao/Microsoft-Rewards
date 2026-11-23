@@ -23,7 +23,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MS_REWARDS_HOME", tempfile.mkdtemp(prefix="hsa-preview-"))
 
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QPushButton, QVBoxLayout, QWidget)  # noqa: E402
+                               QPushButton, QScrollArea, QVBoxLayout,
+                               QWidget)  # noqa: E402
 
 from rewards_assistant.config import Settings  # noqa: E402
 from rewards_assistant.storage import Store  # noqa: E402
@@ -109,18 +110,14 @@ def summary_texts(sp) -> list[str]:
 
 
 def main() -> int:
-    # 离屏渲染常在 CI / 沙盒里跑，那里没有可用的键盘后端。让地址栏前置条件
-    # 显示为「可用」，避免把环境降级提示拍进界面截图。
-    from rewards_assistant import omnibox
-    omnibox.remember({"is_bing": True, "keyboard": True, "enabled": True,
-                      "reason": "ok", "provider": "Bing",
-                      "input_reason": "ok", "input_error": "",
-                      "session": "native", "backend": "xorg",
-                      "ozone_x11": False})
     app = QApplication.instance() or QApplication([])
     day = date.today().isoformat()
     settings, store = Settings(), Store()
     settings.update({"ui_language": "中文", "ui_theme": "浅色"})
+    # 造一个示例独立环境，让运行环境区块展示「打开 / 设为默认」两个按钮；
+    # 预览进程仍是内置默认环境，因此不会误把删除键拍进示例截图。
+    from rewards_assistant import instances as _instances  # noqa: E402
+    _instances.create_instance("khtao", "zh")
     seed(store, day)
     seed_history(store, date.today())
     theme.set_scheme("light")
@@ -207,40 +204,61 @@ def main() -> int:
     assert not hasattr(cal, "_legend")
     settle(app, 8, 800)
     win.grab().save(str(OUT / "settings.png"))
-    win.resize(392, 1120)
+    # 长图按设置页内容实际高度取景：运行环境区块在日历下方，固定 1120
+    # 会把它裁掉。
+    scroll = win.settings_page.findChild(QScrollArea)
+    content_h = scroll.widget().sizeHint().height() + 96
+    win.resize(392, min(2600, max(1120, content_h)))
     settle(app, 8, 300)
     win.grab().save(str(OUT / "settings_full.png"))
 
     sp = win.settings_page
-    # 启动时间 +：从 08:00 起每 30 分钟补档
+    # 设置页所有正文 QLabel 与「外观」卡 Row 标签同为 13px；徽章 / 卡片
+    # 标题保留各自字号，不算正文。
+    body_labels = [x for x in sp.findChildren(QLabel)
+                   if x.objectName() == "body"]
+    assert body_labels
+    assert all(x.font().pixelSize() == 13 for x in body_labels), \
+        "设置页正文字号必须与外观卡一致"
+    # 所有按钮（含分段器、环境行、工具行）与正文同为 13px；符号返回键除外。
+    buttons = [b for b in sp.findChildren(QPushButton)
+               if b.objectName() != "icon"]
+    assert buttons
+    assert all(b.font().pixelSize() == 13 for b in buttons), \
+        "设置页按键字号必须统一"
+    # 启动时间：空态占位 --:--，四位数字自动补冒号；留空点 + 递增 30 分钟
+    time_box = sp.time_input
+    assert time_box.placeholderText() == "--:--"
+    assert time_box.text() == "" and time_box.font().pixelSize() == 13
+    time_box.setText("1530")
+    sp._on_time_text_edited("1530")
+    assert time_box.text() == "15:30"
+    time_box.clear()
     win.set_pref("ui_schedule_times", [])
     for _ in range(3):
         win.add_schedule_time()
     assert win.prefs["ui_schedule_times"] == ["08:00", "08:30", "09:00"]
     assert win.settings.get("auto_run_times") == ["08:00", "08:30", "09:00"]
 
-    # 拟人搜索默认设置：6 行只读值 + 一个强度控件，值随档位联动且真实写回
+    # 拟人搜索默认设置：5 行只读值 + 一个强度控件，值随档位联动且真实写回
     rows = summary_texts(sp)
-    assert len(rows) == 6, rows
-    for label in ("搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数",
-                  "地址栏搜索"):
+    assert len(rows) == 5, rows
+    for label in ("搜索轮数", "单轮耗时", "回车提交", "结果点击", "滚动屏数"):
         assert any(label in t for t in rows), (label, rows)
     assert any("至多 16 轮" in t and "目前搜索" in t for t in rows), \
         "默认中档应显示「至多 16 轮，根据任务进度，目前搜索 N 轮」"
     assert any("16–29 秒" in t for t in rows)
     assert any("50%" in t for t in rows) and any("35%" in t for t in rows)
     assert any("1.2 屏" in t for t in rows)
-    assert any("25%" in t for t in rows), "地址栏搜索默认概率必须是 25%"
     assert sp.level_seg.value() == "中"
 
-    # 低档：整组参数一起变（地址栏 25% 为固定默认），且经典 _collect() 透传
+    # 低档：整组参数一起变，且经典 _collect() 透传
     sp.level_seg.changed.emit("低")
     rows_low = summary_texts(sp)
     assert any("至多 20 轮" in t and "目前搜索" in t for t in rows_low), rows_low
     assert any("10–18 秒" in t for t in rows_low), rows_low
     assert any("35%" in t for t in rows_low) and any("20%" in t for t in rows_low)
     assert any("0.6 屏" in t for t in rows_low)
-    assert any("25%" in t for t in rows_low)
     live = win.settings.get("search_panel")
     assert live["level"] == 1 and live["repeat"] == 20
     assert live["enter_rate"] == 0.35 and live["click_prob"] == 0.20
@@ -248,17 +266,15 @@ def main() -> int:
     collected = win.search._collect()
     assert collected["enter_rate"] == 0.35 and collected["click_prob"] == 0.20
     assert collected["scroll_screens"] == 0.6
-    assert collected["address_bar_rate"] == 0.25
     assert tuple(collected["round_seconds"]) == (10.0, 18.0)
 
-    # 高档：再切一次，6 行与经典参数同步变化
+    # 高档：再切一次，5 行与经典参数同步变化
     sp.level_seg.changed.emit("高")
     rows_high = summary_texts(sp)
     assert any("至多 12 轮" in t and "目前搜索" in t for t in rows_high), rows_high
     assert any("24–40 秒" in t for t in rows_high), rows_high
     assert any("70%" in t for t in rows_high) and any("55%" in t for t in rows_high)
     assert any("2 屏" in t for t in rows_high)
-    assert any("25%" in t for t in rows_high)
     assert win.settings.get("search_panel")["level"] == 3
     assert win.search._collect()["enter_rate"] == 0.70
 
@@ -275,8 +291,7 @@ def main() -> int:
     win.grab().save(str(OUT / "dark.png"))
 
     print("previews OK:", ", ".join(sorted(p.name for p in OUT.glob("*.png"))))
-    print("intensity rows:", len(rows), "→ low", len(rows_low), "→ high", len(rows_high),
-          "| address-bar 25%")
+    print("intensity rows:", len(rows), "→ low", len(rows_low), "→ high", len(rows_high))
     print("daily group:", daily["earned"], "/", daily["total"], "→",
           daily["percent"], "% → fill", vm.progress_fill(daily["percent"], 316), "px")
     win.close()

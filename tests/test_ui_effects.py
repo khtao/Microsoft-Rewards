@@ -177,11 +177,11 @@ def test_wayland_desktop_file_registration_is_skipped():
     assert 'str(app.platformName()).lower() != "wayland"' in app
 
 
-def test_settings_page_has_four_cards_and_intensity_in_defaults_card():
+def test_settings_page_has_six_cards_and_intensity_in_defaults_card():
     src = WINDOW.read_text(encoding="utf8")
     page = src.split("class SettingsPage")[1].split("class _AccountFacade")[0]
     assert "search_panel.level" not in page
-    assert page.count('Card(number="') == 4
+    assert page.count('Card(number="') == 6
     assert page.count("add_row(") <= 10
     for gone in ("SWITCH_ROWS", "switch_map", "number_map", "cap_seg",
                  "cap_note", "auto_sync_seg", "log_sw", "motion_sw",
@@ -194,11 +194,11 @@ def test_settings_page_has_four_cards_and_intensity_in_defaults_card():
                  'self.autostart_sw = Switch(', 'self.schedule_sw = Switch(',
                  'self.cal_seg = Segmented(', 'self.defaults_grid = QGridLayout(',
                  'def refresh_defaults_summary(', 'vm.default_settings_summary(',
-                 'dsl.addWidget(Row('):
+                 'ds.add(Row('):
         assert kept in page, f"控件缺失：{kept}"
     assert 'Segmented(["低", "中", "高"]' in page
     # 强度控件必须放在「拟人搜索默认设置」卡（ds）里，而不是 02 同步卡
-    ds = page.split("# 拟人搜索默认设置")[1]
+    ds = page.split("# 05 拟人搜索默认设置")[1]
     assert "self.level_seg = Segmented(" in ds
     assert "self.defaults_grid = QGridLayout(" in ds
     widgets = WIDGETS.read_text(encoding="utf8")
@@ -287,40 +287,141 @@ def test_reset_patch_restores_both_hidden_and_visible():
 
 # ---------------------------------------------------------------- 启动时间
 
-def test_next_schedule_time_starts_at_8_and_steps_by_30_minutes():
+def test_next_schedule_time_steps_30_minutes_from_the_latest_time():
+    # 空列表从 08:00 起；之后一律从已有最大值 +30 分钟，不回填更早的空档。
     seq: list[str] = []
     for _ in range(5):
         seq.append(vm.next_schedule_time(seq))
     assert seq == ["08:00", "08:30", "09:00", "09:30", "10:00"]
-    assert vm.next_schedule_time(["08:00", "09:00", "10:00"]) == "08:30"
+    assert vm.next_schedule_time(["08:00", "09:00", "10:00"]) == "10:30"
     assert vm.next_schedule_time(["08:00", "08:30", "09:00"]) == "09:30"
+    assert vm.next_schedule_time(["09:07"]) == "09:37"   # 手动值也按 30 分钟递增
+    assert vm.next_schedule_time(["23:45"]) == "00:15"   # 跨 24:00 回绕
+    assert vm.SCHEDULE_MAX == 10
     ten = [f"{8 + i // 2:02d}:{30 * (i % 2):02d}" for i in range(10)]
     assert vm.next_schedule_time(ten) is None
-    full = [f"{8 + (i * 30) // 60:02d}:{(i * 30) % 60:02d}"
+    full = [f"{(i * 30) // 60:02d}:{(i * 30) % 60:02d}"
             for i in range(vm.SCHEDULE_SLOTS)]
     assert vm.next_schedule_time(full) is None
 
 
-def test_plus_button_adds_time_without_input_dialog():
+def test_time_input_is_a_plain_line_edit_with_placeholder():
     src = WINDOW.read_text(encoding="utf8")
     assert "QInputDialog" not in src
     assert "vm.next_schedule_time(times)" in src
     assert 'add = QPushButton("+")' in src
     assert "normalize_run_times(times + [candidate])" in src
-    assert "点 + 从 08:00 起每 30 分钟追加" in vm.tr("zh", "schedule_hint")
+    # 干净输入框：空态占位 --:--，没有秒段、没有上下箭头、没有标准时间控件。
+    assert 'self.time_input = QLineEdit()' in src
+    assert 'self.time_input.setPlaceholderText("--:--")' in src
+    assert 'self.time_input.setMaxLength(5)' in src
+    assert "QTimeEdit" not in src and "QComboBox" not in src
+    assert "setDisplayFormat" not in src and "setValidator(" not in src
+    assert "setTime(" not in src
+    # 时间框必须在 + 之前加入同一行布局。
+    head = src[src.index("times_head = QHBoxLayout()"):
+               src.index("c3.add_layout(times_head)")]
+    assert head.index("times_head.addWidget(self.time_input)") < head.index(
+        "times_head.addWidget(add)"), "时间框必须在 + 左侧"
+    # 四位数字自动补冒号，且只由用户输入触发（setText 不递归）。
+    assert "textEdited.connect" in src
+    assert "_on_time_text_edited" in src
+    assert 're.sub(r"[^0-9:]", "", text)' in src
+    assert "page.time_input.text().strip()" in src, "填了按填的来"
+    assert "page.time_input.clear()" in src, "添加成功后回到空态"
+    assert "len(times) >= vm.SCHEDULE_MAX" in src
+    assert "self.schedule_add_btn.setEnabled(not full)" in src
+    assert "四位数字" in vm.tr("zh", "schedule_hint")
+    assert "4 digits" in vm.tr("en", "schedule_hint")
+
+
+def test_time_input_shows_placeholder_and_formats_four_digits(monkeypatch, tmp_path):
+    """空态只显示 --:--；写 1530 自动成 15:30，秒段不存在。"""
+    from PySide6.QtWidgets import QApplication
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path / "data"))
+    app = QApplication.instance() or QApplication([])
+    from rewards_assistant.config import Settings
+    from rewards_assistant.ui.modern.main_window import ModernMainWindow
+    w = ModernMainWindow(settings=Settings())
+    box = w.settings_page.time_input
+    assert box.text() == ""
+    assert box.placeholderText() == "--:--"
+    assert box.maxLength() == 5
+    assert "s" not in box.placeholderText(), "不需要秒级别"
+    box.setText("1530")
+    w.settings_page._on_time_text_edited("1530")
+    assert box.text() == "15:30"
+    # 手工带冒号输入不干预；逐位敲四位数字同样收敛到 HH:MM。
+    w.settings_page._on_time_text_edited("15:30")
+    assert box.text() == "15:30"
+    for typed in ("0", "07", "071", "0713"):
+        box.setText(typed)
+        w.settings_page._on_time_text_edited(typed)
+    assert box.text() == "07:13"
+    app.processEvents()
+
+
+def test_manual_time_wins_and_auto_mode_uses_latest(monkeypatch, tmp_path):
+    """行为回归：填了按填的来，留空则从已有最大时间 +30 分钟。"""
+    from PySide6.QtWidgets import QApplication
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path / "data"))
+    app = QApplication.instance() or QApplication([])
+    from rewards_assistant.config import Settings
+    from rewards_assistant.ui.modern.main_window import ModernMainWindow
+    w = ModernMainWindow(settings=Settings())
+    w.set_pref("ui_schedule_times", ["08:00", "09:00", "10:00"])
+    box = w.settings_page.time_input
+    # 留空 → 10:30
+    box.clear()
+    w.add_schedule_time()
+    assert w.prefs["ui_schedule_times"] == ["08:00", "09:00", "10:00", "10:30"]
+    assert box.text() == ""
+    # 写四位数字 → 按填的来，且不受半小时档限制
+    box.setText("0713")
+    w.settings_page._on_time_text_edited("0713")
+    assert box.text() == "07:13"
+    w.add_schedule_time()
+    assert "07:13" in w.prefs["ui_schedule_times"]
+    assert box.text() == "", "成功后清空，回到 --:-- 空态"
+    # 重复值不改设置，保留内容供修改
+    box.setText("0713")
+    w.settings_page._on_time_text_edited("0713")
+    w.add_schedule_time()
+    assert box.text() == "07:13"
+    app.processEvents()
+
+
+def test_schedule_ui_caps_at_ten(monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QApplication
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path / "data"))
+    app = QApplication.instance() or QApplication([])
+    from rewards_assistant.config import Settings
+    from rewards_assistant.ui.modern.main_window import ModernMainWindow
+    w = ModernMainWindow(settings=Settings())
+    nine = [f"{8 + i:02d}:00" for i in range(9)]
+    w.set_pref("ui_schedule_times", nine)
+    assert w.settings_page.schedule_add_btn.isEnabled()
+    w.add_schedule_time()
+    assert len(w.prefs["ui_schedule_times"]) == 10
+    assert not w.settings_page.schedule_add_btn.isEnabled()
+    assert not w.settings_page.time_input.isEnabled()
+    w.set_pref("ui_schedule_times", nine)
+    assert w.settings_page.schedule_add_btn.isEnabled()
+    assert w.settings_page.time_input.isEnabled()
+    app.processEvents()
 
 
 # ---------------------------------------------------------------- 拟人强度统一控制
 
-def test_intensity_profiles_cover_three_levels_and_six_displayed_params():
+def test_intensity_profiles_cover_three_levels_and_five_displayed_params():
     assert list(vm.INTENSITY_PROFILES) == ["低", "中", "高"]
     assert [vm.INTENSITY_PROFILES[k]["level"] for k in ("低", "中", "高")] == [1, 2, 3]
     labels = [row[1] for row in vm.DEFAULT_SUMMARY_ROWS]
     assert labels == ["搜索轮数", "单轮耗时", "回车提交", "结果点击",
-                      "滚动屏数", "地址栏搜索"]
+                      "滚动屏数"]
     keys = {row[0] for row in vm.DEFAULT_SUMMARY_ROWS}
     assert keys == {"repeat", "round_seconds", "enter_rate",
-                    "click_prob", "scroll_screens", "address_bar_rate"}
+                    "click_prob", "scroll_screens"}
     for choice, profile in vm.INTENSITY_PROFILES.items():
         for key in keys | set(vm.INTENSITY_PARAM_KEYS):
             assert key in profile, (choice, key)
@@ -330,12 +431,9 @@ def test_intensity_profiles_cover_three_levels_and_six_displayed_params():
         assert 0 <= profile["enter_rate"] <= 1
         assert 0 <= profile["click_prob"] <= 1
         assert profile["scroll_screens"] > 0
-    # 除「地址栏搜索」这项固定默认配置外，三档取值必须彼此不同
-    for key in keys - {"address_bar_rate"}:
+    # 5 项显示参数随档位彼此不同
+    for key in keys:
         assert len({str(vm.INTENSITY_PROFILES[c][key]) for c in vm.INTENSITY_PROFILES}) == 3, key
-    # 25% 是固定默认配置，三档一致，但仍由强度切换统一写回
-    for choice, profile in vm.INTENSITY_PROFILES.items():
-        assert profile["address_bar_rate"] == 0.25, choice
 
 
 def test_middle_profile_matches_api_run_human_search_defaults():
@@ -350,10 +448,9 @@ def test_middle_profile_matches_api_run_human_search_defaults():
     assert sig.parameters["enter_rate"].default == mid["enter_rate"]
     assert sig.parameters["click_prob"].default == mid["click_prob"]
     assert sig.parameters["scroll_screens"].default == mid["scroll_screens"]
-    assert sig.parameters["address_bar_rate"].default == mid["address_bar_rate"] == 0.25
 
 
-def test_intensity_switch_writes_all_six_params_at_once():
+def test_intensity_switch_writes_all_five_params_at_once():
     """一个控件统一控制：切档一次写齐整组参数，且关键词/来源不丢失。"""
     p = dict(vm.UI_DEFAULTS)
     p.update({"ui_keywords": "旅行", "ui_sources": "baidu,bing"})
@@ -366,7 +463,7 @@ def test_intensity_switch_writes_all_six_params_at_once():
             assert sp[key] == profile[key], (choice, key)
         assert sp["keywords"] == "旅行"
         assert sp["keyword_sources"] == ("baidu", "bing")
-        # 其它设置写入不能把 6 项参数冲掉
+        # 其它设置写入不能把整组参数冲掉
         again = vm.pref_to_settings({**p, "ui_search_level": choice},
                                     "ui_keywords", "摄影")
         for key in vm.INTENSITY_PARAM_KEYS:
@@ -374,32 +471,29 @@ def test_intensity_switch_writes_all_six_params_at_once():
                 assert again["search_panel"][key] == profile[key], (choice, key)
 
 
-def test_default_settings_summary_is_six_rows_and_follows_intensity():
+def test_default_settings_summary_is_five_rows_and_follows_intensity():
     # 首行是「至多 N 轮，根据任务进度，目前搜索 M 轮」：N 是档位上限，
     # M = min(ceil(剩余积分÷3), N)，随官方任务进度变化。
     zh = dict(vm.default_settings_summary(
         dict(vm.UI_DEFAULTS), "zh", current_rounds=16))
-    assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 6
+    assert len(zh) == len(vm.DEFAULT_SUMMARY_ROWS) == 5
     assert zh["搜索轮数"] == "至多 16 轮，根据任务进度，目前搜索 16 轮"
     assert zh["单轮耗时"] == "16–29 秒"
     assert zh["回车提交"] == "50%"
     assert zh["结果点击"] == "35%"
     assert zh["滚动屏数"] == "1.2 屏"
-    assert zh["地址栏搜索"] == "25%"
 
     low = dict(vm.default_settings_summary(
         {"ui_search_level": "低", "ui_intensity_params": vm.intensity_profile("低")},
         "zh", current_rounds=20))
     assert low == {"搜索轮数": "至多 20 轮，根据任务进度，目前搜索 20 轮", "单轮耗时": "10–18 秒",
-                   "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏",
-                   "地址栏搜索": "25%"}
+                   "回车提交": "35%", "结果点击": "20%", "滚动屏数": "0.6 屏"}
     high = dict(vm.default_settings_summary(
         {"ui_search_level": "高", "ui_intensity_params": vm.intensity_profile("高")},
         "zh", current_rounds=12))
     # 强度=高时上限 12，本轮按任务进度计划 12 轮
     assert high == {"搜索轮数": "至多 12 轮，根据任务进度，目前搜索 12 轮", "单轮耗时": "24–40 秒",
-                    "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏",
-                    "地址栏搜索": "25%"}
+                    "回车提交": "70%", "结果点击": "55%", "滚动屏数": "2 屏"}
 
     en = dict(vm.default_settings_summary(
         {"ui_search_level": "中", "ui_intensity_params": vm.intensity_profile("中")},
@@ -410,7 +504,6 @@ def test_default_settings_summary_is_six_rows_and_follows_intensity():
     assert en["Enter submits"] == "50%"
     assert en["Result clicks"] == "35%"
     assert en["Result scrolling"] == "1.2 screens"
-    assert en["Address-bar search"] == "25%"
     fallback = dict(vm.default_settings_summary(dict(vm.UI_DEFAULTS), "zh"))
     assert fallback["搜索轮数"] == "至多 16 轮，根据任务进度，目前搜索 0 轮"
 
@@ -423,8 +516,7 @@ def test_intensity_params_are_persisted_and_transmitted_to_classic_chain():
         assert f'"{key}"' in cfg
     legacy = LEGACY.read_text(encoding="utf8")
     for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                "enter_rate", "click_prob", "scroll_screens",
-                "address_bar_rate"):
+                "enter_rate", "click_prob", "scroll_screens"):
         assert key in legacy, key
     assert "params[key]" in legacy
     assert "state[key] = sp[key]" in legacy, "_view_state 必须保留强度参数"

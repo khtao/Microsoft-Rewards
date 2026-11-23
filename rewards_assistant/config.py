@@ -4,10 +4,15 @@
 避免污染项目目录，也方便用户备份与彻底卸载。
 
 **多开环境**：一个进程对应一个实例（``--instance <id>`` / 环境变量
-``MS_REWARDS_INSTANCE``）。默认实例 ``default`` 沿用原来的数据目录，旧数据
+``MS_REWARDS_INSTANCE``）。内置实例 ``default`` 沿用原来的数据目录，旧数据
 零迁移；其余实例各自落在 ``<base>/instances/<id>/`` 下，设置、积分库、
 加密凭证、浏览器 profile、运行日志、自动化快照、开机自启项全部独立，
 因此可以登录不同的 Microsoft 账号且互不干扰。
+
+「启动默认环境」是写在根目录 ``default_instance.json`` 的指针：不传
+``--instance`` 也没有环境变量时，进程进入指针指向的环境。它与内置
+``default`` 目录是两个概念——后者是所有实例的根目录，永远存在、永远
+不可删除，因此删环境只删 ``instances/<id>/``，不会动到其它环境。
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from functools import lru_cache
 import re
 from typing import Optional
 
@@ -23,13 +29,12 @@ APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分管理助手"
 APP_VERSION = "2.0"
 
-# search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 6 项参数
-# （含默认的 address_bar_rate = 25% 地址栏搜索概率）。
+# search_panel 允许持久化的键：4 个经典表单项 + 拟人强度档位的 5 项参数。
 # round_seconds / gap_seconds 是 [min, max] 区间，随 JSON 存为 list。
 SEARCH_PANEL_KEYS = (
     "repeat", "level", "keywords", "keyword_sources",
     "round_seconds", "max_round_seconds", "gap_seconds",
-    "enter_rate", "click_prob", "scroll_screens", "address_bar_rate",
+    "enter_rate", "click_prob", "scroll_screens",
 )
 
 SYNC_MIN_INTERVAL_SEC = 900        # 自动同步的最短间隔，避免频繁打扰服务端
@@ -40,6 +45,7 @@ LOGIN_WINDOW_SECONDS = 300         # 「打开浏览器登录」窗口保持时�
 
 ENV_INSTANCE = "MS_REWARDS_INSTANCE"
 DEFAULT_INSTANCE = "default"
+DEFAULT_INSTANCE_POINTER = "default_instance.json"
 _SINGLE_KEY = "MSRewardsAssistant_SingleInstance_v1"
 _WIN_APP_ID = "Independent.RewardsActivityCompanion"
 INSTANCE_META = "instance.json"
@@ -60,9 +66,66 @@ def normalize_instance_id(raw) -> str:
     return DEFAULT_INSTANCE if name == "instances" else name
 
 
+def default_instance_pointer_path() -> Path:
+    """启动默认环境指针文件；放在根目录，不属于任何一个实例的数据目录。"""
+    return base_data_dir() / DEFAULT_INSTANCE_POINTER
+
+
+@lru_cache(maxsize=8)
+def _preferred_default_for(base: str) -> str:
+    """按数据根目录缓存；不同 ``MS_REWARDS_HOME`` 互不串值。"""
+    try:
+        pointer = Path(base) / DEFAULT_INSTANCE_POINTER
+        obj = json.loads(pointer.read_text(encoding="utf-8"))
+        ident = normalize_instance_id(obj.get("id") if isinstance(obj, dict) else None)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return DEFAULT_INSTANCE
+    if ident == DEFAULT_INSTANCE:
+        return DEFAULT_INSTANCE
+    if not (Path(base) / "instances" / ident / INSTANCE_META).is_file():
+        return DEFAULT_INSTANCE
+    return ident
+
+
+def preferred_default_id() -> str:
+    """不带 ``--instance`` 启动时进入的环境；文件无效一律回落内置 default。
+
+    指针指向的环境必须真实存在，避免删环境后留下一个空壳默认值。写入后会
+    清缓存；另一个进程改了指针，本进程重启后生效。
+    """
+    return _preferred_default_for(str(base_data_dir()))
+
+
+def set_preferred_default(ident) -> str:
+    """把某个环境设为启动默认；内置 default 表示恢复出厂设置。"""
+    name = normalize_instance_id(ident)
+    if name != DEFAULT_INSTANCE and not (
+            instances_root() / name / INSTANCE_META).is_file():
+        raise ValueError("该环境不存在，无法设为默认")
+    pointer = default_instance_pointer_path()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pointer.with_name(pointer.name + ".tmp")
+    tmp.write_text(json.dumps({"id": name}, ensure_ascii=False) + "\n",
+                   encoding="utf-8")
+    os.replace(str(tmp), str(pointer))
+    _preferred_default_for.cache_clear()
+    return name
+
+
+def is_preferred_default(ident: str) -> bool:
+    return normalize_instance_id(ident) == preferred_default_id()
+
+
 def instance_id() -> str:
-    """当前进程的实例 id（进程启动后不再变化）。"""
-    return normalize_instance_id(os.environ.get(ENV_INSTANCE))
+    """当前进程的实例 id（进程启动后不再变化）。
+
+    显式 ``--instance`` / ``MS_REWARDS_INSTANCE`` 优先级最高；否则读启动
+    默认环境指针。多开进程一律带显式参数，不会被指针改写。
+    """
+    explicit = os.environ.get(ENV_INSTANCE)
+    if explicit:
+        return normalize_instance_id(explicit)
+    return preferred_default_id()
 
 
 def set_instance_id(raw) -> str:

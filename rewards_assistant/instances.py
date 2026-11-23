@@ -15,15 +15,18 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from typing import Dict, List
 
+from . import autostart
 from .config import (
     DEFAULT_INSTANCE, INSTANCE_META, autostart_name, instance_home,
     instance_id, instance_meta_path, instances_root,
-    normalize_instance_id, single_instance_key, window_title,
+    normalize_instance_id, preferred_default_id, set_preferred_default,
+    single_instance_key, window_title,
 )
 
 MAX_INSTANCES = 12
@@ -41,37 +44,51 @@ def _entry(ident: str) -> Dict[str, object]:
     meta = _read_meta(ident) if ident != DEFAULT_INSTANCE else {}
     label = ("默认环境" if ident == DEFAULT_INSTANCE
              else str(meta.get("label") or ident)[:24])
+    builtin = ident == DEFAULT_INSTANCE
+    preferred = preferred_default_id() == ident
+    current = ident == instance_id()
     return {
         "id": ident,
         "label": label,
         "home": instance_home(ident),
         "created": str(meta.get("created") or ""),
-        "is_default": ident == DEFAULT_INSTANCE,
-        "current": ident == instance_id(),
-        "title": window_title() if ident == instance_id() else label,
+        # is_default 是内置目录的事实，界面上的「默认」徽章用 is_preferred_default
+        "is_default": builtin,
+        "is_builtin_default": builtin,
+        "is_preferred_default": preferred,
+        "current": current,
+        # 只能删当前环境；内置根目录与启动默认环境都不可删
+        "can_delete": bool(current and not builtin and not preferred),
+        "can_set_default": bool(not preferred),
+        "title": window_title() if current else label,
         "ipc_key": single_instance_key(ident),
-        "autostart_name": autostart_name() if ident == instance_id() else
-                          ("MSRewardsAssistant" if ident == DEFAULT_INSTANCE
+        "autostart_name": autostart_name() if current else
+                          ("MSRewardsAssistant" if builtin
                            else f"MSRewardsAssistant_{ident}"),
     }
 
 
 def list_instances() -> List[Dict[str, object]]:
-    """默认环境永远排第一，其余按创建顺序（id 数字）排列。"""
+    """启动默认环境排第一，其余按创建顺序（id 数字）排列。
+
+    内置 ``default`` 仍列在表里：它是所有实例的根目录，永远存在、永远不可删。
+    """
     out = [_entry(DEFAULT_INSTANCE)]
     root = instances_root()
     try:
         dirs = sorted((d for d in root.iterdir() if d.is_dir()),
                       key=lambda d: (len(d.name), d.name))
     except OSError:
-        return out
+        dirs = []
     for d in dirs:
         ident = normalize_instance_id(d.name)
         if ident == DEFAULT_INSTANCE or ident != d.name:
             continue                      # 跳过非法目录名 / instances 自身
-        if not (d / INSTANCE_META).exists():
+        if not (d / INSTANCE_META).is_file():
             continue                      # 不是由本应用创建的环境
         out.append(_entry(ident))
+    # 稳定排序：只把启动默认环境提到最前，不打乱其余创建顺序。
+    out.sort(key=lambda e: 0 if e["is_preferred_default"] else 1)
     return out
 
 
@@ -133,3 +150,38 @@ def create_and_launch(lang: str = "zh") -> Dict[str, object]:
     entry = create_instance(lang=lang)
     entry["launched"] = launch_instance(str(entry["id"]))
     return entry
+
+
+def set_default_instance(ident: str) -> Dict[str, object]:
+    """把某个环境设为启动默认（不带 --instance 时进入）；指针不改动任何数据。"""
+    name = set_preferred_default(ident)
+    return _entry(name)
+
+
+def delete_instance(ident: str) -> Dict[str, object]:
+    """删除**当前**环境的数据目录；内置根目录与默认环境一律拒绝。
+
+    只删 ``<base>/instances/<id>/``，绝不碰根目录（那里还放着其它环境和
+    默认指针）。删除前顺手关掉该环境的开机自启项，避免留下指向空目录的
+    启动项；当前进程随后会退出，防止 SQLite / 日志把目录又建回来。
+    """
+    name = normalize_instance_id(ident)
+    if name == DEFAULT_INSTANCE:
+        raise ValueError("内置默认环境不能删除（它也是其它环境的根目录）")
+    if name != instance_id():
+        raise ValueError("只能删除当前窗口正在使用的环境")
+    if name == preferred_default_id():
+        raise ValueError("默认环境不能删除，请先把其它环境设为默认")
+    home = instance_home(name)
+    root = instances_root()
+    if home.parent != root or not (home / INSTANCE_META).is_file():
+        raise ValueError("环境目录无效，未删除任何文件")
+    try:
+        if autostart.is_enabled():
+            autostart.set_enabled(False)
+    except Exception:
+        pass                              # 自启动项清理失败不阻断删除
+    shutil.rmtree(home)
+    if preferred_default_id() == name:
+        set_preferred_default(DEFAULT_INSTANCE)
+    return {"id": name, "home": home, "deleted": True}

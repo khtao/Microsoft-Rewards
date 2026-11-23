@@ -240,7 +240,7 @@ def test_entry_supports_equals_form_and_default(monkeypatch):
 def test_ui_keeps_four_cards_and_tray_unchanged():
     win = (ROOT / "rewards_assistant" / "ui" / "modern" /
            "main_window.py").read_text("utf-8")
-    assert win.count('Card(number="') == 4
+    assert win.count('Card(number="') == 6
     assert "QInputDialog" not in win
     assert 'self.setWindowTitle(window_title())' in win
     assert "def refresh_instances(self)" in win

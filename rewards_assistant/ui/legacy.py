@@ -110,7 +110,6 @@ class SearchRunner(QObject):
             headless=False,
             copy_profile=False,
             keep_open=0.0,
-            address_bar_rate=0.25,
             log_file=default_log_path(),
         )
 
@@ -255,8 +254,7 @@ class SearchPanel(QWidget):
         sp = self.settings.get("search_panel", {}) if self.settings else {}
         if isinstance(sp, dict):
             for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                        "enter_rate", "click_prob", "scroll_screens",
-                        "address_bar_rate"):
+                        "enter_rate", "click_prob", "scroll_screens"):
                 if key in sp and sp[key] is not None:
                     state[key] = sp[key]
         return state
@@ -361,7 +359,7 @@ class SearchPanel(QWidget):
         """与定时任务共用一套固定默认参数，不再从旧设置继承危险选项。
 
         拟人强度档位统一控制的 6 项参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果
-        点击 / 滚动屏数 / 地址栏搜索）从经典 ``search_panel`` 透传给
+        点击 / 滚动屏数）从经典 ``search_panel`` 透传给
         api.run_human_search，保证设置页显示的值就是真实执行值。
         """
         kws = [k.strip() for k in self.edt_keywords.text().split(",") if k.strip()]
@@ -375,8 +373,7 @@ class SearchPanel(QWidget):
         sp = self.settings.get("search_panel", {}) if self.settings else {}
         if isinstance(sp, dict):
             for key in ("round_seconds", "max_round_seconds", "gap_seconds",
-                        "enter_rate", "click_prob", "scroll_screens",
-                        "address_bar_rate"):
+                        "enter_rate", "click_prob", "scroll_screens"):
                 if key in sp and sp[key] is not None:
                     params[key] = tuple(sp[key]) if isinstance(sp[key], (list, tuple)) \
                         and key in ("round_seconds", "gap_seconds") else sp[key]

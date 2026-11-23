@@ -98,7 +98,7 @@ def test_summary_first_row_states_cap_and_current_rounds():
     assert en["Search rounds"] == (
         "Up to 16 rounds, 7 planned now based on task progress")
     # 其余 5 行仍是档位参数，不受首行影响
-    assert high["单轮耗时"] == "24–40 秒" and high["地址栏搜索"] == "25%"
+    assert high["单轮耗时"] == "24–40 秒"
 
 
 # ---------------------------------------------------------------- 行为一致

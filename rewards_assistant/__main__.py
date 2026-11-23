@@ -41,22 +41,26 @@ def main(argv=None) -> int:
             continue
         rest.append(arg)
         i += 1
-    if instance is not None:
-        from rewards_assistant.config import (instance_home,
-                                             is_default_instance,
-                                             set_instance_id)
+    # 无论是否显式传 --instance，都在导入数据层之前把实例 id 固定进环境
+    # 变量：不传时读取「启动默认环境」指针。这样进程运行期间在设置页把别的
+    # 环境设为默认，只会影响下一次启动，不会让当前进程的数据目录 / 凭证 /
+    # IPC key 突然漂移到另一个环境。
+    from rewards_assistant.config import (instance_home,
+                                         is_default_instance,
+                                         preferred_default_id,
+                                         set_instance_id)
 
-        set_instance_id(instance)
-        # Linux：多个实例若共用 HOME/.cache/fontconfig，第一次同时冷启动会
-        # 争抢同一个缓存目录，表现为两个窗口都迟迟不出现。给新实例单独一份
-        # XDG 缓存，环境隔离也更彻底；默认实例保持原路径，零迁移。
-        if sys.platform.startswith("linux") and not is_default_instance():
-            cache = instance_home() / "cache"
-            try:
-                cache.mkdir(parents=True, exist_ok=True)
-                os.environ["XDG_CACHE_HOME"] = str(cache)
-            except OSError:
-                pass
+    set_instance_id(instance if instance is not None else preferred_default_id())
+    # Linux：多个实例若共用 HOME/.cache/fontconfig，第一次同时冷启动会
+    # 争抢同一个缓存目录，表现为两个窗口都迟迟不出现。给新实例单独一份
+    # XDG 缓存，环境隔离也更彻底；默认实例保持原路径，零迁移。
+    if sys.platform.startswith("linux") and not is_default_instance():
+        cache = instance_home() / "cache"
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            os.environ["XDG_CACHE_HOME"] = str(cache)
+        except OSError:
+            pass
 
     # Qt 不需要看到这两个参数，避免把环境 id 当成 Qt 命令行选项。
     argv = [a for a in rest if a not in ("--widgets", "--classic")]

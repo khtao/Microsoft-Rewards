@@ -18,27 +18,6 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# pynput 在 omnibox.py 里延迟导入，且 keyboard 包通过 importlib 动态选择
-# 后端（_xorg / _win32 / _darwin），静态分析看不到，这里按构建平台显式登记。
-# 不能用递归子模块收集：它会先 import 包，而 Linux 无 DISPLAY 的构建机上
-# import pynput 就会连 X server 并失败，导致 spec 执行中断。
-try:
-    import importlib.util
-    if importlib.util.find_spec('pynput') is not None:
-        hiddenimports += ['pynput', 'pynput._util', 'pynput.keyboard',
-                          'pynput.keyboard._base']
-        if sys.platform == 'win32':
-            hiddenimports += ['pynput._util.win32', 'pynput._util.win32_vks',
-                              'pynput.keyboard._win32']
-        elif sys.platform == 'darwin':
-            hiddenimports += ['pynput._util.darwin', 'pynput._util.darwin_vks',
-                              'pynput.keyboard._darwin']
-        else:
-            hiddenimports += ['pynput._util.xorg', 'pynput._util.xorg_keysyms',
-                              'pynput.keyboard._xorg']
-except Exception:
-    pass
-
 # Windows 资源管理器 / 任务栏显示的是 EXE 内嵌图标，不是运行时的
 # QApplication.setWindowIcon()。不传 icon= 时 PyInstaller 会用默认空白图标，
 # 这正是「只有运行时窗口有图标、exe 本身没图标」的原因。Linux 忽略此参数。

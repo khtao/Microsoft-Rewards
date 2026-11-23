@@ -34,11 +34,13 @@ python -m pip install -r requirements.txt
 python -m rewards_assistant
 ```
 
-运行时依赖四个：`PySide6-Essentials`、`requests`、`playwright`、`pynput`。其中 `pynput` 只服务于真实地址栏搜索：按平台走原生输入后端（Windows SendInput / macOS Quartz / Linux Xlib-XTEST），不带截图栈、不引入全局隐式延时；未安装、无图形环境或后端不可用时自动关闭该分支，其余功能不受影响；只安装 Qt 核心模块（QtCore / QtGui / QtWidgets / QtSvg / QtNetwork / QtTest），不安装 `PySide6-Addons`，因此不需要 QtWebEngine / Qt3D / QtCharts / QtMultimedia，也不需要浏览器扩展。
+运行时依赖三个：`PySide6-Essentials`、`requests`、`playwright`。只安装 Qt 核心模块（QtCore / QtGui / QtWidgets / QtSvg / QtNetwork / QtTest），不安装 `PySide6-Addons`，因此不需要 QtWebEngine / Qt3D / QtCharts / QtMultimedia，也不需要浏览器扩展或任何系统级输入注入工具。
 
 **打包构建建议用 Python 3.12 或 3.13**，这是 Qt for Python 与 PyInstaller 回归最充分的组合。`requirements.txt` 按 `python_version` 分段：3.10~3.13 装经过完整回归的 PySide6-Essentials 6.9.x（`<6.10`），3.14 装 6.10.1+，3.15+ 装 6.12+，由 pip 选择当前解释器支持的最高兼容版本。
 
 首次启动后，点击右上角设置 → **打开浏览器登录**，在应用弹出的独立 Edge 窗口中完成登录，再点「我已完成登录」。会话 Cookie 经加密后保存在本机数据目录（Windows 用 DPAPI，其余平台用机器绑定密钥），与你日常使用的 Edge 配置互不影响——应用不读取日常 Edge 的 Cookie 数据库；窗口不会自动关闭，登录期间可以慢慢操作。之后同步只发两个只读 HTTP 请求，不再启动浏览器。
+
+设置页「本机账号」区块显示当前环境是否保存了会话，并提供「删除本机保存的账号」：两道确认均默认「否」，执行后清除加密凭证、遗留明文文件与应用独立 profile 的登录态，积分记录、设置与其它环境不受影响；删除后需由本人重新登录。
 
 `--widgets` 与 `--classic` 只是兼容别名，和默认命令完全等价——2.0 只有一种界面。
 
@@ -48,7 +50,13 @@ python -m rewards_assistant
 python -m rewards_assistant --instance work
 ```
 
-每个实例拥有自己的设置、积分库、加密凭证、浏览器 profile 与日志，互不干扰；不传参数就是默认环境，沿用原有数据目录、零迁移。id 只接受 1~32 位 ASCII 字母/数字/下划线/连字符，其余一律回落默认环境。
+每个实例拥有自己的设置、积分库、加密凭证、浏览器 profile 与日志，互不干扰。id 只接受 1~32 位 ASCII 字母/数字/下划线/连字符，其余一律回落内置默认环境。
+
+设置页「运行环境」列出所有环境，每行有**打开**、**设为默认**与（仅当前可删环境显示的）**删除**键，删除键紧贴环境名称：
+
+* **设为默认**：把启动默认环境写进根目录 `default_instance.json`，不带 `--instance` 也不带环境变量时进入它，下次启动生效；运行中修改不会让当前进程的数据目录、凭证或 IPC key 漂移。
+* **删除**：两道确认均默认「否」，只删 `<base>/instances/<id>/`，不动根目录与其它环境；**只能删除当前窗口正在使用的环境**，内置默认环境（它同时是其它环境的根目录）与启动默认环境都不可删除。删除成功后当前窗口关闭，避免 SQLite / 日志把目录重建回来。
+* 内置默认环境沿用原有数据目录、零迁移，永远保留；把其它环境设为默认后，它仍列在表里并可随时设回默认。
 
 ---
 
@@ -60,7 +68,7 @@ python -m rewards_assistant --instance work
 | --- | --- |
 | 外观 | 语言、主题 |
 | 同步与桌面 | 自动刷新、任务提醒、后台与通知、开机自启 |
-| 定时运行 | 总开关、时间胶囊（`+` 从 08:00 起按 30 分钟自动补档） |
+| 定时运行 | 总开关、时间胶囊（`+` 左侧时间框占位 `--:--`，写四位数字自动成 HH:MM；留空则从已有最大时间 +30 分钟，最多 10 个） |
 | 积分日历 | 日（一排七个）/ 周（一排一周，含 7 个圆点）/ 月；只显示有积分的时间，无记录的未来与过去都不显示。汇总随视图切换为日均 / 周均 / 月均 |
 | 拟人搜索默认设置 | **拟人强度 低 / 中 / 高**，统一控制 5 项参数 |
 
@@ -110,18 +118,9 @@ python -m rewards_assistant --instance work
 - 识别登录页 / 公开「关于」页直接判定为未登录，不写假的 0 分；429 / 5xx / 超时归类为「网络错误」，不会诱导重新登录。
 - 搜索进度读 `pointsCounters`；读不到显示「未知」，不伪造「已满」。官方每日搜索上限按会员等级为 15 / 30 / 60 分。
 - 只有两页都完整可用时才替换当日任务集合；否则保留上次快照并标记 stale。
-- **地址栏搜索真正操作 omnibox**：每轮以设置页固定的 25% 概率把「页面搜索框」换成「浏览器地址栏」，由 pynput 原生键盘后端把按键发给前台 Edge 窗口（Wayland 会话下自动让 Edge 走 X11 ozone，见下）——`Ctrl+L` / macOS `Cmd+L` 定位 → `Ctrl+A` + `Delete` 清空 → 剪贴板粘贴**搜索词本身** → `Enter` 触发 omnibox 搜索。地址栏不属于页面 DOM，Playwright 的键盘事件触达不到它，因此结果页由浏览器自己跳转，代码**不再调用 `page.goto`**；导航目标是默认搜索引擎的 `/search?q=`，`mkt` 与首页一致。因为粘贴的是搜索词而非 URL，**默认搜索引擎必须是 Bing**：`omnibox.status()` 读取 Edge 管理策略与 profile 的 `default_search_provider_data`，非必应（或键盘后端不可用）时地址栏分支整体关闭、本轮退回页面搜索框，设置页显示「默认搜索非必应，地址栏搜索不会进行」。页面搜索框路径维持原有行为（50% 概率清空、粘贴自检、可点搜索按钮），后续结果阅读、点击、滚动两条路径完全一致。
+- 自动完成任务的每一轮都在**页面搜索框**里完成：定位输入框 → 概率性全选清空 → 粘贴关键词并自检 → 回车（或点击搜索按钮）提交，之后共用同一套结果阅读、点击与滚动。首轮进首页，后续轮次留在结果页直接改词，避免一串可疑的重复首页请求。
 
-**地址栏搜索的运行环境**：`pynput` 在 Windows 用 SendInput、macOS 用 Quartz，两者都不需要 X11；Linux 默认走 Xlib/XTEST，需要有效的 X11 DISPLAY。Ubuntu 的 Wayland 会话通常由 **XWayland** 提供 `DISPLAY`，应用会自动给本次自动完成任务的 Edge 加上 `--ozone-platform=x11`，让浏览器窗口走 X11——键盘事件与浏览器落在同一个 X server 上，原生按键就能真正到达 omnibox，**不需要注销去切 Xorg**。这个参数只在「Linux + Wayland 会话 + 有 `DISPLAY` + 有头窗口」时注入：后台无头同步不加，Xorg 会话本来就是 X11 也不加；完全没提供 X server 的纯 Wayland 会话同样不加（否则浏览器会直接退出），此时地址栏分支降级关闭、设置页给出具体原因。若 Edge 因该参数启动失败，启动链路会自动去掉它重试，宁可退回原生 Wayland，也不会让整个自动完成任务挂掉。可用 `MS_REWARDS_NO_OZONE_X11=1` 显式关闭。
-
-「`pip` 里装好了」仍不等于「运行时可用」：无 X server 时 `import pynput` 会抛 `failed to acquire X connection`，`DISPLAY` / `XAUTHORITY` 指向不可达的 X server 同理。高级场景可用 `PYNPUT_BACKEND` 选择 pynput 支持的其它后端（例如 `uinput`，需要 `/dev/uinput` 权限与可用的键盘布局工具，不作默认）。一键查看真实原因（含 `ozone_x11` 与会话类型）：
-
-```bash
-echo "DISPLAY=$DISPLAY  WAYLAND_DISPLAY=$WAYLAND_DISPLAY  XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
-python -c "from rewards_assistant import omnibox; print(omnibox.describe())"
-```
-
-会话类型里的 `wayland-x11` 表示 Wayland + XWayland 已提供 DISPLAY。失败结果不缓存：X server 恢复后，应用内下次刷新设置页或同步完成即会自动重试，无需重启。macOS 首次使用需在「系统设置 → 隐私与安全性 → 辅助功能 / 输入监控」里授权。修饰键由 `Controller.pressed()` 上下文管理，异常时也会释放，不会把 Ctrl 卡在按下状态。
+设置页里所有正文（分组标题、环境行名称、5 行拟人参数）统一用 `QLabel#body` 的 13px，与「外观」卡标签同字号；所有按键（含分段器、环境行与工具行）也是 13px，徽章与编号保留各自字号。本机账号不再单独成卡，「删除账号」与「删除环境」都放在当前环境那一行。
 
 登录与同步链路只做两页 GET，不 POST、不注入脚本、不点击活动卡、不代领积分。
 
@@ -135,6 +134,7 @@ rewards_assistant/
 ├── session.py / auth.py          浏览器会话、五态探测、只读门面
 ├── readonly_report.py           两页 HTML 解析（零依赖纯函数）
 ├── row_access.py                sqlite3.Row / dict / 对象统一字段取值
+├── instances.py                 多开环境：启动默认指针与当前环境删除
 ├── rewards_client.py / storage.py / points.py   任务结构与本地 SQLite
 ├── sync.py / notifier.py / autostart.py        桌面集成
 ├── ui/modern/                   唯一 Qt Widgets 界面
@@ -155,7 +155,7 @@ docs/previews/                   界面截图
 
 | 文件 | 用途 |
 | --- | --- |
-| `requirements.txt` | 运行时：`PySide6-Essentials>=6.6,<6.10`（Python < 3.14）/ `PySide6-Essentials>=6.10.1`（Python ≥ 3.14）、`requests>=2.28`、`playwright>=1.40`、`pynput>=1.7.7`（地址栏搜索，可选降级） |
+| `requirements.txt` | 运行时：`PySide6-Essentials>=6.6,<6.10`（Python < 3.14）/ `PySide6-Essentials>=6.10.1`（Python ≥ 3.14）、`requests>=2.28`、`playwright>=1.40` |
 | `requirements-build.txt` | 在运行时依赖之上加 `pyinstaller>=6.0` |
 | `requirements-dev.txt` | 在运行时依赖之上加 `pytest>=8.0`，仅供本地与 CI 测试 |
 
@@ -252,6 +252,7 @@ python tools/render_previews.py
 ## 本地数据与隐私
 
 - 配置、积分历史、运行日志与浏览器登录态都保存在用户数据目录，Linux 默认为 `~/.local/share/msrewardsassistant/`，可用 `MS_REWARDS_HOME` 覆盖。
+- 设置页可独立删除当前环境保存的账号会话（两道确认），积分历史与设置不随删除清除；每个多开环境各存一份，删除互不影响。
 - 应用**不把 Cookie 写成明文文件**；遗留的明文 `cookies.txt` 会由迁移逻辑一次性导入加密存储后删除，`browser_profile/` 本身包含登录状态，请视为敏感数据，不要打包或分享；日志中的邮箱 / 长令牌会先脱敏。
 - `.gitignore` 已排除凭证、数据库、日志、浏览器目录与构建产物。忽略规则无法抹掉 Git 历史，公开仓库前请自行检查提交记录；若凭证有外泄风险，请在官网重新登录使其失效。
 - 程序会直接访问 Microsoft / Bing 页面，热搜关键词等功能还可能访问其他站点与 IP 归属服务，相关请求受目标站点隐私政策约束。

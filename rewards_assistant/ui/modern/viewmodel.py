@@ -213,10 +213,18 @@ I18N: Dict[str, Dict[str, str]] = {
         "theme": "主题",
         "runtime": "运行设置", "intensity": "拟人强度",
         "auto_sync": "自动同步", "off": "关", "on": "开",
-        "schedule": "定时运行", "schedule_hint": "点 + 从 08:00 起每 30 分钟追加",
+        "schedule": "定时运行", "schedule_hint":
+            "留空自动 +30 分钟；写四位数字如 1530 即 15:30",
         "schedule_on": "定时运行", "search_cap": "搜索次数上限",
         "default_summary": "拟人搜索默认设置",
         "default_summary_hint": "强度可切换；搜索轮数按任务进度自适应，其余按推荐值固定",
+        "account_title": "本机账号",
+        "account_hint":
+            "每个环境独立保存账号会话；删除后需重新登录，积分记录与其它环境不受影响",
+        "account_saved": "已保存账号会话", "account_empty": "未保存账号会话",
+        "account_delete": "删除本机保存的账号",
+        "account_delete_short": "删除账号",
+        "account_deleted": "已清除本机保存的账号会话",
         "start_times": "启动时间", "calendar": "积分赚取日历",
         "logs": "记录运行日志", "desktop": "桌面版", "autostart": "开机自动启动",
         "reset": "恢复默认设置", "signed_in": "已登录", "signed_out": "未登录",
@@ -235,10 +243,21 @@ I18N: Dict[str, Dict[str, str]] = {
         "status.all_done": "已完成，无需动作", "status.synced": "已同步积分",
         "status.stopping": "正在停止", "status.completing": "正在完成任务",
         "instance_title": "运行环境", "instance_hint":
-            "每个环境独立保存账号、积分记录与设置，可同时打开多个窗口",
+            "每个环境独立保存账号、积分记录与设置，可同时打开多个窗口；"
+            "可将其它环境设为默认，只能删除当前环境，默认环境不能删除",
         "instance_default": "默认环境", "instance_current": "当前",
-        "instance_open": "打开", "instance_new": "新建并打开独立环境",
+        "instance_preferred": "默认", "instance_open": "打开",
+        "instance_set_default": "设为默认", "instance_delete": "删除环境",
+        "instance_new": "新建并打开独立环境",
         "instance_name_hint": "环境名称（可选，如：工作账号）",
+        "instance_set_default_done": "已设为默认环境，下次启动时生效",
+        "instance_delete_title": "删除当前环境",
+        "instance_delete_q1": "第一步确认：将删除当前环境独立保存的账号、积分记录、"
+                              "设置与日志。此操作不可恢复，其它环境不受影响。",
+        "instance_delete_q2": "最后确认：当前窗口的环境数据将立即清除，窗口随机关闭。"
+                              "请确认已经备份需要保留的内容。",
+        "instance_deleted": "当前环境已清除，窗口即将关闭",
+        "instance_busy": "请先停止正在运行的同步或搜索任务，再删除环境",
     },
     "en": {
         "app_title": "Assistant", "settings": "Settings",
@@ -258,9 +277,17 @@ I18N: Dict[str, Dict[str, str]] = {
         "theme": "Theme",
         "runtime": "Behavior", "intensity": "Intensity",
         "auto_sync": "Auto sync", "off": "Off", "on": "On",
-        "schedule": "Timed runs", "schedule_hint": "+ adds 08:00, 08:30, 09:00…",
+        "schedule": "Timed runs", "schedule_hint":
+            "Blank: +30 min; type 4 digits (1530 -> 15:30)",
         "default_summary": "Human-like search defaults",
         "default_summary_hint": "Adjust intensity; rounds follow task progress, others are fixed",
+        "account_title": "Local account",
+        "account_hint":
+            "Each environment saves its own account session; deleting requires a new sign-in. Points history and other environments are untouched",
+        "account_saved": "Account session saved", "account_empty": "No account session",
+        "account_delete": "Delete saved local account",
+        "account_delete_short": "Delete account",
+        "account_deleted": "Saved local account deleted",
         "schedule_on": "Timed auto-run", "search_cap": "Search cap",
         "start_times": "Start times", "calendar": "Points calendar",
         "logs": "Run log", "desktop": "Desktop", "autostart": "Launch at login",
@@ -280,10 +307,18 @@ I18N: Dict[str, Dict[str, str]] = {
         "status.all_done": "All tasks done — nothing to do", "status.synced": "Points synced",
         "status.stopping": "Stopping", "status.completing": "Completing tasks",
         "instance_title": "Environments", "instance_hint":
-            "Each environment keeps its own account, points and settings. Open several at once.",
+            "Each environment keeps its own account, points and settings; set another as default, delete only the current one, the default cannot be deleted",
         "instance_default": "Default", "instance_current": "Current",
-        "instance_open": "Open", "instance_new": "Create & open environment",
+        "instance_preferred": "Default", "instance_open": "Open",
+        "instance_set_default": "Set default", "instance_delete": "Delete env",
+        "instance_new": "Create & open environment",
         "instance_name_hint": "Environment name (optional, e.g. Work account)",
+        "instance_set_default_done": "Set as default; takes effect on next launch",
+        "instance_delete_title": "Delete current environment",
+        "instance_delete_q1": "Step 1: this removes the current environment's account, points history, settings and logs. This cannot be undone; other environments are untouched.",
+        "instance_delete_q2": "Final confirmation: the current window's data is cleared immediately and the window will close. Back up anything you need first.",
+        "instance_deleted": "Current environment cleared; closing window",
+        "instance_busy": "Stop the running sync or search task before deleting an environment",
     },
 }
 
@@ -746,8 +781,8 @@ def managed_group_keys(key: str) -> Sequence[str]:
 
 # ---------------------------------------------------------------- 拟人搜索默认设置
 #
-# 设置页底部只展示 6 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
-# 滚动屏数 / 地址栏搜索），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」
+# 设置页底部只展示 5 个拟人搜索参数（搜索轮数 / 单轮耗时 / 回车提交 / 结果点击 /
+# 滚动屏数），且**不再单独可调**：全部由「拟人强度 低 / 中 / 高」
 # 统一控制。其中「搜索轮数」显示为「至多 N 轮，根据任务进度，目前搜索 M 轮」：
 # N 是档位的最多次数，M = min(剩余积分÷3 向上取整, N)，由
 # pending.planned_rounds() 按官方快照算出、执行链路同源取小。除此之外没有
@@ -758,28 +793,25 @@ def managed_group_keys(key: str) -> Sequence[str]:
 #
 # 中档取值与 api.run_human_search() 签名默认逐项一致（单测会核对）；低档更轻快，
 # 高档更慢、抖动更大。level 同时驱动 human.PROFILES 的 1 / 2 / 3 级拟人行为。
-# address_bar_rate 是固定默认配置（25% 概率从地址栏直接发起搜索），三档取同值：
-# 它属于「强度统一写回」的参数组，但不随强度增减，避免把概率写成可调的隐蔽项。
 
 INTENSITY_PARAM_KEYS: Sequence[str] = (
     "repeat", "level", "round_seconds", "max_round_seconds",
     "gap_seconds", "enter_rate", "click_prob", "scroll_screens",
-    "address_bar_rate",
 )
 
 INTENSITY_PROFILES: Dict[str, Dict[str, Any]] = {
     "低": dict(level=1, repeat=20,
                round_seconds=(10.0, 18.0), max_round_seconds=20.0,
                gap_seconds=(2.0, 6.0), enter_rate=0.35,
-               click_prob=0.20, scroll_screens=0.6, address_bar_rate=0.25),
+               click_prob=0.20, scroll_screens=0.6),
     "中": dict(level=2, repeat=16,
                round_seconds=(16.0, 29.0), max_round_seconds=30.0,
                gap_seconds=(3.0, 12.0), enter_rate=0.50,
-               click_prob=0.35, scroll_screens=1.2, address_bar_rate=0.25),
+               click_prob=0.35, scroll_screens=1.2),
     "高": dict(level=3, repeat=12,
                round_seconds=(24.0, 40.0), max_round_seconds=45.0,
                gap_seconds=(6.0, 18.0), enter_rate=0.70,
-               click_prob=0.55, scroll_screens=2.0, address_bar_rate=0.25),
+               click_prob=0.55, scroll_screens=2.0),
 }
 
 DEFAULT_SUMMARY_ROWS: Sequence[tuple[str, str, str]] = (
@@ -789,7 +821,6 @@ DEFAULT_SUMMARY_ROWS: Sequence[tuple[str, str, str]] = (
     ("enter_rate", "回车提交", "Enter submits"),
     ("click_prob", "结果点击", "Result clicks"),
     ("scroll_screens", "滚动屏数", "Result scrolling"),
-    ("address_bar_rate", "地址栏搜索", "Address-bar search"),
 )
 
 # 旧配置一次性迁移标记：把只有 level 的 search_panel 补齐为整组档位参数。
@@ -832,7 +863,7 @@ def repeat_cap(prefs: dict) -> int:
 
 def default_settings_summary(prefs: dict, lang: str = "zh",
                              current_rounds: Optional[int] = None) -> list[tuple[str, str]]:
-    """6 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。
+    """5 行「标签 → 当前值」，值取自当前强度档位真实写入的参数。
 
     ``current_rounds`` 由界面按官方任务快照算出（``pending.planned_rounds``），
     即「根据任务进度，目前搜索 M 轮」。首行写「至多 N 轮」而不是固定次数：
@@ -853,9 +884,8 @@ def default_settings_summary(prefs: dict, lang: str = "zh",
         elif key == "round_seconds":
             lo, hi = _range_pair(params.get("round_seconds"), (16.0, 29.0))
             value = f"{_num(lo)}–{_num(hi)} " + ("sec" if en else "秒")
-        elif key in ("enter_rate", "click_prob", "address_bar_rate"):
-            fallback = 0.25 if key == "address_bar_rate" else 0
-            value = f"{int(round(float(params.get(key, fallback)) * 100))}%"
+        elif key in ("enter_rate", "click_prob"):
+            value = f"{int(round(float(params.get(key, 0)) * 100))}%"
         else:  # scroll_screens
             value = f"{_num(params.get('scroll_screens', 1.2))} " + (
                 "screens" if en else "屏")
@@ -870,54 +900,6 @@ def _intensity_params_from_sp(sp: dict, level: int) -> dict:
         if key in sp and sp[key] is not None:
             out[key] = sp[key]
     return out
-
-
-def address_bar_hint(status: dict, lang: str = "zh") -> str:
-    """设置页里的地址栏搜索提示；条件满足时返回空串（不显示新行）。
-
-    ``omnibox.status()`` 会区分「包没装」和「装了但后端不可用」，这里把
-    原因如实写出来，避免用户看到 pip 已安装却仍提示不可用。
-    """
-    en = lang == "en"
-    if not status.get("is_bing", True):
-        provider = str(status.get("provider") or "").strip()
-        tail = f"（当前：{provider}）" if provider else ""
-        return (f"Default search is not Bing; address-bar search will not run{tail}"
-                if en else f"默认搜索非必应，地址栏搜索不会进行{tail}")
-    if status.get("keyboard", True):
-        return ""
-
-    why = str(status.get("input_reason") or "import-failed")
-    session = str(status.get("session") or "")
-    err = str(status.get("input_error") or "").strip()
-    if why == "not-installed":
-        return ("pynput is not installed; address-bar search will not run"
-                if en else "未安装 pynput，地址栏搜索不会进行")
-    if why == "missing-dependency":
-        return ("A pynput dependency is missing; address-bar search will not run"
-                if en else "pynput 依赖缺失，地址栏搜索不会进行")
-    if why == "no-x11-display":
-        if session == "wayland":
-            return ("Wayland session has no X11 DISPLAY; address-bar search "
-                    "will not run. Log in with Xorg instead" if en else
-                    "当前为 Wayland 会话（无 X11 DISPLAY），地址栏搜索不会进行；请改用 Xorg 会话登录")
-        if session == "wayland-x11":
-            return ("Wayland via XWayland has a DISPLAY but the X connection "
-                    "failed; check XAUTHORITY and restart the session" if en else
-                    "Wayland 会话已由 XWayland 提供 X11 DISPLAY，但连接失败，"
-                    "地址栏搜索不会进行；请检查 DISPLAY / XAUTHORITY 或重启图形会话")
-        if session == "headless":
-            return ("No X11 DISPLAY detected; address-bar search will not run"
-                    if en else "未检测到 X11 DISPLAY，地址栏搜索不会进行")
-        return ("Cannot connect to the X11 DISPLAY; address-bar search will not run"
-                if en else "X11 DISPLAY 无法连接，地址栏搜索不会进行；请检查 DISPLAY / XAUTHORITY")
-    if why == "controller-failed":
-        return ("Keyboard controller failed to initialize; address-bar search "
-                "will not run" if en else "键盘控制器初始化失败，地址栏搜索不会进行")
-    raw = err[:48] if err else why
-    detail = f" ({raw})" if en else f"（{raw}）"
-    return ("Keyboard backend failed to initialize; address-bar search will not run" + detail
-            if en else "键盘后端运行时初始化失败，地址栏搜索不会进行" + detail)
 
 
 def _range_pair(value, fallback) -> tuple:
@@ -936,22 +918,33 @@ def _num(value) -> str:
 
 # ---------------------------------------------------------------- 启动时间档位
 #
-# 「+」不再弹 HH:MM 输入框：从 08:00 起每 30 分钟一档，自动补第一个空位。
-# 与 config.normalize_run_times() 的「最多 10 个、互不重复、HH:MM」约束一致。
+# 「+」左侧有一个时间输入框：**没手动填**时，从已有时间点里的最大值往后
+# 递增 30 分钟；列表为空则从 08:00 起。手动填了 HH:MM 就按填的来，不受
+# 半小时档限制。与 config.normalize_run_times() 的「最多 10 个、互不重复、
+# HH:MM」约束一致。
 
 SCHEDULE_FIRST_MIN = 8 * 60
 SCHEDULE_STEP_MIN = 30
-SCHEDULE_SLOTS = 32          # 08:00 → 23:30
+SCHEDULE_SLOTS = 48          # 一天 48 个半小时档，递增查找的上限
 SCHEDULE_MAX = 10
 
 
 def next_schedule_time(times) -> Optional[str]:
-    """返回 08:00 起第一个未被占用的半小时档；满 10 个或无空位返回 None。"""
-    existing = {str(t).strip() for t in (times or [])}
+    """从已有最大时间起按 30 分钟递增，返回第一个未占用的 HH:MM。
+
+    列表为空时以 08:00 为起点；跨过 24:00 回绕继续找。满 10 个或一天
+    48 个档位全被占用时返回 None。
+    """
+    existing = {str(x).strip() for x in (times or [])}
     if len(existing) >= SCHEDULE_MAX:
         return None
+    if existing:
+        peak = max(int(x[:2]) * 60 + int(x[3:]) for x in existing)
+        start = peak + SCHEDULE_STEP_MIN
+    else:
+        start = SCHEDULE_FIRST_MIN
     for step in range(SCHEDULE_SLOTS):
-        minutes = SCHEDULE_FIRST_MIN + step * SCHEDULE_STEP_MIN
+        minutes = (start + step * SCHEDULE_STEP_MIN) % (24 * 60)
         text = f"{minutes // 60:02d}:{minutes % 60:02d}"
         if text not in existing:
             return text

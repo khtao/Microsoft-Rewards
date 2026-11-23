@@ -48,7 +48,7 @@ flowchart TD
 | 任务提醒 | `remind_time` / `remind_time_value` / `evening_remind_time` / `evening_remind_time_value` |
 | 后台与通知 | `notify_after_sync` / `silent_when_all_done` / `close_to_tray` |
 | 拟人强度 低/中/高 | 一次写齐 `search_panel` 的 8 个执行参数；最多次数 20 / 16 / 12，实际次数 = min(ceil(剩余积分÷3), 上限) |
-| 时间胶囊 | `auto_run_times`（08:00 起每 30 分钟补第一个空档） |
+| 时间胶囊 | `auto_run_times`（最多 10 个；`+` 左侧输入框占位 `--:--`，四位数字自动补冒号，留空则 +30 分钟） |
 
 隐藏项由 `defaults_patch()` 一次性写成推荐默认值（带迁移标记，不覆盖用户后续选择）；既有配置由 `intensity_upgrade_patch()` / `repeat_upgrade_patch()` 平滑升级。`config.SEARCH_PANEL_KEYS` 是持久化白名单，`SearchPanel._collect()` 负责把参数透传给 `api.run_human_search()`。
 
@@ -115,7 +115,7 @@ Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `M
 
 macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.0_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
 
-依赖按用途分成三份清单，互不夹带：`requirements.txt` 只装运行时（`PySide6-Essentials` / `requests` / `playwright` / `pynput`），`requirements-build.txt` 追加 `pyinstaller`，`requirements-dev.txt` 追加 `pytest`。Qt 只用 Essentials 的核心模块，不安装 `PySide6-Addons`（QtWebEngine / Qt3D / QtCharts / QtMultimedia 均为项目不需要的扩展）。`requests` 是首选 HTTP 后端，缺失时 `HttpFetcher` 自动切到标准库 `urllib`。
+依赖按用途分成三份清单，互不夹带：`requirements.txt` 只装运行时（`PySide6-Essentials` / `requests` / `playwright`），`requirements-build.txt` 追加 `pyinstaller`，`requirements-dev.txt` 追加 `pytest`。Qt 只用 Essentials 的核心模块，不安装 `PySide6-Addons`（QtWebEngine / Qt3D / QtCharts / QtMultimedia 均为项目不需要的扩展）。`requests` 是首选 HTTP 后端，缺失时 `HttpFetcher` 自动切到标准库 `urllib`。
 
 `.github/workflows/build.yml` 把上述流程自动化：`test` job 先补 `libegl1` / `libgl1` 等 Qt 基础运行库（offscreen 只选平台插件，`libQt6Gui.so.6` 在 import 阶段就要解析 `libEGL.so.1`）并验证 Qt 模块可导入，再在 Qt offscreen 下跑离线测试与脚本语法检查；`ubuntu` job 在 ubuntu-22.04 上补齐 Qt xcb 运行库（该发行版缺 `libxcb-cursor0` 时降级为非致命警告）后调用 `build_deb.sh`，产出 `.deb`；`windows` job 在 windows-latest 上先跑 `build_windows.bat`，再用 Chocolatey 装的 Inno Setup 执行 `build_inno.bat --no-build`（不加 `--quiet`，保留 ISCC 日志），产出单文件 exe；cmd 步骤显式传递退出码。`macos` job 在 macos-latest 上运行 `build_macos.sh`，校验 `Info.plist` 版本、cocoa 平台插件、代码签名与 DMG 可读性后上传 `.dmg`。三个产物各作为 artifact 保留 30 天，推送 `v*` 标签时由 `release` job 先确认三平台包齐全再挂到 GitHub Release。Ubuntu 选 22.04 是为了让 glibc 基线覆盖更老的目标系统；版本号由 `config.APP_VERSION` 与 `setup.iss` 的 `MyAppVersion` 提供，macOS 由 spec 的 `BUNDLE` 读取同一个常量，workflow 不重复维护。
 
@@ -127,9 +127,11 @@ macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/
 - **抓取复用**：两页并发共用一个模块级固定 2 线程池，避免按小时反复同步时反复创建销毁线程；`requests.Session` 预检结果按类对象缓存（有界），单测替换 `Session` 时会自动重新预检。两页始终各自独立的 Session / opener 并发 GET，不共享连接池。
 - **HTML 解码按页进行**：DOM 徽章卡用原始 HTML，RSC / 积分卡用解码后的 HTML。`build_report()` 逐页「解码 → 解析 → 释放」，任何时刻最多驻留一份解码副本；`decode_payload()` 对无转义引号的普通 HTML 直接返回原串，不产生副本。`sync_once()` 在解析完成后立即断开 `PageResult.html` 的引用，写库与兼容桥构造期间不再持有两页大字符串。
 - **落库一次提交**：`Store.tx()` 可重入，任务批量 UPSERT、余额、页面真值与刷新汇总包成一个事务；`SyncWorker` 退出时 `close_thread_connection()` 关闭线程局部连接，不积累句柄。
-- **地址栏是真实 UI 自动化**：`omnibox.py` 用 pynput 的原生键盘后端把「定位 → 清空 → 粘贴搜索词 → 回车」发给前台 Edge 窗口，结果页由浏览器自己跳转，不调用 `page.goto`；修饰键用 `Controller.pressed()` 上下文保证释放，剪贴板写入中文搜索词后 `Ctrl+V`，不依赖逐字键入。`engines.run_search` 的页面搜索框路径保持原有节奏（50% 概率清空、按钮提交、`fix_input` 自检），两条路径只在输入框上分叉，结果阅读 / 点击 / 滚动共用一段代码。因为 omnibox 粘贴的是搜索词本身，`omnibox.status()` 会读 Edge 策略与 `Preferences` 的 `default_search_provider_data` 确认默认引擎是 Bing，非必应或键盘后端不可用时关闭该分支并在设置页给出文本提示。 Linux 上 `omnibox.keyboard_status()` 会把「未安装」「依赖缺失」「装了但没有有效 X11 DISPLAY」「控制器初始化失败」分开归类，`describe()` 输出含后端名与真实异常的一行文本；失败不写死缓存，会话恢复后同一进程内自动重试。Linux Wayland 会话由 XWayland 提供 `DISPLAY` 时，`platform_env.x11_ozone_needed()` 让 `browser.build_args()` 给有头 Edge 追加 `--ozone-platform=x11`，浏览器窗口与 pynput 的 XTEST 后端落在同一个 X server；无头同步、Xorg 会话、无 X server 的纯 Wayland、以及 `MS_REWARDS_NO_OZONE_X11=1` 均不注入，`launch_edge` 在该参数导致启动失败时还会自动去掉它重试。Windows / macOS 走 SendInput / Quartz 原生后端，不受 X11 限制。
+- **设置页正文字号单一来源**：`theme.stylesheet()` 的 `QLabel#body` 为 13px，与 `widgets.Row` 外观卡标签的 `font-size:13px` 一致；设置页构造段、5 行拟人参数、环境行名称与状态标记全部用这个 objectName，不再混用 `#tiny` 的 11px 或内联 12px。主页的 `#tiny` 徽章、卡片标题、编号与胶囊字号保持原样。`tools/render_previews.py` 离屏断言所有 `#body` 标签 `pixelSize()==13`，防止截图里正文字号漂移。
 - **跨层 helper 单一来源**：`row_access.get_field()` 统一 `sqlite3.Row` / dict / 对象的「缺字段返回默认值」规则，`sync` 与 `viewmodel` 共用同一函数；命中字段时直接下标取值，不做额外类型判断。浏览器启动错误分类共用 `browser._error_matches()`，淡入动画的结束清理共用 `effects._clear_fade()` / `_fade_restore()`。
 - **界面数据构造保持轻量**：`Settings` 复制 `DEFAULT_SETTINGS` 时只递归处理内建容器、标量直接返回；`viewmodel` 的 `timedelta` 在模块级导入，`calendar_week()` 一周只遍历一次，同时得到每天圆点状态与周合计；`group_tasks()` / `_points_by_day()` 的行取值走 `get_field()` 命中路径。
 - **只读口径**：只 GET `/dashboard` 与 `/earn` 两个白名单页面，不 POST、不点击、不搜索、不领取、不注入脚本；读不到不写 0、失败保留快照、运行期不同步。
+- **账号数据独立删除**：设置页「运行环境」的当前环境那一行提供两道确认的「删除账号」入口（均默认「否」），本机账号不再单独成卡，执行 `AuthManager().logout()` 清除当前实例的加密凭证、遗留明文文件与应用独立 profile 登录态；积分历史、设置与其它环境不动，删除后由本人重新登录。
+- **启动默认环境与环境删除**：`config.preferred_default_id()` 读根目录 `default_instance.json` 的指针，不带 `--instance` 时决定进入哪个环境；`__main__.main()` 在导入数据层前把 id 固定进环境变量，因此运行中改指针只影响下次启动。`instances._entry()` 为每行给出 `is_builtin_default` / `is_preferred_default` / `can_delete` / `can_set_default`，设置页据此把删除键放在名称旁：只允许删当前环境，内置根目录（同时是 `instances/` 的父目录）与启动默认环境都不显示删除键。`instances.delete_instance()` 用 `shutil.rmtree()` 只删 `instances/<id>/`，先清自启动项、再由界面关掉当前进程，避免 SQLite / 运行日志把目录重新建回来；两道确认均默认「否」。
 
 链路细节与约束以源码注释为准；本文件只描述当前结构，不记录开发过程。

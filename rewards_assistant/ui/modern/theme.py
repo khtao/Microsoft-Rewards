@@ -150,13 +150,22 @@ QFrame#heroBar {{
 QLabel {{ background: transparent; color: {c['text']}; }}
 QLabel#muted {{ color: {c['text_sub']}; }}
 QLabel#tiny {{ color: {c['text_muted']}; font-size: 11px; }}
+/* 设置页正文：字体家族沿用全局，字号与「外观」卡 Row 标签一致（13px）。
+   说明文字、环境行名称与状态标记全部用它，不再混用
+   #tiny 的 11px / 内联 12px。徽章与胶囊保留各自小字号以免溢出。 */
+QLabel#body {{ color: {c['text_sub']}; font-size: 13px; }}
+/* 设置页输入框（时间、环境名称）与正文同字号；占位色由控件 palette
+   随浅色/深色主题设置，QSS 不写死。无秒段、无上下箭头。 */
+QLineEdit#body {{ font-size: 13px; }}
+QLineEdit#body:focus {{ border-color: {c['primary']}; }}
+QLineEdit#body:disabled {{ color: {c['text_muted']}; }}
 QLabel#group {{ color: {c['text_sub']}; font-size: 12px; }}
 QLabel#cardTitle {{ font-weight: 600; font-size: 15px; }}
 QLabel#status {{ color: {c['text_sub']}; font-size: 12px; }}
 QPushButton {{
     background: {c['card']}; color: {c['text']};
     border: 1px solid {c['border']}; border-radius: 10px;
-    padding: 7px 12px;
+    padding: 7px 12px; font-size: 13px;
 }}
 QPushButton:hover {{ border-color: {c['primary']}; }}
 QPushButton:flat {{ border: none; background: transparent; color: {c['blue_chip_text']}; }}
@@ -173,8 +182,10 @@ QPushButton#primary[danger="true"]:disabled {{ background: {c['danger']}; }}
 QPushButton#icon {{ border: none; background: transparent; font-size: 17px; padding: 4px; }}
 QPushButton#seg {{
     border: none; background: transparent; color: {c['text_sub']};
-    border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    border-radius: 8px; padding: 6px 10px; font-size: 13px;
 }}
+/* 环境行按钮：紧凑内边距，保证「删除账号 / 设为默认」四字文案完整显示。 */
+QPushButton#envBtn {{ padding: 5px 8px; font-size: 13px; }}
 QPushButton#seg:checked {{
     background: {c['segment_on']}; color: {c['text']}; font-weight: 600;
 }}

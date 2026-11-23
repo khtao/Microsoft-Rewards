@@ -59,6 +59,11 @@ def test_macos_script_is_self_contained_and_guards_bundle():
 def test_spec_bundle_branch_is_darwin_only():
     src = _text(SPEC)
     tree = ast.parse(src)
+    # darwin 分支用 sys.platform；精简 hiddenimports 时不能把 import sys 删掉，
+    # 否则 macOS 构建会在 spec 执行阶段直接 NameError（Linux 构建不会触发）。
+    imports = {alias.name for node in tree.body
+               if isinstance(node, ast.Import) for alias in node.names}
+    assert "sys" in imports
     branches = [n for n in tree.body
                 if isinstance(n, ast.If) and "darwin" in ast.unparse(n.test)]
     assert len(branches) == 1
