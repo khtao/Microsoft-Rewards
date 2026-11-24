@@ -32,7 +32,7 @@ python -m pip install -r requirements.txt
 python -m rewards_assistant
 ```
 
-运行时只有三个依赖：`PySide6-Essentials`、`requests`、`playwright`。首次启动后点右上角设置 → **打开浏览器登录**，在弹出的 Edge 窗口里登录并完成 MFA，再点「我已完成登录」即可开始同步。
+运行时只有三个依赖：`PySide6-Essentials`、`requests`、`playwright`。首次启动后点右上角设置 → **打开浏览器登录**，登录窗口里的循环动图会把五步流程演一遍；在弹出的 Edge 窗口里登录并完成 MFA，再点「我已完成登录」即可开始同步。
 
 ### 安装包
 

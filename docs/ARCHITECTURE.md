@@ -101,6 +101,7 @@ flowchart LR
 - `HttpFetcher.fetch_many()` 实现与 `BrowserSessionFetcher` 相同的 `ReadOnlyFetcher` 接口：每页一个独立 `requests.Session`（Session 不保证线程安全），两页在共享的固定 2 线程池里并发；单页异常只返回 `transient`，不误判登录失效。无凭证时直接返回 `signed_out`，连网络往返都省掉。
 - `default_fetcher()` 恒返回 `HttpFetcher`。`BrowserSessionFetcher` 只保留给登录窗口与「退出登录」清理 profile 使用，不在同步热路径上；`profile_guard` 只保护登录 / 清理这两类低频浏览器操作。
 - 会话工厂预检会真实构造一次 `requests.Session`：系统环境中若被 `lazy_import` 不可调用代理污染，整轮切到标准库 `urllib` 后端；运行时若仍遇到 `not callable`，该页再用标准库重试一次。两页始终并发，后端切换不改变五态判定。
+- **登录对话框不堆说明文字**：`ui/login_guide.py` 用 `QPainter` 画 5 帧循环插画（点按钮 → 独立 Edge 里本人登录 → 短信 / 验证器确认 → 回来点「我已完成登录」→ 凭证加密留本机、只读两页），`QTimer` 40ms 驱动帧内微动（流动光点、光标浮动、按钮呼吸）与帧间交叉淡入，底部只留一行随帧切换的短句和 5 个步骤圆点。实时绘制不依赖打包环境未必提供的动图解码插件；`tools/render_login_guide.py` 用同一套 `paint_guide()` 离屏导出 `login_flow.gif` 与浅色 / 深色对话框预览。配色取自当前主题，状态行也统一走主题色，深色下可读。
 
 ## 积分赚取日历
 

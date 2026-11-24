@@ -87,6 +87,9 @@ hiddenimports += [
     'rewards_assistant.ui.modern.main_window',
     'rewards_assistant.ui.modern.effects',
     'rewards_assistant.ui.legacy',
+    # 登录对话框的流程插画在运行时用 QPainter 绘制；显式登记，避免
+    # 某些 hook 组合把延迟导入的模块漏出 Analysis。
+    'rewards_assistant.ui.login_guide',
 ]
 
 a = Analysis(

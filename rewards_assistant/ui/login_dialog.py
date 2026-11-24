@@ -34,8 +34,32 @@ from ..session import (
     DEGRADED, SIGNED_IN, SIGNED_OUT, TRANSIENT_ERROR, ProfileBusyError,
     login_poll_state, profile_guard, short_error,
 )
+from .login_guide import LoginGuideWidget, guide_palette
 
 BASE = "https://rewards.bing.com"
+
+
+def _dialog_qss(pal: dict) -> str:
+    """独立 QDialog 不继承主窗口的 widget 级样式，这里按当前主题配一套。"""
+    hover = pal.get("primary_hover", pal["primary"])
+    return f"""
+QDialog {{ background: {pal['window']}; }}
+QLabel#loginTitle {{
+    color: {pal['text']}; font-size: 15px; font-weight: 600;
+}}
+QLabel#loginStatus {{ color: {pal['text_sub']}; font-size: 12px; }}
+QPushButton {{
+    background: {pal['card']}; color: {pal['text']};
+    border: 1px solid {pal['border']}; border-radius: 8px;
+    padding: 6px 14px; font-size: 13px; min-height: 18px;
+}}
+QPushButton:hover {{ border-color: {pal['primary']}; }}
+QPushButton:disabled {{ color: {pal['text_muted']}; }}
+QPushButton#loginPrimary {{
+    background: {pal['primary']}; color: #ffffff; border: none;
+}}
+QPushButton#loginPrimary:hover {{ background: {hover}; }}
+"""
 
 
 def worker_running(worker) -> bool:
@@ -161,38 +185,28 @@ class LoginDialog(QDialog):
     def __init__(self, parent: Optional[QDialog] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("登录 Microsoft Rewards")
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(604)
         self._probe: Optional[ProbeWorker] = None
         self._login: Optional[LoginWorker] = None
         self._logout: Optional[LogoutWorker] = None
         self._pending_login = False
 
-        tip = QLabel(
-            "<h3>浏览器会话登录</h3>"
-            "<ol>"
-            "<li>点「打开浏览器登录」，应用会打开一个独立的 Edge 窗口</li>"
-            "<li>在该窗口里<b>由你本人</b>完成账号登录（含短信 / MFA 验证）</li>"
-            "<li>回到本对话框点「<b>我已完成登录</b>」，窗口才会关闭并自动检测</li>"
-            "</ol>"
-            "<p>登录窗口<b>不会自动关闭</b>；应用不代填密码，会话 Cookie 只"
-            "<b>加密保存在本机</b>，不上传、不打印、不写成明文。</p>"
-            "<p style='color:#c92a2a'>同步只读取 /dashboard 与 /earn 两个页面。</p>"
-        )
-        tip.setWordWrap(True)
-        tip.setOpenExternalLinks(True)
+        # 流程用 5 帧循环插画演示（含淡入、流动光点与光标微动），
+        # 说明文字压成画板底部随帧切换的一行短句；不再堆整段有序列表与附注。
+        self._pal = guide_palette()
+        self.setStyleSheet(_dialog_qss(self._pal))
 
-        self.status = QLabel("尚未检测会话状态；点「检测会话」可随时复查。")
+        title = QLabel("登录 Microsoft Rewards")
+        title.setObjectName("loginTitle")
+
+        self.guide = LoginGuideWidget()
+
+        self.status = QLabel("尚未检测会话状态")
+        self.status.setObjectName("loginStatus")
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("color:#495057;font-size:12px;")
-
-        self.notice = QLabel("")
-        self.notice.setWordWrap(True)
-        self.notice.setStyleSheet("color:#6b7280;font-size:12px;")
-        self.notice.setText(
-            "登录完成后，会话 Cookie 会加密保存在本机数据目录；"
-            "同步只发两个只读 GET，不上传、不打印凭证。")
 
         self.login_btn = QPushButton("打开浏览器登录")
+        self.login_btn.setObjectName("loginPrimary")
         self.login_btn.setDefault(True)
         self.login_btn.clicked.connect(self._on_login_button)
         self.probe_btn = QPushButton("检测会话")
@@ -203,6 +217,7 @@ class LoginDialog(QDialog):
         self.close_btn.clicked.connect(self.close)
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addWidget(self.login_btn)
         row.addWidget(self.probe_btn)
         row.addWidget(self.clear_btn)
@@ -210,10 +225,11 @@ class LoginDialog(QDialog):
         row.addWidget(self.close_btn)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(tip)
-        lay.addWidget(self.notice)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
+        lay.addWidget(title)
+        lay.addWidget(self.guide)
         lay.addWidget(self.status)
-        lay.addStretch(1)          # 状态紧贴说明，不再被拉到对话框中间
         lay.addLayout(row)
 
         # 不在构造时自动探测：它会打开第二个持久 profile，与登录窗口抢
@@ -225,12 +241,24 @@ class LoginDialog(QDialog):
     def _is_running(worker) -> bool:
         return worker_running(worker)
 
-    def _set_busy(self, busy: bool, text: str = "", color: str = "#2f6fed") -> None:
+    _STATUS_KEYS = {
+        "normal": "text_sub", "busy": "primary", "ok": "green",
+        "warn": "orange", "err": "warn",
+    }
+
+    def _set_status(self, text: str, kind: str = "normal") -> None:
+        """状态行统一走主题色，深浅色主题下都可读。"""
+        key = self._STATUS_KEYS.get(kind, "text_sub")
+        self.status.setText(text)
+        self.status.setStyleSheet(
+            f"color:{self._pal.get(key, '#7b8798')};font-size:12px;")
+
+    def _set_busy(self, busy: bool, text: str = "",
+                  kind: str = "normal") -> None:
         for btn in (self.login_btn, self.probe_btn, self.clear_btn):
             btn.setEnabled(not busy)
         if text:
-            self.status.setText(text)
-        self.status.setStyleSheet(f"color:{color if busy else '#495057'};font-size:12px;")
+            self._set_status(text, kind)
 
     def _set_login_running(self, running: bool, text: str = "") -> None:
         self.login_btn.setEnabled(True)   # 这个按钮要用来「完成登录」
@@ -247,17 +275,16 @@ class LoginDialog(QDialog):
             return
         ok = state in (SIGNED_IN, DEGRADED)
         if state == SIGNED_IN:
-            label, color = "✅ 会话有效，可以只读同步。", "#2b8a3e"
+            label, kind = "✅ 会话有效，可以只读同步。", "ok"
         elif state == DEGRADED:
-            label, color = "⚠ 会话可用但部分页面未读到，将降级同步。", "#e67700"
+            label, kind = "⚠ 会话可用但部分页面未读到，将降级同步。", "warn"
         elif state == SIGNED_OUT:
-            label, color = "❌ 未登录：请点「打开浏览器登录」由本人完成登录。", "#c92a2a"
+            label, kind = "❌ 未登录：请点「打开浏览器登录」由本人完成登录。", "err"
         elif state == TRANSIENT_ERROR:
-            label, color = "⚠ " + (reason or "服务暂时不可用"), "#e67700"
+            label, kind = "⚠ " + (reason or "服务暂时不可用"), "warn"
         else:
-            label, color = "❓ 会话状态未知，请点「检测会话」复查。", "#495057"
-        self._set_busy(False, label, color)
-        self.status.setStyleSheet(f"color:{color};font-size:12px;")
+            label, kind = "❓ 会话状态未知，请点「检测会话」复查。", "normal"
+        self._set_busy(False, label, kind)
         self.login_state_changed.emit(ok)
         # 之前因「正在检测会话」而排队的登录请求，现在可以安全启动
         if getattr(self, "_pending_login", False):
@@ -299,7 +326,7 @@ class LoginDialog(QDialog):
     def check_status(self) -> None:
         if self._is_running(self._probe):
             return  # 已有探测在跑，避免重复启动
-        self._set_busy(True, "正在只读检测会话…")
+        self._set_busy(True, "正在只读检测会话…", "busy")
         worker = ProbeWorker(self)
         self._probe = worker
         worker.done.connect(self._apply_state)
@@ -317,8 +344,7 @@ class LoginDialog(QDialog):
         # 正在探测时不要阻塞 GUI 线程 wait()，登记成待办，探测结束后自动打开
         if self._is_running(self._probe):
             self._pending_login = True
-            self.status.setText("正在结束会话检测，稍后自动打开登录窗口…")
-            self.status.setStyleSheet("color:#2f6fed;font-size:12px;")
+            self._set_status("正在结束会话检测，稍后自动打开登录窗口…", "busy")
             return
         # wrapper 悬空（isRunning 抛 RuntimeError）时清掉引用，照常启动
         if self._probe is not None and not self._is_running(self._probe):
@@ -327,8 +353,7 @@ class LoginDialog(QDialog):
             self._logout = None
 
         self._set_login_running(True)
-        self.status.setText("已打开浏览器窗口，请在窗口中完成登录…")
-        self.status.setStyleSheet("color:#2f6fed;font-size:12px;")
+        self._set_status("已打开浏览器窗口，请在窗口中完成登录…", "busy")
         worker = LoginWorker(self)          # parent 位置正确
         self._login = worker
         worker.state.connect(self.status.setText)
@@ -344,8 +369,7 @@ class LoginDialog(QDialog):
 
     def _finish_login(self) -> None:
         """用户确认完成：中断线程 → 等 ctx.close() 释放 profile → 再只读探测。"""
-        self.status.setText("正在关闭登录窗口并复查会话…")
-        self.status.setStyleSheet("color:#2f6fed;font-size:12px;")
+        self._set_status("正在关闭登录窗口并复查会话…", "busy")
         worker = self._login
         if worker is None:
             self.check_status()
@@ -361,8 +385,7 @@ class LoginDialog(QDialog):
         if closed:
             self.check_status()
         else:
-            self.status.setText("⚠ 窗口关闭超时，请稍后点「检测会话」复查。")
-            self.status.setStyleSheet("color:#e67700;font-size:12px;")
+            self._set_status("⚠ 窗口关闭超时，请稍后点「检测会话」复查。", "warn")
 
     def _on_login_done(self, ok: bool, message: str) -> None:
         # _finish_login 已把 _login 置空，此时状态由 check_status 接管，不覆盖
@@ -371,15 +394,13 @@ class LoginDialog(QDialog):
         self._login = None
         self._set_login_running(False)
         if ok:
-            self.status.setText("✅ " + message)
-            self.status.setStyleSheet("color:#2b8a3e;font-size:12px;")
+            self._set_status("✅ " + message, "ok")
         else:
-            self.status.setText("⚠ " + message)
-            self.status.setStyleSheet("color:#e67700;font-size:12px;")
+            self._set_status("⚠ " + message, "warn")
 
     def clear_session(self) -> None:
         CookieStore().clear()
-        self._set_busy(True, "正在清除本地会话…")
+        self._set_busy(True, "正在清除本地会话…", "busy")
         worker = LogoutWorker(self)
         self._logout = worker
         worker.done.connect(self._on_logout_done)
@@ -388,8 +409,7 @@ class LoginDialog(QDialog):
 
     def _on_logout_done(self, message: str) -> None:
         self._set_busy(False)
-        self.status.setText(message)
-        self.status.setStyleSheet("color:#495057;font-size:12px;")
+        self._set_status(message)
         self.login_state_changed.emit(False)
 
     # ------------------------------------------------------------ 关闭保护
