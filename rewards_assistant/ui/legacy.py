@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from .. import debug_log
 from ..api import default_log_path, run_human_search
 from ..browser import browser_error_hint, find_edge_binary, is_root
 from ..pending import planned_rounds
@@ -72,6 +73,8 @@ class SearchWorker(QThread):
             self.sig.finished.emit(self.report)
         except Exception as e:
             raw = f"{type(e).__name__}: {e}"
+            debug_log.error("search", "拟人搜索运行器异常", exc=e,
+                            repeat=self.params.get("repeat"))
             # 先发一条单行完整原因，再把堆栈压成一行短帧，保证任何截断
             # 长度下都留得下有用信息。
             from ..session import redact

@@ -8,8 +8,9 @@ REM  completely self-contained and needs nothing at install time (no Inno
 REM  Setup, no .NET, no VC++ redist, no companion files).
 REM
 REM  Pure ASCII + CRLF, no code page switching. No CMD/VBS install logic at all:
-REM  shortcuts, Start Menu group, uninstaller and registry entry are all
-REM  handled natively by Inno Setup from setup.iss.
+REM  shortcuts, Start Menu group, uninstaller, registry entry, language
+REM  detection, "all users" choice, old-version uninstall and the finishing
+REM  page "Open" checkbox are all handled natively by Inno Setup.
 REM
 REM  Usage:  installer\build_inno.bat [options] ["C:\path\ISCC.exe"]
 REM            --no-build   do not run build_windows.bat if dist is missing
@@ -20,6 +21,8 @@ REM ===========================================================================
 for %%A in ("%~dp0..") do set "ROOT=%%~fA"
 set "ISS=%ROOT%\installer\setup.iss"
 set "ICO=%ROOT%\assets\icons\app.ico"
+set "MSGEN=%ROOT%\installer\Messages.en.isl"
+set "MSGZH=%ROOT%\installer\Messages.zh.isl"
 set "DIST=%ROOT%\dist\MSRewardsAssistant"
 set "OUT=%ROOT%\MSRewardsAssistantSetup.exe"
 set "NOBUILD=0"
@@ -72,6 +75,8 @@ REM ---- [2/5] Inputs ---------------------------------------------------------
 echo [2/5] Checking inputs ...
 if not exist "%ISS%" goto :noiss
 if not exist "%ICO%" goto :noico
+if not exist "%MSGEN%" goto :nomsg
+if not exist "%MSGZH%" goto :nomsg
 if exist "%DIST%\MSRewardsAssistant.exe" goto :have_dist
 if "%NOBUILD%"=="1" goto :nodist
 echo        dist not found - calling build_windows.bat (may take a few minutes)...
@@ -84,17 +89,20 @@ if not exist "%DIST%\MSRewardsAssistant.exe" goto :nodist
 :have_dist
 echo        dist : OK
 echo        icon : OK
+echo        custom messages : OK
 
 REM ---- [3/5] Language + optional GUI IDE ------------------------------------
 echo [3/5] Compiler options ...
 set "LANGSW="
 if "%ENGLISH%"=="1" goto :eng
 if exist "%ISCDIR%Languages\ChineseSimplified.isl" goto :zh
-echo        ChineseSimplified.isl not found - using English wizard.
+echo        ChineseSimplified.isl not found - English-only wizard.
+echo        (system language following still works: English everywhere)
 set "LANGSW=/DEnglishOnly=1"
 goto :langdone
 :zh
-echo        ChineseSimplified.isl found - Chinese + English wizard.
+echo        ChineseSimplified.isl found - wizard follows the system UI language:
+echo        zh-CN = Chinese, all other systems = English. No language dialog.
 goto :langdone
 :eng
 echo        --english specified - English-only wizard.
@@ -129,10 +137,14 @@ echo [5/5] Done.
 echo.
 for %%A in ("%OUT%") do echo    Setup package : %OUT%  size=%%~zA bytes
 echo    Distribute this ONE exe. Double-click for a graphical wizard.
-echo    It creates the desktop shortcut, Start Menu group and uninstall entry,
-echo    installs to %%LOCALAPPDATA%%\Programs\MSRewardsAssistant, no UAC.
+echo    Wizard language follows the system (Chinese on zh-CN, English elsewhere).
+echo    The wizard offers "Install for all users" (UAC) or "Just for me" (no UAC),
+echo    uninstalls any older version first (user data is kept), and shows an
+echo    "Open MSRewardsAssistant" checkbox on the finishing page.
 echo.
-echo    Silent install  : MSRewardsAssistantSetup.exe /VERYSILENT
+echo    Silent install  : MSRewardsAssistantSetup.exe /VERYSILENT /SP- /CURRENTUSER
+echo    All users      : MSRewardsAssistantSetup.exe /VERYSILENT /SP- /ALLUSERS
+echo    Force language : MSRewardsAssistantSetup.exe /LANG=english
 echo    Silent uninstall: "%%LOCALAPPDATA%%\Programs\MSRewardsAssistant\unins000.exe" /VERYSILENT
 echo.
 exit /b 0
@@ -160,6 +172,13 @@ goto :fail
 echo.
 echo [ERROR] Missing %ICO% (used by SetupIconFile in setup.iss).
 echo         Re-copy the assets\icons folder, or remove SetupIconFile.
+goto :fail
+:nomsg
+echo.
+echo [ERROR] Missing custom message file: %MSGEN% or %MSGZH%
+echo         Re-copy the whole installer\ folder from the project zip; both
+echo         .isl files must ship next to setup.iss (they carry the localised
+echo         "Open MSRewardsAssistant" finishing-page checkbox text).
 goto :fail
 :nodist
 echo.

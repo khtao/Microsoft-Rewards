@@ -15,23 +15,42 @@
   浏览器会把用户带到错账号；这里连 user-data-dir 都挂在 ``data_dir()`` 下，
   按实例隔离，目录族与自动化任务分开，互不 prune。
 * 领取动作必须由本人在官网右上角「准备领取」面板完成；应用只负责把窗口
-  带到那个页面，并在窗口关闭后清理临时 profile。
+  带到那个页面，并在窗口关闭后清理临时 profile、触发一次积分同步。
+
+关闭检测的兜底
+--------------
+persistent context 被用户手动关掉时，不同 Playwright / Edge 版本对
+``page.is_closed()`` / ``wait_for_event("close")`` 的表现并不一致：进程整体
+退出后页面对象可能既不变 closed 也不抛异常，轮询就一直挂着，关窗后的自动
+同步永远不触发。因此这里同时做三件事：
+
+1. 注册 ``page/context close`` 与 ``page crash`` 事件回调；
+2. 用 ``page.wait_for_timeout()`` 泵 Playwright 事件循环（同步 API 只在调用
+   期间派发事件），并轮询 ``page.is_closed()``；
+3. 从**成功打开页面**起计时，若 ``CLAIM_SYNC_FALLBACK_SECONDS``（30 秒）内
+   仍没捕获到关闭事件，就调用 ``on_close_undetected`` 让控制器兜底刷新一次
+   积分状态。兜底只补同步、不强行关掉用户可能还在用的窗口。
 """
 from __future__ import annotations
 
+import random
+import time
 from typing import Any, Callable, Optional
 
+from . import debug_log
 from .browser import (cleanup_automation_profile, launch_automation_edge,
                       browser_error_hint)
 from .credentials import CookieStore
 from .readonly_report import parse_points_trio
 from .session import HttpFetcher
-from .timing import sleep_jitter
+from .timing import jitter, sleep_jitter
 
 # 官方说明：可领取积分只能在 rewards.bing.com 领取，右上角「准备领取」面板。
 CLAIM_URL = "https://rewards.bing.com/dashboard"
 CLAIM_PROFILE_DIRNAME = "claim_edge_profile"
 CLAIM_NAV_TIMEOUT_MS = 30000
+# 关闭事件检测失败时，从「成功打开领取页」算起多久兜底刷新积分。
+CLAIM_SYNC_FALLBACK_SECONDS = 30.0
 
 LogFn = Optional[Callable[[str, str], None]]
 
@@ -98,7 +117,11 @@ def verify_claim_session(store, log: LogFn = None):
 
 def open_claim_window(store=None, url: str = CLAIM_URL, log: LogFn = None,
                       wait_for_close: bool = True,
-                      stop_event: Any = None) -> bool:
+                      stop_event: Any = None,
+                      on_opened: Optional[Callable[[], None]] = None,
+                      on_close_undetected: Optional[Callable[[], None]] = None,
+                      fallback_seconds: float = CLAIM_SYNC_FALLBACK_SECONDS,
+                      clock: Optional[Callable[[], float]] = None) -> bool:
     """打开当前账号的领取页并保持窗口，直到用户关闭或应用退出。
 
     这是给后台线程调用的同步函数。``ClaimUnavailable`` / 启动异常都由调用方
@@ -106,12 +129,24 @@ def open_claim_window(store=None, url: str = CLAIM_URL, log: LogFn = None,
     ``wait_for_close=False`` 供离线测试使用；``stop_event`` 由控制器在退出时
     set，让轮询在 0.3 秒内收尾并关闭 Edge，避免留下孤儿窗口与临时 profile。
 
-    用轮询 ``page.is_closed()`` 而不是 ``page.wait_for_event("close")``：后者
-    在 persistent context 被整体关闭时可能直接抛 TargetClosedError，且各版本
-    对 ``timeout=0`` 的语义不一致。
+    ``on_opened`` 在页面 ``goto`` 成功后调用一次；若 30 秒内没检测到关闭
+    事件，``on_close_undetected`` 被调用一次，控制器据此补一次积分同步。
+    ``clock`` 只用于离线测试注入单调时钟。
     """
     store = store or CookieStore()
     verify_claim_session(store, log)
+
+    monotonic = clock or time.monotonic
+    rng = random.Random()
+
+    def fire(cb: Optional[Callable[[], None]]) -> None:
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as exc:
+            _note(log, "callback_error", f"{type(exc).__name__}: {exc}")
+            debug_log.error("claim", "领取窗口回调失败", exc=exc)
 
     pw_cm = _playwright()
     with pw_cm as pw:
@@ -121,22 +156,85 @@ def open_claim_window(store=None, url: str = CLAIM_URL, log: LogFn = None,
         try:
             pages = list(getattr(ctx, "pages", []) or [])
             page = pages[0] if pages else ctx.new_page()
+
+            # 事件回调 + 轮询双保险：persistent context 整体退出时，单靠
+            # is_closed() 可能既不返回 True 也不抛异常。
+            closed = [False]
+
+            def _mark_closed(*_a, **_k):
+                closed[0] = True
+
+            for obj, event in ((page, "close"), (ctx, "close"),
+                               (page, "crash")):
+                try:
+                    obj.on(event, _mark_closed)
+                except Exception:
+                    pass                  # 离线桩 / 旧版本没有 on()
+
             page.goto(url, wait_until="domcontentloaded",
                       timeout=CLAIM_NAV_TIMEOUT_MS)
+            opened_at = monotonic()
             _note(log, "claim_open",
                   f"{instance_tag()}：已打开领取页 {url}（请本人在官网领取）")
+            debug_log.debug("claim", "领取页已打开",
+                            instance=instance_tag(), url=url,
+                            fallback_seconds=fallback_seconds)
+            fire(on_opened)               # 控制器记录「已成功打开」
+
             if wait_for_close:
+                fallback_fired = False
                 # 窗口由用户手动关闭；期间线程常驻，不占用 UI 事件循环。
                 while True:
                     if stop_event is not None and stop_event.is_set():
                         _note(log, "claim_close", "应用退出，关闭领取窗口")
                         break
+                    if closed[0]:
+                        _note(log, "claim_close", "已捕获领取窗口关闭事件")
+                        break
                     try:
                         if page.is_closed():
+                            closed[0] = True
+                            _note(log, "claim_close", "领取页面已关闭")
                             break
-                    except Exception:
-                        break                 # context 被整体关闭
-                    sleep_jitter(0.2, 0.45)
+                    except Exception as exc:
+                        closed[0] = True
+                        _note(log, "claim_close",
+                              f"页面状态查询异常，按已关闭处理：{type(exc).__name__}")
+                        debug_log.warn("claim", "领取页状态查询异常", exc=exc)
+                        break
+
+                    # Playwright 同步 API 只在调用期间派发事件；wait_for_timeout
+                    # 既让出时间片又泵事件循环，close/crash 回调才会被触发。
+                    wait_s = jitter(0.2, 0.45, rng)
+                    try:
+                        pump = getattr(page, "wait_for_timeout", None)
+                        if callable(pump):
+                            pump(int(wait_s * 1000))
+                        else:
+                            sleep_jitter(0.2, 0.45)
+                    except Exception as exc:
+                        closed[0] = True
+                        _note(log, "claim_close",
+                              f"事件泵异常，按已关闭处理：{type(exc).__name__}")
+                        debug_log.warn("claim", "领取页事件泵异常", exc=exc)
+                        break
+
+                    # 兜底：关闭事件始终没来，也要在打开 30 秒后刷新积分。
+                    if (not fallback_fired and fallback_seconds > 0
+                            and monotonic() - opened_at >= fallback_seconds):
+                        fallback_fired = True
+                        _note(log, "claim_sync_fallback",
+                              f"未捕获关闭事件，打开 {fallback_seconds:g} 秒后"
+                              "兜底刷新积分状态")
+                        debug_log.warn("claim", "关闭事件检测失败，触发兜底同步",
+                                       instance=instance_tag(),
+                                       fallback_seconds=fallback_seconds)
+                        fire(on_close_undetected)
+        except Exception as exc:
+            _note(log, "claim_error", f"{type(exc).__name__}: {exc}")
+            debug_log.error("claim", "领取窗口运行异常", exc=exc,
+                            instance=instance_tag())
+            raise
         finally:
             try:
                 ctx.close()

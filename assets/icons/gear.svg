@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 顶部栏设置齿轮：中性灰描边，浅色 / 深色主题都清晰；矢量渲染，
+       与品牌图标、标题文字固定在同一行高内。 -->
+  <g fill="none" stroke="#8895A8" stroke-width="4.4" stroke-linecap="round">
+    <circle cx="32" cy="32" r="18"/>
+    <circle cx="32" cy="32" r="7.6"/>
+    <path d="M32 7 V14 M32 50 V57 M7 32 H14 M50 32 H57
+             M14.3 14.3 L19.2 19.2 M44.8 44.8 L49.7 49.7
+             M49.7 14.3 L44.8 19.2 M19.2 44.8 L14.3 49.7"/>
+  </g>
+</svg>

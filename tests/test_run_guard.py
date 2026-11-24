@@ -122,7 +122,8 @@ def test_primary_button_becomes_stop_and_sync_entries_are_disabled(wired, monkey
     assert win.home.primary.property("danger") == "true"   # 运行期红色
     assert win.home.primary.isEnabled()
     assert not win.home.ring.isEnabled()
-    assert not win.home.logo.isEnabled()
+    # 顶栏品牌图标是纯展示 QLabel，不随运行状态禁用（只有圆环刷新被禁用）。
+    assert win.home.logo.isEnabled()
     assert not win.act_sync.isEnabled()
 
     win.home.primary.click()
@@ -164,7 +165,9 @@ def test_activity_completion_never_syncs_mid_run():
     body = src.split("def _on_activity_completed", 1)[1].split("\n    def ", 1)[0]
     assert "sync_now(" not in body
     assert "fetch_dashboard" not in body
-    assert "_start_pc_search()" in body
+    # 搜索已并入同一个 ActivityWorker，不再关掉浏览器另起 SearchRunner。
+    assert "_start_pc_search()" not in body
+    assert 'stats.get("search")' in body
     assert "运行结束后统一同步" in body
 
 

@@ -11,7 +11,7 @@
 它克制得有点固执：
 
 - **只读**：登录之后同步只发两个 GET，不代填密码、不导出 Cookie、不自动领取积分。首次登录由你本人在弹出的 Edge 窗口完成（含 MFA），凭证加密后只留在本机。
-- **本地**：积分记录、设置与运行日志都在自己的数据目录里；每个环境各自独立，多开也不会串号。
+- **本地**：积分记录、设置与运行日志都在自己的数据目录里；每个环境各自独立，多开也不会串号。日志分两层：`run.log` 是日常操作流水，另有一份带完整错误堆栈的 `debug.log`；导出的日志包与网页快照包文件名都带日期时间。
 - **顺手**：浅色 / 深色 / 跟随系统、中文 / English、动画常开、不用鼠标悬浮提示；定时运行最多 10 个时间点，托盘里就能一键同步。
 - **该手动的手动**：领取积分请到官网自己点。项目里那个实验性的自动完成任务链路只作辅助；Microsoft Rewards 要求奖励搜索由用户本人手动进行，**不要依赖它获取积分**。
 
@@ -40,7 +40,7 @@ python -m rewards_assistant
 
 | 平台 | 产物 | 安装方式 |
 | --- | --- | --- |
-| Windows | `MSRewardsAssistantSetup.exe` | 双击走中文向导，当前用户级安装，不弹 UAC |
+| Windows | `MSRewardsAssistantSetup.exe` | 双击走安装向导（界面跟随系统语言：中文／英文），可选为所有用户安装，装完可直接打开 |
 | Ubuntu / Debian | `ms-rewards-assistant_2.1_amd64.deb` | `sudo apt install ./ms-rewards-assistant_2.1_amd64.deb` |
 | macOS | `MSRewardsAssistant_2.1_<arch>.dmg` | 打开后把 .app 拖进 Applications |
 

@@ -7,6 +7,14 @@
 * 用 SVG 而不是位图：托盘只有 16px，位图缩到这个尺寸会糊成一团，
   矢量渲染任意尺寸都清晰，且只需一个 1KB 的文件。
 
+顶部栏图标（assets/icons/brand.svg / gear.svg）
+---------------------------------------------
+* ``brand.svg``：橙色渐变圆环 + 白色五角星 = 积分奖章，替代早期那枚
+  被当作「刷新按钮」使用的放大镜；现在它是**纯展示的品牌图标**，刷新只由
+  中央进度圆环承担。
+* ``gear.svg``：矢量齿轮，和标题文字、品牌图标固定同一行高，不再依赖
+  ``⚙`` 这类高度随字体变化的 emoji 字形。
+
 加载顺序（任何一步失败都不会让程序起不来）：
 1. SVG 矢量渲染（首选）
 2. 同尺寸/最接近尺寸的 PNG
@@ -44,15 +52,15 @@ def icons_dir() -> Path:
     return cands[-1]
 
 
-def _render_svg(size: int) -> QPixmap:
-    """把 app.svg 渲染成指定尺寸的 QPixmap；失败返回空图。"""
+def _render_svg(size: int, name: str = "app.svg") -> QPixmap:
+    """把指定 SVG 渲染成 size×size 的 QPixmap；失败返回空图。"""
     try:
         from PySide6.QtCore import QByteArray
         from PySide6.QtSvg import QSvgRenderer
     except ImportError:
         return QPixmap()
 
-    path = icons_dir() / "app.svg"
+    path = icons_dir() / name
     if not path.is_file():
         return QPixmap()
     try:
@@ -135,6 +143,69 @@ def _draw_fallback(size: int) -> QPixmap:
     p.drawEllipse(QPointF(px(32), px(42.6)), px(2.2), px(2.2))
     p.end()
     return pm
+
+
+def _star_polygon(cx: float, cy: float, r_out: float, r_in: float,
+                  points: int = 5):
+    pts = []
+    for i in range(points * 2):
+        r = r_out if i % 2 == 0 else r_in
+        a = -math.pi / 2 + math.pi * i / points
+        pts.append(QPointF(cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
+
+def _draw_brand_fallback(size: int) -> QPixmap:
+    """brand.svg 缺失时用 QPainter 画同款「积分奖章」，保证界面照样能跑。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    s = size / 64.0
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(BRAND))
+    p.drawEllipse(QPointF(32 * s, 32 * s), 28 * s, 28 * s)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(255, 255, 255, 235), 2.4 * s))
+    p.drawEllipse(QPointF(32 * s, 32 * s), 21 * s, 21 * s)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPolygon(_star_polygon(32 * s, 32 * s, 15 * s, 6.5 * s))
+    p.end()
+    return pm
+
+
+def _draw_gear_fallback(size: int, color: str) -> QPixmap:
+    """gear.svg 缺失时画齿轮环 + 八齿 + 中心孔；颜色跟随当前主题。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    s = size / 64.0
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(color), 4.4 * s, Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.RoundCap))
+    p.drawEllipse(QPointF(32 * s, 32 * s), 18 * s, 18 * s)
+    p.drawEllipse(QPointF(32 * s, 32 * s), 7.6 * s, 7.6 * s)
+    for i in range(8):
+        a = math.pi * i / 4
+        x1, y1 = 32 * s + 20 * s * math.cos(a), 32 * s + 20 * s * math.sin(a)
+        x2, y2 = 32 * s + 27 * s * math.cos(a), 32 * s + 27 * s * math.sin(a)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    p.end()
+    return pm
+
+
+def brand_pixmap(size: int = 24) -> QPixmap:
+    """顶部栏品牌图标（积分奖章），优先 brand.svg，缺失时现画同款造型。"""
+    pm = _render_svg(size, "brand.svg")
+    return pm if not pm.isNull() else _draw_brand_fallback(size)
+
+
+def gear_pixmap(size: int = 20, color: str = "#8895A8") -> QPixmap:
+    """顶部栏设置齿轮，优先 gear.svg；缺失时用主题色现画。"""
+    pm = _render_svg(size, "gear.svg")
+    return pm if not pm.isNull() else _draw_gear_fallback(size, color)
 
 
 def app_icon(size: int = 64) -> QIcon:

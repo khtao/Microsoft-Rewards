@@ -2,7 +2,10 @@
 
 唯一界面的控制器：``_ensure_window()`` 创建 ``ui.modern.ModernMainWindow``，
 托盘「自动完成未完成任务」与主界面主按钮都落到 ``run_pending_tasks()``，
-执行链路与经典窗口共用同一份 Python 代码。
+执行链路与经典窗口共用同一份 Python 代码。整轮自动任务（活动卡片点击 +
+电脑端拟人搜索）在 **同一个真实 Edge** 里完成：Playwright 同步对象不能跨
+线程复用，因此由 ``ActivityWorker`` 持有唯一的 ``pw`` / ``context`` / ``page``
+并把它们注入 ``api.run_human_search()``，不再关掉浏览器后重新打开。
 """
 from __future__ import annotations
 
@@ -18,11 +21,11 @@ from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import autostart
+from . import autostart, debug_log
 from .activity_worker import ActivityWorker
 from .auth import AuthManager
-from .claim import (CLAIM_URL, claim_ready, open_claim_window,
-                    short_claim_error)
+from .claim import (CLAIM_SYNC_FALLBACK_SECONDS, CLAIM_URL, claim_ready,
+                    open_claim_window, short_claim_error)
 from .credentials import CookieStore
 from .config import (APP_TITLE, APP_VERSION, Settings, instance_id,
                      instance_label, single_instance_key, win_app_id,
@@ -59,8 +62,12 @@ class Application(QObject):
 
     # 领取窗口在后台线程里等用户关闭；结束时回到主线程复位卡片闸门，
     # 并补一次同步（用户手动关窗即视为领取完成）。
+    # claim_opened 在页面成功打开后发出；若 30 秒内关闭事件始终没捕获到，
+    # claim_fallback_sync_requested 触发兜底刷新（去重，避免与关窗同步连发）。
     claim_finished = Signal()
+    claim_opened = Signal()
     claim_sync_requested = Signal()
+    claim_fallback_sync_requested = Signal()
 
     def __init__(self, argv: list) -> None:
         super().__init__()
@@ -94,8 +101,12 @@ class Application(QObject):
         self._claim_opening = False
         self._claim_thread: Optional[threading.Thread] = None
         self._claim_stop = threading.Event()
+        # 一次领取只同步一次：正常关窗与 30 秒兜底共用这个去重标志。
+        self._claim_sync_done = False
         self.claim_finished.connect(self._on_claim_finished)
+        self.claim_opened.connect(self._on_claim_opened)
         self.claim_sync_requested.connect(self._on_claim_closed)
+        self.claim_fallback_sync_requested.connect(self._on_claim_sync_fallback)
 
         # 逐个打开任务页的调度器（第一个立即，之后随机间隔）
         self._opener = PendingOpener(self._gap_seconds,
@@ -535,8 +546,36 @@ class Application(QObject):
     def activity_running(self) -> bool:
         return self._activity_worker is not None and self._activity_worker.isRunning()
 
+    def _pending_search_params(self) -> Optional[dict]:
+        """本轮待办电脑端搜索的参数；没有待办或来源为空时返回 None。"""
+        if self.window is None:
+            return None
+        from .ui.legacy import SearchRunner
+        try:
+            config = self.window.search._collect()
+        except Exception as exc:
+            config = dict(self.settings.get("search_panel", {}) or {})
+            debug_log.warn("auto_run", "读取搜索表单失败，改用已保存设置",
+                           exc=exc)
+        try:
+            params = SearchRunner.for_pending(self.store, config)
+        except Exception as exc:
+            debug_log.error("auto_run", "计算本轮搜索参数失败", exc=exc)
+            return None
+        if params is None:
+            return None
+        if not params.get("keyword_sources") and not params.get("keywords"):
+            self._log("搜索词来源为空，跳过本轮拟人搜索")
+            return None
+        return params
+
     def _start_activity_clicks(self, tasks: list, *, then_search: bool = False) -> None:
-        """使用真实 Edge 鼠标点击侧栏卡片；整轮结束后统一同步核验。"""
+        """一个真实 Edge 里先点击活动卡片、再拟人搜索；整轮结束后统一同步。
+
+        Playwright 同步对象不能跨线程复用，所以搜索不再另起 ``SearchWorker``
+        （那会关掉这个 Edge 再开一个新的），而是把同一个 ``context`` / ``page``
+        注入 ``api.run_human_search()``，在 ActivityWorker 的线程内续跑。
+        """
         if self.activity_running() or self.window.runner.is_running():
             self._log("活动点击或电脑端搜索正在执行，不重复启动")
             return
@@ -550,20 +589,26 @@ class Application(QObject):
         try:
             # 优先使用账户设置当前表单值，和电脑端搜索共用 profile 等配置。
             options.update(self.window.search._collect())
-        except Exception:
-            pass
+        except Exception as exc:
+            debug_log.warn("auto_run", "读取搜索表单失败，改用已保存设置",
+                           exc=exc)
+        search_params = self._pending_search_params() if then_search else None
         worker = ActivityWorker(
             tasks, browser_options=options,
-            gap_range=(5, 10),
+            gap_range=(5, 10), search_params=search_params,
             parent=self,
         )
         self._activity_worker = worker
-        self._activity_then_search = then_search
+        # 搜索已并入同一个 worker，不再需要「结束后再起一轮搜索」的后续动作。
+        self._activity_then_search = False
         worker.progress.connect(self._on_activity_progress)
         worker.completed.connect(self._on_activity_completed)
         worker.finished.connect(lambda: self._on_activity_worker_exited(worker))
         worker.finished.connect(worker.deleteLater)
         worker.start()
+        debug_log.debug("auto_run", "自动任务启动（单浏览器）",
+                        tasks=len(tasks),
+                        with_search=search_params is not None)
         self.window.update_running_state()
 
     def _on_activity_progress(self, message: str) -> None:
@@ -576,17 +621,21 @@ class Application(QObject):
                   f"状态将在运行结束后统一同步核验")
         if stats.get("error"):
             self._log("活动点击错误：" + stats["error"])
+        search = stats.get("search") or {}
+        if search:
+            self._log(f"同一浏览器内拟人搜索完成：成功 {search.get('ok', 0)} / "
+                      f"失败 {search.get('fail', 0)}，"
+                      f"点击 {search.get('clicked', 0)} 次")
+        if stats.get("search_error"):
+            self._log("拟人搜索失败：" + stats["search_error"])
         if stats.get("stopped"):
             self._activity_then_search = False
-            self._set_open_progress("已停止活动自动点击")
+            self._set_open_progress("已停止自动任务")
         else:
             self._set_open_progress(
                 f"活动点击 {stats['clicked']}/{stats['total']}；"
                 f"运行结束后统一同步核验")
-            if self._activity_then_search:
-                # 不再插一次同步：直接续跑电脑端搜索，整轮结束才同步。
-                self._activity_then_search = False
-                self._start_pc_search()
+        # 不插同步、不另起搜索：整个链路结束后由 _on_auto_run_finished 补同步。
         self.window.update_running_state()
 
     def _on_activity_worker_exited(self, worker) -> None:
@@ -704,6 +753,7 @@ class Application(QObject):
         if not self.claim_available():
             return
         self._claim_opening = True
+        self._claim_sync_done = False
         self._claim_stop.clear()
         self._sync_claim_card()
         self._show_claim_opening()
@@ -715,10 +765,15 @@ class Application(QObject):
             try:
                 opened = bool(open_claim_window(
                     store=store, url=CLAIM_URL, stop_event=self._claim_stop,
+                    on_opened=lambda: self.claim_opened.emit(),
+                    on_close_undetected=(
+                        lambda: self.claim_fallback_sync_requested.emit()),
                     log=lambda a, d: self._claim_log(f"[领取] {tag} {a} {d}".strip())))
             except Exception as exc:
                 # 会话失效 / 官网已无可领取 / 浏览器启动失败：静默，不弹提示。
                 self._claim_log(f"[领取] {tag} 未打开：{short_claim_error(exc)}")
+                debug_log.error("claim", "领取窗口未能打开", exc=exc,
+                                instance=tag)
             finally:
                 self.claim_finished.emit()
                 # 用户手动关闭领取窗口 = 领取完成；应用退出触发的关闭不同步。
@@ -744,12 +799,33 @@ class Application(QObject):
             except Exception:
                 pass
 
+    def _on_claim_opened(self) -> None:
+        """领取页成功打开：记录细目，兜底时钟在 claim.py 的轮询里计时。"""
+        self._claim_sync_done = False
+        self._log(f"领取页已打开；若未检测到关闭事件，"
+                  f"{int(CLAIM_SYNC_FALLBACK_SECONDS)} 秒后自动刷新积分")
+        debug_log.debug("claim", "领取页打开，兜底计时开始",
+                        fallback_seconds=CLAIM_SYNC_FALLBACK_SECONDS)
+
+    def _on_claim_sync_fallback(self) -> None:
+        """关闭事件检测失败：距成功打开 30 秒，兜底刷新一次积分状态。"""
+        if self._claim_sync_done:
+            return
+        self._log("未检测到领取窗口关闭事件，按兜底策略刷新积分")
+        debug_log.warn("claim", "关闭事件未捕获，触发 30 秒兜底同步",
+                       fallback_seconds=CLAIM_SYNC_FALLBACK_SECONDS)
+        self._on_claim_closed()
+
     def _on_claim_closed(self) -> None:
-        """领取窗口由用户手动关闭：回到主线程自动同步一次积分。"""
+        """关窗或兜底：回到主线程自动同步一次积分（两者只触发一次）。"""
+        if self._claim_sync_done:
+            return
+        self._claim_sync_done = True
         try:
             self.sync_now(auto=True)
         except Exception as exc:
             self._log(f"领取后自动同步失败：{type(exc).__name__}")
+            debug_log.error("claim", "领取后自动同步失败", exc=exc)
 
     # ------------------------------------------------------------------ 同步
 
@@ -840,6 +916,7 @@ class Application(QObject):
 
     def _on_sync_fail(self, message: str) -> None:
         self._syncing = False
+        debug_log.error("sync", "同步失败", detail=message)
         # 读取不完整 / 未登录 / 网络异常：本地可领取值只是旧快照，卡片无动作。
         self._last_sync_ok = False
         self._sync_enrich_current = False

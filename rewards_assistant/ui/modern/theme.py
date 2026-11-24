@@ -180,6 +180,16 @@ QPushButton#primary[danger="true"] {{
 QPushButton#primary[danger="true"]:hover {{ background: {c['danger_hover']}; }}
 QPushButton#primary[danger="true"]:disabled {{ background: {c['danger']}; }}
 QPushButton#icon {{ border: none; background: transparent; font-size: 17px; padding: 4px; }}
+/* 顶部栏：品牌图标 / 标题 / 登录状态 / 齿轮固定同一行高（24px），
+   文字字号统一 16px（与「积分管理助手」标题一致）。品牌图标是纯展示
+   QLabel，不是刷新按钮；刷新只由中央进度圆环承担。 */
+QLabel#brandIcon {{ min-height: 24px; max-height: 24px; }}
+QLabel#topTitle {{ font-size: 16px; font-weight: 700; min-height: 24px; max-height: 24px; }}
+QPushButton#topAction {{
+    border: none; background: transparent; font-size: 16px;
+    padding: 0px 4px; min-height: 24px; max-height: 24px;
+}}
+QPushButton#topAction:hover {{ background: {c['primary_soft']}; border-radius: 8px; }}
 QPushButton#seg {{
     border: none; background: transparent; color: {c['text_sub']};
     border-radius: 8px; padding: 6px 10px; font-size: 13px;

@@ -326,7 +326,7 @@ def test_activity_completion_cancels_followup_when_stopped():
             self._activity_then_search = True
             self.calls = []
             self.window = SimpleNamespace(update_running_state=lambda: None)
-        def _log(self, msg): pass
+        def _log(self, msg): self.calls.append(msg)
         def _set_open_progress(self, msg): self.calls.append(msg)
         def _start_pc_search(self): self.calls.append('search')
         def sync_now(self, auto): self.calls.append(('sync', auto))
@@ -340,10 +340,16 @@ def test_activity_completion_cancels_followup_when_stopped():
     stats['stopped'] = False
     obj._activity_then_search = True
     finish(obj, stats)
-    # 运行期间禁止同步：不再插入 sync_now，直接续跑搜索并登记「结束后统一同步」。
+    # 运行期间禁止同步；搜索已在同一个 ActivityWorker 里跑完，
+    # 结束时只汇总统计，不再关掉浏览器另起 _start_pc_search()。
     assert obj._after_sync == set()
     assert ('sync', True) not in obj.calls
-    assert 'search' in obj.calls
+    assert 'search' not in obj.calls
+    stats['search'] = {'ok': 3, 'fail': 0, 'clicked': 1, 'seconds': 12.5}
+    obj.calls.clear()
+    finish(obj, stats)
+    assert any('拟人搜索完成' in str(c) for c in obj.calls)
+    assert 'search' not in obj.calls
     assert obj._after_sync == set()
     assert ('sync', True) not in obj.calls
 

@@ -10,9 +10,11 @@
   设置页接到控制器上，不再有第二套同步或调度代码；
 * 主页「自动完成任务」与托盘「自动完成未完成任务」最终都调用
   ``Application.run_pending_tasks()`` — **与经典界面完全同一份 Python 代码**：
-  先同步官方状态 → 点击未完成活动卡片（ActivityWorker，运行期不核验）→
-  未完成的电脑端搜索（SearchRunner.for_pending → run_human_search）→
-  整轮结束后统一同步一次核验；
+  先同步官方状态 → 点击未完成活动卡片 → 未完成的电脑端拟人搜索 →
+  整轮结束后统一同步一次核验。两个阶段由 ``ActivityWorker`` 在**同一个
+  Edge** 内完成（把 context/page 注入 ``api.run_human_search``），不再
+  关掉浏览器后重新打开；只有「没有活动卡片、只跑搜索」时才由
+  ``SearchRunner`` 独立启动一次浏览器；
 * 设置项直接写入经典控制器读取的 ``Settings`` 键（见 ``viewmodel.CLASSIC_BINDING``），
   不再是纯展示的假偏好。
 
@@ -27,15 +29,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFontMetrics, QPalette
+from PySide6.QtCore import QEvent, QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QFontMetrics, QIcon, QPalette
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
-from ... import instances
+from ... import debug_log, instances
 from ...auth import AuthManager
 from ...browser import browser_error_hint
 from ...config import (Settings, data_dir, instance_label,
@@ -46,6 +48,7 @@ from ...session import ALLOWED_PATHS, default_fetcher, redact
 from ...storage import Store, day_str
 from ...sync import sync_once
 from ...ui.legacy import QuickPanel, SearchPanel, SearchRunner
+from ...ui.icons import brand_pixmap, gear_pixmap
 from ...ui.login_dialog import LoginDialog
 from . import effects, theme, viewmodel as vm
 from .viewmodel import (calendar_days, calendar_months,
@@ -54,6 +57,30 @@ from .viewmodel import (calendar_days, calendar_months,
                         settings_values, tr)
 from .widgets import (CalendarGrid, Card, GroupBlock, RingProgress, Row,
                       Segmented, StatCard, StatusChip, Switch, TimeChip)
+
+
+# 顶部栏统一行高：品牌图标 / 标题 / 登录状态 / 齿轮严格等高，字号统一 16px。
+TOPBAR_ROW_H = 24
+
+# 导出的日志包 / 关键页面包都带 YYYYmmdd_HHMMSS 后缀，避免多次导出互相覆盖。
+_EXPORT_STAMP_RE = re.compile(r"_\d{8}_\d{6}$")
+
+
+def timestamped_zip_name(stem: str, now: Optional[datetime] = None) -> str:
+    """默认导出名：``run-log_20261124_153012.zip``。"""
+    now = now or datetime.now()
+    return f"{stem}_{now:%Y%m%d_%H%M%S}.zip"
+
+
+def ensure_timestamped_zip(path: str, now: Optional[datetime] = None) -> str:
+    """用户在保存对话框里改了名字也补上时间戳；已有合法后缀则原样保留。"""
+    p = Path(path)
+    stem = p.stem
+    if _EXPORT_STAMP_RE.search(stem):
+        return str(p)
+    now = now or datetime.now()
+    suffix = p.suffix.lower() if p.suffix.lower() in (".zip",) else ".zip"
+    return str(p.with_name(f"{stem}_{now:%Y%m%d_%H%M%S}{suffix}"))
 
 
 def should_hide_in_tray(controller) -> bool:
@@ -133,7 +160,8 @@ class CaptureRunner(QThread):
     def run(self) -> None:
         try:
             pages = default_fetcher().fetch_many(ALLOWED_PATHS)
-            notes = ["只读抓取的页面源码。可能含账户信息，请勿公开分享。"]
+            notes = ["只读抓取的页面源码。可能含账户信息，请勿公开分享。",
+                     f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}"]
             entries: List[Tuple[str, str]] = []
             usable_count = 0
             for path in ALLOWED_PATHS:
@@ -170,7 +198,11 @@ class CaptureRunner(QThread):
                     z.writestr(name, text)
                 z.writestr("README.txt", "\n".join(notes) + "\n")
             self.done.emit(str(self.target))
+            debug_log.debug("capture", "关键页面 zip 已生成",
+                            target=str(self.target), pages=usable_count)
         except Exception as exc:
+            debug_log.error("capture", "关键页面抓取/打包失败", exc=exc,
+                            target=str(self.target))
             self.fail.emit(redact(str(exc))[:220])
 
 
@@ -197,26 +229,43 @@ class HomePage(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
-        self.logo = QPushButton("🔍")
-        self.logo.setObjectName("icon")
-        self.logo.clicked.connect(self._on_refresh_clicked)
+        top.setSpacing(8)
+        top.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        # 品牌图标：积分奖章（橙色圆环 + 星），纯展示、不可点击、不触发刷新。
+        # 早期那枚放大镜同时充当刷新按键，语义与外观都不贴主题，已移除。
+        self.logo = QLabel()
+        self.logo.setObjectName("brandIcon")
+        self.logo.setFixedSize(TOPBAR_ROW_H, TOPBAR_ROW_H)
+        self.logo.setPixmap(brand_pixmap(TOPBAR_ROW_H))
+        self.logo.setScaledContents(True)
+        self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top.addWidget(self.logo)
         self.title = QLabel(tr(self._lang, "app_title"))
-        self.title.setStyleSheet("font-size:16px;font-weight:700;")
+        self.title.setObjectName("topTitle")
+        self.title.setFixedHeight(TOPBAR_ROW_H)
+        self.title.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(self.title)
         if not is_default_instance():
             # 多开时一眼分清当前是哪个账号的环境；默认环境保持原样。
             badge = QLabel("· " + instance_label())
             badge.setObjectName("tiny")
+            badge.setFixedHeight(TOPBAR_ROW_H)
+            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter)
             top.addWidget(badge)
         top.addStretch(1)
         self.login_badge = QPushButton("🏅 " + tr(self._lang, "unknown"))
-        self.login_badge.setObjectName("icon")
-        self.login_badge.setStyleSheet("color:" + theme.current()["orange"] + ";font-size:12px;")
+        self.login_badge.setObjectName("topAction")
+        self.login_badge.setFixedHeight(TOPBAR_ROW_H)
+        self.login_badge.setStyleSheet(
+            "color:" + theme.current()["orange"] + ";font-size:16px;")
         self.login_badge.clicked.connect(app.open_login)
         top.addWidget(self.login_badge)
-        gear = QPushButton("⚙")
-        gear.setObjectName("icon")
+        gear = QPushButton()
+        gear.setObjectName("topAction")
+        gear.setFixedHeight(TOPBAR_ROW_H)
+        gear.setIcon(QIcon(gear_pixmap(20, theme.current()["text_sub"])))
+        gear.setIconSize(QSize(20, 20))
+        gear.setAccessibleName(tr(self._lang, "settings"))
         gear.clicked.connect(app.show_settings)
         top.addWidget(gear)
         lay.addLayout(top)
@@ -343,7 +392,7 @@ class HomePage(QWidget):
         # 停止请求发出后立刻禁用按钮，避免连点造成重复停止/误触。
         self.primary.setEnabled(not self._stopping and not self._sync_busy)
         self.ring.setEnabled(not self._running and not self._sync_busy)
-        self.logo.setEnabled(not self._running and not self._sync_busy)
+        # self.logo 是纯展示品牌图标（QLabel），不是刷新入口，无需禁用。
 
     def set_busy(self, busy: bool) -> None:
         """同步进行中：禁用主按钮与刷新入口；运行期主按钮仍可点（作为停止）。"""
@@ -351,7 +400,6 @@ class HomePage(QWidget):
         self._apply_primary_style()
         self.primary.setEnabled(not self._sync_busy and not self._stopping)
         self.ring.setEnabled(not self._sync_busy and not self._running)
-        self.logo.setEnabled(not self._sync_busy and not self._running)
 
     def set_language(self, lang: str) -> None:
         self.title.setText(tr(lang, "app_title"))
@@ -1367,9 +1415,11 @@ class ModernMainWindow(QWidget):
     # ------------------------------------------------------------ 日志 / 抓取
 
     def log(self, message: str) -> None:
+        """日常操作级流水（run.log）+ 同条 INFO 进 debug.log 形成完整时间线。"""
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {redact(message)}"
         self._log_lines.append(line)
         self._log_lines = self._log_lines[-500:]
+        debug_log.info("ui", redact(message))
         if self.prefs.get("ui_log_enabled", True):
             try:
                 with (data_dir() / "run.log").open("a", encoding="utf-8") as f:
@@ -1378,28 +1428,47 @@ class ModernMainWindow(QWidget):
                 pass
 
     def export_logs(self) -> None:
+        default = str(data_dir() / timestamped_zip_name("run-log"))
         path, _ = QFileDialog.getSaveFileName(
-            self, tr(self.lang, "export_logs"),
-            str(data_dir() / "run-log.zip"), "Zip (*.zip)")
+            self, tr(self.lang, "export_logs"), default, "Zip (*.zip)")
         if not path:
             return
+        path = ensure_timestamped_zip(path)
         try:
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-                z.writestr("run.log", "\n".join(self._log_lines) + "\n")
+                # 落盘的完整流水优先；内存里的最后 500 行另存一份，避免重名覆盖。
                 legacy = data_dir() / "run.log"
                 if legacy.exists():
                     z.write(legacy, arcname="run.log")
-                z.writestr("README.txt", "运行日志已脱敏；分享前请再自行检查。")
+                    z.writestr("run-session.log",
+                               "\n".join(self._log_lines) + "\n")
+                else:
+                    z.writestr("run.log", "\n".join(self._log_lines) + "\n")
+                dbg = debug_log.debug_log_path()
+                if dbg.exists():
+                    z.write(dbg, arcname="debug.log")
+                notes = [
+                    "运行日志已脱敏；分享前请再自行检查。",
+                    f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
+                    "run.log / run-session.log：日常操作级流水（INFO）。",
+                    "debug.log：DEBUG 细目与 ERROR 完整堆栈，含异常类型、",
+                    "traceback 与上下文键值，用于排查问题。",
+                ]
+                z.writestr("README.txt", "\n".join(notes) + "\n")
             self.home.set_detail("运行日志已导出：" + path)
+            self.log("已导出运行日志 zip：" + Path(path).name)
+            debug_log.debug("export", "运行日志 zip 已导出", path=path)
         except Exception as exc:
+            debug_log.error("export", "导出运行日志失败", exc=exc, path=path)
             self.home.set_detail("导出失败：" + redact(str(exc))[:100])
 
     def capture_html(self) -> None:
+        default = str(data_dir() / timestamped_zip_name("rewards-pages"))
         path, _ = QFileDialog.getSaveFileName(
-            self, tr(self.lang, "capture_html"),
-            str(data_dir() / "rewards-pages.zip"), "Zip (*.zip)")
+            self, tr(self.lang, "capture_html"), default, "Zip (*.zip)")
         if not path:
             return
+        path = ensure_timestamped_zip(path)
         self.home.set_detail("正在只读抓取 /dashboard 与 /earn …")
         runner = CaptureRunner(Path(path), self)
         runner.done.connect(lambda p: (self.home.set_detail("已保存：" + p),

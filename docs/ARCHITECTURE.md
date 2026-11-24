@@ -58,6 +58,8 @@ flowchart TD
 
 「可领取」卡由 `claim_ready()` 统一把关（积分 > 0、登录态、凭证、无同步/运行/已有领取窗口、最近同步成功）。放行时 `StatCard` 变手形并在 `enterEvent` 把标签换成「点击领取」；点击后 `Application.open_claim_page()` 调 `StatusChip.set_green_hint()`，圆环下用完成态绿色显示「正在打开浏览器...」。领取窗口在后台线程里等用户关闭；正常关闭后 `claim_sync_requested` 回到主线程触发 `sync_now(auto=True)`，`claim_finished` 负责复位闸门。`stop_event` 被设置（应用退出）或窗口启动失败时不发同步信号。
 
+**关闭检测失败也要刷新积分**：persistent context 被整体关掉时，各版本 Playwright 对 `page.is_closed()` / `wait_for_event("close")` 的表现并不一致（可能既不返回 closed 也不抛异常），单靠轮询会让「关窗后自动同步」永远不触发。因此 `claim.open_claim_window()` 同时注册 `page/context close` + `page crash` 回调、用 `page.wait_for_timeout()` 泵同步 API 的事件循环、再轮询 `page.is_closed()`；从**成功打开领取页**（`on_opened`）起计时，若 `CLAIM_SYNC_FALLBACK_SECONDS = 30` 秒内仍没捕获到关闭事件，就发 `claim_fallback_sync_requested` 让控制器兜底刷新一次积分状态，不强行关掉用户可能还在用的窗口。兜底与正常关窗共用 `_claim_sync_done` 去重，一次领取最多同步一次。`Application._on_claim_opened()` 只记 DEBUG 与状态行，不提前同步。
+
 纯界面偏好只有 `ui_language` / `ui_theme` / `ui_calendar_view`。
 
 ## 搜索次数与强度档位
@@ -125,11 +127,15 @@ SyncWorker（同步未完成任务）→ ActivityWorker（活动卡点击）
 
 启动健壮性：`launch_edge()` 在 `channel="msedge"` 解析不到 Edge 时自动改用 `find_edge_binary()` 的绝对路径；`launch_automation_edge()` 对占用类错误换全新空目录重试、对参数不兼容类错误（`Unexpected option` / `no_viewport` / `permissions` 等）降级为最小参数集重试，其余错误（没装 Edge、凭证为空）直接给出明确提示、不空转。
 
-日志与可观测性：`launch_automation_edge(log=...)` 把 `credentials`（凭证条数）、`profile`（全新空目录）、`edge`（启动成功/失败）、`cookies`（注入条数）逐阶段写进运行日志；`api.run_human_search()` 在启动异常分支先写 `browser_error: 异常类型: 原因`，再安全 `pw.stop()` 并以 `session_end error: 原因` 收尾，主循环异常的 `finally` 同样区分 `ok` / `error`。`SearchWorker` 先发一条单行完整原因（`error`），再把栈帧压成一行（`trace`）；界面日志上限 500 字符，原因不会被截断。
+日志与可观测性分两层：`run.log` 保持**日常操作级**（INFO）流水，给用户看、导出时分享也放心；`debug_log.py` 另写 `debug.log`，提供 `debug / info / warn / error` 四级细目——浏览器启动阶段、活动卡片命中、搜索轮次、领取窗口事件都带键值上下文，`error` 还附异常类型、完整 traceback 与 `__cause__` 链。ERROR 同时在 `run.log` 留一行不带堆栈的摘要。所有内容经 `session.redact()` 脱敏（凭证 / Bearer / token / 邮箱）后，再按 `browser_error_hint` 同款规则抹掉 `C:\Users\...` / `/home/...` 这类本机绝对路径；堆栈**逐行**脱敏，避免「更细致的错误记录」反而泄漏本机信息。`debug_log_enabled`（默认开）或 `MS_REWARDS_DEBUG=0` 可关闭 DEBUG 细目，ERROR 详细记录始终写入；`debug.log` 与 `run.log` 一样按实例隔离。
 
-运行期互斥：`Application.auto_running()` 为真时，`sync_now()` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，主按钮同时通过 `danger` 动态属性切到红色 QSS（浅色 / 深色各一套），窗口统一禁用 `act_sync` / 圆环 / 顶部放大镜，并锁定停止按钮防连点。
+`launch_automation_edge(log=...)` 把 `credentials`（凭证条数）、`profile`（全新空目录）、`edge`（启动成功/失败）、`cookies`（注入条数）逐阶段写进运行日志；`api.run_human_search()` 在启动异常分支先写 `browser_error: 异常类型: 原因`，再安全 `pw.stop()` 并以 `session_end error: 原因` 收尾，主循环异常的 `finally` 同样区分 `ok` / `error`。`SearchWorker` 先发一条单行完整原因（`error`），再把栈帧压成一行（`trace`）；界面日志上限 500 字符，原因不会被截断。导出运行日志 zip 会同时打包 `run.log` / `run-session.log` 与 `debug.log`，并在 README 写明两者用途。`export_logs` / `capture_html` 的默认文件名与用户改名后的最终路径都经 `ensure_timestamped_zip()` 补 `YYYYmmdd_HHMMSS` 后缀，多次导出不互相覆盖；关键页面 zip 的 README 也记录导出时间。
 
-主页交互：`RingProgress` 是 `QAbstractButton`，本身就是唯一的显式手动刷新入口（任务卡头部不设文字按钮）。hover 时 1500ms 无限呼吸动画驱动光晕透明度、弧宽、外扩 2px、末端高光点、中心字号，圆环内小字从「今日任务」换成「点击刷新」——用内置文字而非悬浮提示框表达可点击性；移出 / 禁用立即归零。点击与左上角放大镜都走 `HomePage._on_refresh_clicked()`，运行期或同步期直接 return。任务行的 `numBadge` 统一使用绿色圆角徽章，搜索 60 分与活动 `+10` 完全一致。整轮结束的 `running → idle` 边沿调用 `_on_auto_run_finished()`，只补一次同步（`_post_run_sync_pending` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
+运行期互斥：`Application.auto_running()` 为真时，`sync_now()` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，主按钮同时通过 `danger` 动态属性切到红色 QSS（浅色 / 深色各一套），窗口统一禁用 `act_sync` / 圆环，并锁定停止按钮防连点；顶栏品牌图标是纯展示 `QLabel`，不随运行状态禁用。
+
+主页交互：`RingProgress` 是 `QAbstractButton`，本身就是唯一的显式手动刷新入口（任务卡头部不设文字按钮）。hover 时 1500ms 无限呼吸动画驱动光晕透明度、弧宽、外扩 2px、末端高光点、中心字号，圆环内小字从「今日任务」换成「点击刷新」——用内置文字而非悬浮提示框表达可点击性；移出 / 禁用立即归零。顶栏左侧不再是放大镜按钮：早期那枚 `🔍` 同时充当刷新入口，语义与「积分管理助手」主题都不贴；现在换成 `assets/icons/brand.svg` 的**积分奖章**（橙色渐变圆环 + 白色五角星），是纯展示 `QLabel#brandIcon`，不绑定 `clicked`、不触发刷新。齿轮也改用 `assets/icons/gear.svg` 矢量图标（替代高度随字体变化的 `⚙` emoji），`icons.py` 的 `brand_pixmap()` / `gear_pixmap()` 优先渲染 SVG，资源缺失时用 QPainter 画同款造型兜底。品牌图标 / 标题 / 登录状态 / 齿轮由 `TOPBAR_ROW_H = 24` 与 `QLabel#topTitle` / `QPushButton#topAction` 的 QSS 固定**等高、统一 16px 字号**；刷新只由圆环承担，运行期或同步期点击圆环直接 return。任务行的 `numBadge` 统一使用绿色圆角徽章，搜索 60 分与活动 `+10` 完全一致。整轮结束的 `running → idle` 边沿调用 `_on_auto_run_finished()`，只补一次同步（`_post_run_sync_pending` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
+
+**自动完成任务全程共用一个浏览器**：Playwright 同步对象绑定创建它的线程/greenlet，跨线程复用会报 `Cannot switch to a different thread`。旧实现里 `ActivityWorker` 点完卡片就关掉 Edge、`SearchWorker` 再起一份全新 Playwright + Edge，用户看到的就是「浏览器关掉又重新打开」。现在 `_start_activity_clicks()` 用 `SearchRunner.for_pending()` 预先算好搜索参数，`ActivityWorker(..., search_params=...)` 在同一个线程里持有唯一的 `pw` / `context` / `page`：点击阶段结束后把该对象注入 `api.run_human_search(page=..., context=..., close_browser=False)` 续跑拟人搜索，`finally` 里才统一 `ctx.close()` / `pw.stop()` / 清理临时 profile。整轮只有一次 Edge 启动、一次关闭；`_on_activity_completed()` 只汇总 `stats["search"]`，不再调用 `_start_pc_search()`，运行期也不插同步。只有「没有活动卡片、只跑搜索」时才由 `SearchRunner` 独立启动一次浏览器。
 
 Microsoft Rewards 要求奖励搜索由本人手动进行，不建议用它获取积分；详见 README 的合规章节。
 
@@ -137,7 +143,7 @@ Microsoft Rewards 要求奖励搜索由本人手动进行，不建议用它获�
 
 `build_ubuntu.sh` / `build_windows.bat` / `build_deb.sh` / `build_macos.sh` 都使用统一的 `MSRewardsAssistant.spec`：图标、可选字体、Playwright 驱动由 spec 收集，Qt 模块交给 PyInstaller 官方 hook 按 import 图收集；`shiboken6` 动态库显式平铺到 `_internal` 根目录并由 `normalize_bundle.py` 校验。`.deb` 的版本号取自 `config.APP_VERSION`（当前 `2.1`）。构建一律使用系统 Python（不创建虚拟环境），避免 `site-packages` 混用引入 `lazy_import` 代理污染；源码运行时仍可用虚拟环境。Windows 侧构建脚本与 `tools/normalize_bundle.py` 的输出保持纯 ASCII，并对 stdout / stderr 设 `backslashreplace`：CI 以管道捕获输出（cp1252），`chcp` 不作用于管道，中文路径与消息都不会让构建中断。
 
-Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`：图形化中文向导、当前用户级安装（不弹 UAC）、桌面与开始菜单图标、HKCU 卸载项；版本号同为 `2.1`。详见 [installer/README.md](../installer/README.md)。
+Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`，版本号同为 `2.1`：向导语言按系统 UI 自动选（`LanguageDetectionMethod=uilanguage` + `ShowLanguageDialog=no`，english 列在首位作回落，自定义文案放在 `Messages.en.isl` / `Messages.zh.isl`）；`PrivilegesRequired=lowest` + `OverridesAllowed=dialog` 提供「为所有用户安装 / 仅为我安装」，`{autopf}` 让一条 `DefaultDirName` 同时适配两种模式；`[Code]` 在 `InitializeSetup` 里按 AppId 查 HKCU / HKLM 卸载项、等待旧版静默卸载完成再装（只清 `{app}`，用户数据目录不动）；完成页的中英双语「打开」复选框由 `[Run] postinstall skipifsilent` 提供。详见 [installer/README.md](../installer/README.md)。
 
 macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.1_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
 

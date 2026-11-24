@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from . import debug_log
 from .engines import ENGINES, resolve_engine, run_search
 from .human import Budget, Human
 from .trends import Keyword, get_keyword_pool
@@ -293,6 +294,8 @@ def run_human_search(
             from .session import redact
             reason = redact(f"{type(exc).__name__}: {exc}").replace("\n", " ")
             logger("browser_error", reason[:400])
+            debug_log.error("api", "Edge 启动失败", exc=exc,
+                            headless=headless, sid=sid)
             try:
                 pw.stop()          # 失败时不能让 stop 的异常覆盖原异常
             except Exception:
@@ -405,6 +408,9 @@ def run_human_search(
             except Exception as e:
                 rnd.ok, rnd.reason = False, f"{type(e).__name__}: {e}"
                 logger("error", rnd.reason, engine=ename, keyword=kw.text)
+                debug_log.error("api", "单轮拟人搜索异常", exc=e,
+                                sid=sid, round=i, engine=ename,
+                                keyword=kw.text)
 
             rnd.duration = round(budget.elapsed, 3)
             report.rounds.append(rnd)

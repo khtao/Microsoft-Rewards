@@ -279,6 +279,9 @@ DEFAULT_SETTINGS = {
     # 趋势图显示天数
     "chart_days": 30,
     "chart_metric": "earned",
+    # DEBUG 级别细目日志（debug.log）：含异常堆栈与上下文；run.log 仍只记
+    # 日常操作级流水。可用环境变量 MS_REWARDS_DEBUG=0 临时关闭细目。
+    "debug_log_enabled": True,
     # 账户与设置中拟人搜索区域的全部表单选项（兼容原独立选项卡）。
     "search_panel": {},
 }

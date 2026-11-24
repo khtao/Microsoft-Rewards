@@ -19,7 +19,8 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPointF  # noqa: E402
 from PySide6.QtGui import QEnterEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QFrame, QLabel,  # noqa: E402
+                               QPushButton)  # noqa: E402
 
 from rewards_assistant.ui.modern import theme, viewmodel as vm  # noqa: E402
 from rewards_assistant.ui.modern.main_window import HomePage  # noqa: E402
@@ -167,8 +168,12 @@ def test_ring_click_syncs_and_is_the_only_text_refresh(home):
     page, calls, qapp = home
     page.ring.click()
     assert calls == ["sync"]
-    page.logo.click()
-    assert calls == ["sync", "sync"]
+    # 顶栏品牌图标是纯展示 QLabel（积分奖章），不是刷新按钮。
+    assert isinstance(page.logo, QLabel)
+    assert page.logo.objectName() == "brandIcon"
+    assert not page.logo.pixmap().isNull()
+    assert not hasattr(page.logo, "clicked")
+    assert calls == ["sync"]
     # 任务卡头部不再有「刷新」文字按钮
     texts = [b.text() for b in page.task_card.findChildren(QPushButton)]
     assert vm.tr(page.app.lang, "refresh") not in texts
@@ -182,7 +187,9 @@ def test_ring_click_is_ignored_while_running_or_syncing(home):
     page, calls, _ = home
     page.set_running(True)
     page.ring.click()
-    page.logo.click()
+    assert not page.ring.isEnabled()
+    # 纯展示图标不随运行/同步状态禁用
+    assert page.logo.isEnabled()
     assert calls == []
     page.set_running(False)
     page.set_busy(True)

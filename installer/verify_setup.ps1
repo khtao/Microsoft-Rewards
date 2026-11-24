@@ -18,8 +18,9 @@ Modes:
   Uninstalled  assert uninstall result: program gone, shortcuts/registry gone,
                user data folder KEPT
   Manifest     build a SHA256 manifest of the BUILD machine's dist folder
-  Full         Pre -> silent install -> Installed -> silent uninstall ->
-               Uninstalled (one command, exit code 0 = all checks passed)
+  Full         Pre -> silent install -> Installed -> upgrade install
+               (old version silently uninstalled, user data kept) ->
+               silent uninstall -> Uninstalled (exit code 0 = all passed)
 
 Use -SkipLaunch on Full if the GUI app must not be started (unattended CI).
 Use -SourceDir / -ManifestOut with -Mode Manifest on the build machine.
@@ -277,7 +278,9 @@ elseif ($Mode -eq 'Full') {
 
     Write-Host ''
     Write-Host '==== PHASE 2: silent install ===='
-    $setupArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + $SetupLog + '"'
+    # /CURRENTUSER picks the default install mode without showing the
+    # "Install for all users / Just for me" dialog in unattended mode.
+    $setupArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /LOG="' + $SetupLog + '"'
     $p = Start-Process -FilePath $SetupExe -ArgumentList $setupArgs -Wait -PassThru
     Add-Result ('Silent setup exit code (0 = success)') ($p.ExitCode -eq 0) ('exit=' + $p.ExitCode)
     if (Test-Path -LiteralPath $SetupLog) {
@@ -288,6 +291,26 @@ elseif ($Mode -eq 'Full') {
     Write-Host ''
     Write-Host '==== PHASE 3: installed state ===='
     Test-Installed
+
+    Write-Host ''
+    Write-Host '==== PHASE 3b: upgrade install (old version uninstalled, data kept) ===='
+    $upgradeMarker = Join-Path $DataDir 'upgrade_marker.txt'
+    if (-not (Test-Path -LiteralPath $DataDir)) {
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $upgradeMarker -Value 'keep me across upgrade' -Encoding ASCII
+    $upgradeArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /LOG="' + $SetupLog + '"'
+    $up2 = Start-Process -FilePath $SetupExe -ArgumentList $upgradeArgs -Wait -PassThru
+    Add-Result ('Upgrade setup exit code (0 = success)') ($up2.ExitCode -eq 0) ('exit=' + $up2.ExitCode)
+    Add-Result 'User data marker survives upgrade' (Test-Path -LiteralPath $upgradeMarker) $upgradeMarker
+    Add-Result 'Main exe present after upgrade' (Test-Path -LiteralPath $MainExe) $MainExe
+    $u2 = Find-UninstallEntry
+    Add-Result 'Uninstall entry present after upgrade' ($null -ne $u2) $UninstallRoot
+    $dupes = @(Get-ChildItem -LiteralPath $UninstallRoot -ErrorAction SilentlyContinue | Where-Object {
+        $pp = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        $pp -and $pp.DisplayName -eq $AppName
+    })
+    Add-Result 'No duplicate install after upgrade' ($dupes.Count -le 1) ('matching entries=' + $dupes.Count)
 
     Write-Host ''
     Write-Host '==== PHASE 4: silent uninstall ===='
@@ -303,6 +326,10 @@ elseif ($Mode -eq 'Full') {
     Write-Host ''
     Write-Host '==== PHASE 5: uninstalled state ===='
     Test-Uninstalled
+    if ($upgradeMarker) {
+        Add-Result 'User data folder KEPT after uninstall' (Test-Path -LiteralPath $DataDir) $DataDir
+        Add-Result 'User data marker KEPT after uninstall' (Test-Path -LiteralPath $upgradeMarker) $upgradeMarker
+    }
     if (Test-Path -LiteralPath $InstallDir) {
         $left = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -ErrorAction SilentlyContinue)
         Add-Info 'Leftover files in install folder' ([string]$left.Count + ' item(s) - usually caused by files the app wrote into {app}')
