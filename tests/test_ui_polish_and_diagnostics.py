@@ -64,7 +64,7 @@ def test_magnifier_removed_and_brand_icon_is_display_only():
     assert "self.logo = QLabel()" in text
     assert 'self.logo.setObjectName("brandIcon")' in text
     assert "brand_pixmap(TOPBAR_ROW_H)" in text
-    assert "gear_pixmap(20" in text
+    assert "gear_pixmap(28" in text
     assert "TOPBAR_ROW_H = 32" in text
     # 主题里顶栏三者等高、字号统一 16px
     css = src("rewards_assistant/ui/modern/theme.py")
