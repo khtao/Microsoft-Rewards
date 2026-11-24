@@ -118,6 +118,8 @@ def _bind(dlg):
     """把需要访问 self 的未绑定方法绑到桩对象上。"""
     # 状态行统一走 _set_status；轻量桩只需记录文字，不必真的套样式表。
     dlg._set_status = lambda text, kind="normal": dlg.status.setText(text)
+    dlg._show_last_sync = lambda prefix="", fallback="", fallback_kind="normal": \
+        dlg.status.setText(prefix or fallback or "尚未检测会话状态")
     for name in ("_set_busy", "_set_login_running", "_apply_state",
                  "_on_login_detected", "_on_login_done", "_on_probe_finished",
                  "_on_login_finished", "_on_logout_finished",

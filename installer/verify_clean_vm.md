@@ -1,4 +1,4 @@
-# 如何验证 2.1 安装包能在「干净系统」正常运行
+# 如何验证 2.2 安装包能在「干净系统」正常运行
 
 > 本文是**开发者验证工具**，不随 `MSRewardsAssistantSetup.exe` 分发。
 > 配套文件：`verify_setup.ps1`（自动检查）、`clean_sandbox.wsb`（沙箱配置）。
@@ -96,7 +96,7 @@ Inno Setup 的 `recursesubdirs` 会保留目录树，但「装完能启动」不
 | 开始菜单 | 程序组里有主程序 + 卸载项，两个都能点 |
 | 程序能跑 | 主界面正常出现，不报 `shiboken6.abi3.dll`/`qwindows.dll` 缺失 |
 | 安装目录 | `%LOCALAPPDATA%\Programs\MSRewardsAssistant\` 下 `_internal\` 及子目录齐全 |
-| 设置 → 应用 | 能找到 `MSRewardsAssistant 2.1`（`DisplayVersion` 为 `2.1`），点卸载可正常走完 |
+| 设置 → 应用 | 能找到 `MSRewardsAssistant 2.2`（`DisplayVersion` 为 `2.2`），点卸载可正常走完 |
 | 用户数据 | `%LOCALAPPDATA%\MSRewardsAssistant\` 在覆盖安装、升级安装与卸载后都仍在 |
 | 断网 | 全程无网络也能装完、能启动 |
 

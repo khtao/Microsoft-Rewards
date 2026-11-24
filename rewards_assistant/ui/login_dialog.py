@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from ..auth import AuthManager
 from ..config import LOGIN_WINDOW_SECONDS
 from ..timing import jitter
+from .. import sync_state
 from ..credentials import CookieStore
 from ..session import (
     DEGRADED, SIGNED_IN, SIGNED_OUT, TRANSIENT_ERROR, ProfileBusyError,
@@ -201,7 +202,7 @@ class LoginDialog(QDialog):
 
         self.guide = LoginGuideWidget()
 
-        self.status = QLabel("尚未检测会话状态")
+        self.status = QLabel("")
         self.status.setObjectName("loginStatus")
         self.status.setWordWrap(True)
 
@@ -232,6 +233,10 @@ class LoginDialog(QDialog):
         lay.addWidget(self.status)
         lay.addLayout(row)
 
+        # 主界面已显示「已登录」时，状态行直接给出最近一次同步的时间与
+        # 结果，不再谎称「尚未检测会话状态」。
+        self._show_last_sync()
+
         # 不在构造时自动探测：它会打开第二个持久 profile，与登录窗口抢
         # SingletonLock（Chromium 报 "profile is already in use"）。
 
@@ -246,12 +251,28 @@ class LoginDialog(QDialog):
         "warn": "orange", "err": "warn",
     }
 
-    def _set_status(self, text: str, kind: str = "normal") -> None:
-        """状态行统一走主题色，深浅色主题下都可读。"""
+    def _set_status(self, text: str, kind: str = "normal",
+                    bold: Optional[bool] = None) -> None:
+        """状态行统一走主题色；同步成功绿、失败红，两者都加粗。"""
         key = self._STATUS_KEYS.get(kind, "text_sub")
+        if bold is None:
+            bold = kind in ("ok", "err")
+        weight = 700 if bold else 400
         self.status.setText(text)
         self.status.setStyleSheet(
-            f"color:{self._pal.get(key, '#7b8798')};font-size:12px;")
+            f"color:{self._pal.get(key, '#7b8798')};font-size:12px;"
+            f"font-weight:{weight};")
+
+    def _show_last_sync(self, prefix: str = "", fallback: str = "",
+                        fallback_kind: str = "normal") -> None:
+        """显示最近同步时间与结果；从未同步过才回落到「尚未检测」。"""
+        text, kind = sync_state.summary(sync_state.last())
+        if text == "尚未检测会话状态":
+            if fallback:
+                text, kind = fallback, fallback_kind
+        elif prefix:
+            text = prefix + " · " + text
+        self._set_status(text, kind)
 
     def _set_busy(self, busy: bool, text: str = "",
                   kind: str = "normal") -> None:
@@ -275,16 +296,23 @@ class LoginDialog(QDialog):
             return
         ok = state in (SIGNED_IN, DEGRADED)
         if state == SIGNED_IN:
-            label, kind = "✅ 会话有效，可以只读同步。", "ok"
+            prefix, label, kind = "会话有效", "✅ 会话有效，可以只读同步。", "ok"
         elif state == DEGRADED:
-            label, kind = "⚠ 会话可用但部分页面未读到，将降级同步。", "warn"
+            prefix, label, kind = ("部分页面未读到",
+                                   "⚠ 会话可用但部分页面未读到，将降级同步。", "warn")
         elif state == SIGNED_OUT:
-            label, kind = "❌ 未登录：请点「打开浏览器登录」由本人完成登录。", "err"
+            prefix, label, kind = ("未登录",
+                                   "❌ 未登录：请点「打开浏览器登录」由本人完成登录。", "err")
         elif state == TRANSIENT_ERROR:
-            label, kind = "⚠ " + (reason or "服务暂时不可用"), "warn"
+            prefix, label, kind = ("服务暂时不可用",
+                                   "⚠ " + (reason or "服务暂时不可用"), "warn")
         else:
-            label, kind = "❓ 会话状态未知，请点「检测会话」复查。", "normal"
-        self._set_busy(False, label, kind)
+            prefix, label, kind = ("会话状态未知",
+                                   "❓ 会话状态未知，请点「检测会话」复查。", "normal")
+        self._set_busy(False)
+        # 探测结论只是前缀，最近同步时间与结果始终留在状态行里。
+        self._show_last_sync(prefix=prefix, fallback=label,
+                             fallback_kind=kind)
         self.login_state_changed.emit(ok)
         # 之前因「正在检测会话」而排队的登录请求，现在可以安全启动
         if getattr(self, "_pending_login", False):
@@ -409,7 +437,8 @@ class LoginDialog(QDialog):
 
     def _on_logout_done(self, message: str) -> None:
         self._set_busy(False)
-        self._set_status(message)
+        # clear_local_session() 已清掉最近同步记录，此时不该再显示旧的绿字。
+        self._set_status(message + " 尚未检测会话状态", "err")
         self.login_state_changed.emit(False)
 
     # ------------------------------------------------------------ 关闭保护

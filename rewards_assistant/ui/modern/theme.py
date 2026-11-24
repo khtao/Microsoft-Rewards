@@ -23,6 +23,8 @@ LIGHT: Dict[str, str] = {
     "green": "#2f9e5f",
     "green_soft": "#e6f5ec",
     "green_text": "#248a4f",
+    # 顶栏「已登录」文字：金色（与橙金奖章图标同一族，和绿色进度区分开）
+    "gold": "#b9790a",
     "track": "#e9edf4",
     "progress": "#3aa76d",
     "segment_bg": "#e9edf5",
@@ -61,6 +63,7 @@ DARK: Dict[str, str] = {
     "green": "#4cc38a",
     "green_soft": "#1d3a2c",
     "green_text": "#5fd39a",
+    "gold": "#ffc14d",
     "track": "#2a3342",
     "progress": "#4cc38a",
     "segment_bg": "#2a3342",
@@ -180,14 +183,14 @@ QPushButton#primary[danger="true"] {{
 QPushButton#primary[danger="true"]:hover {{ background: {c['danger_hover']}; }}
 QPushButton#primary[danger="true"]:disabled {{ background: {c['danger']}; }}
 QPushButton#icon {{ border: none; background: transparent; font-size: 17px; padding: 4px; }}
-/* 顶部栏：品牌图标 / 标题 / 登录状态 / 齿轮固定同一行高（24px），
+/* 顶部栏：品牌图标 / 标题 / 登录状态 / 齿轮固定同一行高（32px），
    文字字号统一 16px（与「积分管理助手」标题一致）。品牌图标是纯展示
    QLabel，不是刷新按钮；刷新只由中央进度圆环承担。 */
-QLabel#brandIcon {{ min-height: 24px; max-height: 24px; }}
-QLabel#topTitle {{ font-size: 16px; font-weight: 700; min-height: 24px; max-height: 24px; }}
+QLabel#brandIcon {{ min-height: 32px; max-height: 32px; }}
+QLabel#topTitle {{ font-size: 16px; font-weight: 700; min-height: 32px; max-height: 32px; }}
 QPushButton#topAction {{
     border: none; background: transparent; font-size: 16px;
-    padding: 0px 4px; min-height: 24px; max-height: 24px;
+    padding: 0px 4px; min-height: 32px; max-height: 32px;
 }}
 QPushButton#topAction:hover {{ background: {c['primary_soft']}; border-radius: 8px; }}
 QPushButton#seg {{

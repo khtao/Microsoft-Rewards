@@ -1,6 +1,6 @@
-# Windows 安装包（Inno Setup，2.1）
+# Windows 安装包（Inno Setup，2.2）
 
-`MSRewardsAssistantSetup.exe` 由 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成，是一个**自带图形安装向导**的单文件 exe：双击 → 向导 → 自动装完。它自动创建桌面图标、开始菜单程序组、卸载程序、卸载注册项（「设置 → 应用」可见），不联网、不需要同目录任何其他文件。版本号与 `config.APP_VERSION` 一致，当前为 **2.1**。
+`MSRewardsAssistantSetup.exe` 由 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成，是一个**自带图形安装向导**的单文件 exe：双击 → 向导 → 自动装完。它自动创建桌面图标、开始菜单程序组、卸载程序、卸载注册项（「设置 → 应用」可见），不联网、不需要同目录任何其他文件。版本号与 `config.APP_VERSION` 一致，当前为 **2.2**。
 
 这一版的安装体验做了四件事：
 
@@ -84,7 +84,7 @@ installer\build_inno.bat "D:\Tools\ISCC.exe"    手动指定编译器路径
 
 | 段 | 关键配置 | 效果 |
 | --- | --- | --- |
-| `[Setup]` | `#define MyAppVersion "2.1"` | `AppVersion` / `VersionInfoVersion` / 向导显示版本统一为 2.1 |
+| `[Setup]` | `#define MyAppVersion "2.2"` | `AppVersion` / `VersionInfoVersion` / 向导显示版本统一为 2.2 |
 | | `PrivilegesRequired=lowest` + `PrivilegesRequiredOverridesAllowed=dialog` + `UsePreviousPrivileges=no` | 默认当前用户级、**不弹 UAC**；向导提供「为所有用户安装」选项（选它才提权），并自动支持 `/ALLUSERS` `/CURRENTUSER`；每次交互安装都显示该选择，不沿用旧模式 |
 | | `DefaultDirName={autopf}\{#MyAppName}` | auto 常量：所有用户 → Program Files，当前用户 → `%LOCALAPPDATA%\Programs`，一条配置覆盖两种模式 |
 | | `LanguageDetectionMethod=uilanguage` / `ShowLanguageDialog=no` | 按系统 UI 语言自动选中文 / 英文，不弹语言选择框 |
@@ -125,7 +125,7 @@ installer\build_inno.bat "D:\Tools\ISCC.exe"    手动指定编译器路径
 三种方式，效果一致：
 
 - 开始菜单 → `MSRewardsAssistant` → `卸载 MSRewardsAssistant`
-- 设置 → 应用 → `MSRewardsAssistant 2.1` → 卸载
+- 设置 → 应用 → `MSRewardsAssistant 2.2` → 卸载
 - 命令行：`"%LOCALAPPDATA%\Programs\MSRewardsAssistant\unins000.exe"`（所有用户安装时在 `%ProgramFiles%\MSRewardsAssistant\`）
 
 向导本身自带卸载确认页，也可以 `/VERYSILENT` 静默卸载。

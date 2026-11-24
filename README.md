@@ -1,4 +1,4 @@
-# 积分活动管理助手 2.1
+# 积分活动管理助手 2.2
 
 | 主页 | 设置页 | 深色主题 |
 | --- | --- | --- |
@@ -41,8 +41,8 @@ python -m rewards_assistant
 | 平台 | 产物 | 安装方式 |
 | --- | --- | --- |
 | Windows | `MSRewardsAssistantSetup.exe` | 双击走安装向导（界面跟随系统语言：中文／英文），可选为所有用户安装，装完可直接打开 |
-| Ubuntu / Debian | `ms-rewards-assistant_2.1_amd64.deb` | `sudo apt install ./ms-rewards-assistant_2.1_amd64.deb` |
-| macOS | `MSRewardsAssistant_2.1_<arch>.dmg` | 打开后把 .app 拖进 Applications |
+| Ubuntu / Debian | `ms-rewards-assistant_2.2_amd64.deb` | `sudo apt install ./ms-rewards-assistant_2.2_amd64.deb` |
+| macOS | `MSRewardsAssistant_2.2_<arch>.dmg` | 打开后把 .app 拖进 Applications |
 
 也可以自己从源码构建（建议 Python 3.12 / 3.13）：
 

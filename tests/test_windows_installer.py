@@ -43,7 +43,7 @@ def _section(name: str) -> str:
 
 def test_setup_is_still_pure_ascii_crlf_and_single_version_source():
     _ascii_crlf(ISS)
-    assert '#define MyAppVersion "2.1"' in ISS_TEXT
+    assert '#define MyAppVersion "2.2"' in ISS_TEXT
     assert "AppId={{30E2D155-B39B-49B9-9072-C6494626574A}" in ISS_TEXT
 
 

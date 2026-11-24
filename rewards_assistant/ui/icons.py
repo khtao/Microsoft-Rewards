@@ -27,7 +27,10 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush, QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen,
+    QPixmap, QPolygonF,
+)
 
 # 与 app.svg 保持一致的主色
 BRAND = "#FF8630"
@@ -202,10 +205,156 @@ def brand_pixmap(size: int = 24) -> QPixmap:
     return pm if not pm.isNull() else _draw_brand_fallback(size)
 
 
-def gear_pixmap(size: int = 20, color: str = "#8895A8") -> QPixmap:
+def gear_pixmap(size: int = 32, color: str = "#8895A8") -> QPixmap:
     """顶部栏设置齿轮，优先 gear.svg；缺失时用主题色现画。"""
     pm = _render_svg(size, "gear.svg")
     return pm if not pm.isNull() else _draw_gear_fallback(size, color)
+
+
+# --------------------------------------------------------------------------- #
+# 顶栏登录状态奖章：按参考图复刻的矢量造型，不引入任何位图素材
+#
+# 已登录（第一张高清参考图）：白色圆盘 + 等宽细橙环 + 橙金渐变圆章，
+#   圆章上方两条带 45° 斜纹的绶带向外展开，中央白色勾
+# 未登录（第二张参考图）：实心圆底 + 白色描边环 + 白色同款奖章；
+#   浅色主题下圆底改灰色，深色主题才用深棕
+# 未检测：同一造型降为中性灰，避免状态未定时就给出明显的成功/失败暗示
+# --------------------------------------------------------------------------- #
+
+_BADGE_CACHE: dict = {}
+
+
+def _ribbon(p: QPainter, cx: float, cy: float, s: float, flip: int,
+            base: QColor, stripe: QColor) -> None:
+    """一条向上外展的斜纹绶带；flip=-1 左带、+1 右带。64 单位坐标。
+
+    参考图里绶带是奖章上方两条带斜条纹的短带，左右对称呈「八」字展开，
+    底端被圆章盖住；这里用多边形裁切后画 45° 平行条纹，避免用位图。
+    """
+    pts = [
+        QPointF((cx + flip * 3 * s), (cy + 5 * s)),     # 内下（贴圆章）
+        QPointF((cx + flip * 18 * s), (cy - 10 * s)),   # 外下
+        QPointF((cx + flip * 13 * s), (cy - 17 * s)),   # 外上
+        QPointF((cx + flip * 0 * s), (cy - 4 * s)),     # 内上
+    ]
+    path = QPainterPath()
+    path.addPolygon(QPolygonF(pts))
+    p.save()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(base))
+    p.drawPath(path)
+    p.setClipPath(path)
+    p.setPen(QPen(stripe, 2.3 * s, Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.FlatCap))
+    for k in range(-10, 11):
+        off = k * 4.6 * s
+        p.drawLine(QPointF(cx + off - 24 * s, cy - 24 * s),
+                   QPointF(cx + off + 24 * s, cy + 24 * s))
+    p.restore()
+    # 带子外沿一道细亮边，让绶带有厚度
+    p.setPen(QPen(QColor(255, 255, 255, 90), 0.8 * s))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPolygon(pts)
+
+
+def _medal(p: QPainter, cx: float, cy: float, s: float,
+           body_top: QColor, body_mid: QColor, body_bottom: QColor,
+           edge: QColor, ribbon_base: QColor, ribbon_stripe: QColor,
+           mark: QColor) -> None:
+    """奖章：两条斜纹绶带 + 橙金渐变圆章 + 中央白色勾。"""
+    _ribbon(p, cx, cy, s, -1, ribbon_base, ribbon_stripe)
+    _ribbon(p, cx, cy, s, +1, ribbon_base, ribbon_stripe)
+
+    mc = QPointF(cx, cy + 8 * s)
+    grad = QLinearGradient(cx - 11 * s, cy - 4 * s,
+                           cx + 11 * s, cy + 19 * s)
+    grad.setColorAt(0.0, body_top)
+    grad.setColorAt(0.52, body_mid)
+    grad.setColorAt(1.0, body_bottom)
+    p.setPen(QPen(edge, 1.5 * s))
+    p.setBrush(QBrush(grad))
+    p.drawEllipse(mc, 10.6 * s, 10.6 * s)
+
+    # 内圈细环 + 左上高光，复刻参考图圆章的立体感
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(255, 255, 255, 145), 1.0 * s))
+    p.drawEllipse(mc, 8.0 * s, 8.0 * s)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(255, 255, 255, 110)))
+    p.drawEllipse(QPointF(mc.x() - 3.4 * s, mc.y() - 4.4 * s),
+                  2.5 * s, 1.6 * s)
+
+    path = QPainterPath()
+    path.moveTo(mc.x() - 4.4 * s, mc.y() + 0.3 * s)
+    path.lineTo(mc.x() - 1.1 * s, mc.y() + 3.5 * s)
+    path.lineTo(mc.x() + 4.8 * s, mc.y() - 4.0 * s)
+    p.setPen(QPen(mark, 2.5 * s, Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(path)
+
+
+def _draw_login_badge(size: int, state: str, scheme: str) -> QPixmap:
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    s = size / 64.0
+    cx = cy = 32.0 * s
+
+    if state == "signed_in":
+        # 第一张高清参考图：白色圆盘 + 等宽细橙环（不是粗渐变环）
+        inner = QColor("#FFFDF8") if scheme == "light" else QColor("#26303F")
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(inner))
+        p.drawEllipse(QPointF(cx, cy), 27.0 * s, 27.0 * s)
+        ring = QLinearGradient(0.0, 0.0, float(size), float(size))
+        ring.setColorAt(0.0, QColor("#FFC073"))
+        ring.setColorAt(0.55, QColor("#FFA04A"))
+        ring.setColorAt(1.0, QColor("#F98B36"))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QBrush(ring), 2.4 * s))
+        p.drawEllipse(QPointF(cx, cy), 27.0 * s, 27.0 * s)
+        _medal(p, cx, cy, s,
+               QColor("#FFD98A"), QColor("#FFAE45"), QColor("#F47B1E"),
+               QColor("#FFE7B0"), QColor("#F26B3C"), QColor("#FFC95C"),
+               QColor(255, 255, 255))
+    else:
+        # 第二张参考图：实心圆底 + 白色细描边环 + 白色奖章
+        if state == "unknown":
+            disk = QColor("#B8C2D0") if scheme == "light" else QColor("#4A5668")
+        elif scheme == "light":
+            disk = QColor("#8A93A0")       # 浅色背景下改灰色，不用深色圆块
+        else:
+            disk = QColor("#3B2A24")
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(disk))
+        p.drawEllipse(QPointF(cx, cy), 28.0 * s, 28.0 * s)
+        white = QColor(255, 255, 255, 232)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(white, 2.2 * s))
+        p.drawEllipse(QPointF(cx, cy), 21.5 * s, 21.5 * s)
+        _medal(p, cx, cy, s,
+               QColor(255, 255, 255), QColor(240, 243, 248),
+               QColor(220, 226, 234), white,
+               QColor(255, 255, 255, 214), QColor(255, 255, 255, 150),
+               disk)
+    p.end()
+    return pm
+
+
+def login_badge_pixmap(size: int = 32, state: str = "signed_in",
+                       scheme: str = "light") -> QPixmap:
+    """顶栏登录状态奖章，按 (尺寸, 状态, 主题) 缓存；默认 32 与品牌图标同大。"""
+    state = state if state in ("signed_in", "signed_out", "unknown") else "unknown"
+    scheme = "dark" if scheme == "dark" else "light"
+    key = (int(size), state, scheme)
+    pm = _BADGE_CACHE.get(key)
+    if pm is None:
+        pm = _draw_login_badge(*key)
+        _BADGE_CACHE[key] = pm
+    return pm
 
 
 def app_icon(size: int = 64) -> QIcon:

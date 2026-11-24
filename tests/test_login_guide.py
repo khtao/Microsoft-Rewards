@@ -115,10 +115,12 @@ def test_widget_animates_and_can_freeze(qapp):
     w.deleteLater()
 
 
-def test_dialog_hosts_the_guide(qapp):
+def test_dialog_hosts_the_guide(qapp, tmp_path, monkeypatch):
     from rewards_assistant.ui.login_dialog import LoginDialog
     from rewards_assistant.ui.modern import theme
 
+    # 隔离实例目录：确保「从未同步过」这条回落真的被走到，不被本机记录影响
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
     theme.set_scheme("light")
     dlg = LoginDialog()
     assert isinstance(dlg.guide, lg.LoginGuideWidget)
@@ -136,10 +138,11 @@ def test_dialog_hosts_the_guide(qapp):
     dlg.deleteLater()
 
 
-def test_status_uses_theme_colors(qapp):
+def test_status_uses_theme_colors(qapp, tmp_path, monkeypatch):
     from rewards_assistant.ui.login_dialog import LoginDialog
     from rewards_assistant.ui.modern import theme
 
+    monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
     theme.set_scheme("dark")
     dlg = LoginDialog()
     dlg._set_status("测试", "ok")

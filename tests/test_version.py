@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""版本号单一真源：2.1 在源码、README、三平台打包配置里保持一致。
+"""版本号单一真源：2.2 在源码、README、三平台打包配置里保持一致。
 
 ``config.APP_VERSION`` 是真源；`.deb` / macOS Info.plist / CI 都动态读它，
 只有 Inno Setup 与其校验脚本各存一份字面量，必须锁住不漂移。
@@ -12,8 +12,8 @@ from pathlib import Path
 from rewards_assistant.config import APP_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "2.1"
-STALE = re.compile(r"(?<![0-9A-Za-z_.])2\.0(?![0-9A-Za-z_.])")
+VERSION = "2.2"
+STALE = re.compile(r"(?<![0-9A-Za-z_.])2\.[01](?![0-9A-Za-z_.])")
 
 
 def _read(rel: str) -> str:
@@ -39,7 +39,7 @@ def test_every_platform_packaging_uses_the_same_version():
         assert expected in _read(rel), rel
 
 
-def test_no_stale_2_0_version_string_in_docs_and_packaging():
+def test_no_stale_version_string_in_docs_and_packaging():
     for rel in ("README.md", "docs/ARCHITECTURE.md",
                 "installer/README.md", "installer/verify_clean_vm.md",
                 "installer/setup.iss", "installer/verify_setup.ps1",

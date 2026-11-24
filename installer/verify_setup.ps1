@@ -39,7 +39,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $AppName = 'MSRewardsAssistant'
-$VersionExpected = '2.1'
+$VersionExpected = '2.2'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\MSRewardsAssistant'
 $DataDir = Join-Path $env:LOCALAPPDATA 'MSRewardsAssistant'
 $Desktop = [Environment]::GetFolderPath('Desktop')

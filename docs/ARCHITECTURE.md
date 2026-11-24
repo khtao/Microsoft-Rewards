@@ -1,4 +1,4 @@
-# 架构说明（2.1）
+# 架构说明（2.2）
 
 面向维护者的简要说明，描述当前版本的分层、数据流与设计约束。简介与安装说明见 [README.md](../README.md)。
 
@@ -102,6 +102,7 @@ flowchart LR
 - `default_fetcher()` 恒返回 `HttpFetcher`。`BrowserSessionFetcher` 只保留给登录窗口与「退出登录」清理 profile 使用，不在同步热路径上；`profile_guard` 只保护登录 / 清理这两类低频浏览器操作。
 - 会话工厂预检会真实构造一次 `requests.Session`：系统环境中若被 `lazy_import` 不可调用代理污染，整轮切到标准库 `urllib` 后端；运行时若仍遇到 `not callable`，该页再用标准库重试一次。两页始终并发，后端切换不改变五态判定。
 - **登录对话框不堆说明文字**：`ui/login_guide.py` 用 `QPainter` 画 5 帧循环插画（点按钮 → 独立 Edge 里本人登录 → 短信 / 验证器确认 → 回来点「我已完成登录」→ 凭证加密留本机、只读两页），`QTimer` 40ms 驱动帧内微动（流动光点、光标浮动、按钮呼吸）与帧间交叉淡入，底部只留一行随帧切换的短句和 5 个步骤圆点。实时绘制不依赖打包环境未必提供的动图解码插件；`tools/render_login_guide.py` 用同一套 `paint_guide()` 离屏导出 `login_flow.gif` 与浅色 / 深色对话框预览。配色取自当前主题，状态行也统一走主题色，深色下可读。
+- **状态行与主界面同源**：`sync_state.py` 在每次真正完成的同步后原子写入当前实例目录的 `last_sync.json`（时间、成功与否、失败原因摘要）；「距上次过近」的跳过不刷新时间戳。登录对话框打开时直接显示「最近同步：时间 · 同步成功 / 失败（原因）」，成功绿色、失败红色，两者加粗；只有从未同步过才回落到「尚未检测会话状态」，避免出现主界面已「已登录」、登录页却说没检测过的矛盾。退出登录 / 清除本地会话会一并清掉该记录。主界面顶栏的登录状态文字与标题同为 16px 加粗，只有文字变色：已登录金色、未登录红色、未检测中性；旁边的状态图标是 `icons.py` 里用 `QPainter` 复刻的 32×32 矢量奖章：细等宽橙环 + 白色圆盘 + 两条带 45° 斜纹的绶带 + 橙金渐变圆章（中央白勾），未登录态换成灰 / 深棕实心圆底与白色描边环、白色同款奖章；与左侧品牌图标同为 32px。不是 emoji 也不是截图素材，切换主题时随 `rebuild_ui()` 重新取色。
 
 ## 积分赚取日历
 
@@ -134,7 +135,7 @@ SyncWorker（同步未完成任务）→ ActivityWorker（活动卡点击）
 
 运行期互斥：`Application.auto_running()` 为真时，`sync_now()` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，主按钮同时通过 `danger` 动态属性切到红色 QSS（浅色 / 深色各一套），窗口统一禁用 `act_sync` / 圆环，并锁定停止按钮防连点；顶栏品牌图标是纯展示 `QLabel`，不随运行状态禁用。
 
-主页交互：`RingProgress` 是 `QAbstractButton`，本身就是唯一的显式手动刷新入口（任务卡头部不设文字按钮）。hover 时 1500ms 无限呼吸动画驱动光晕透明度、弧宽、外扩 2px、末端高光点、中心字号，圆环内小字从「今日任务」换成「点击刷新」——用内置文字而非悬浮提示框表达可点击性；移出 / 禁用立即归零。顶栏左侧不再是放大镜按钮：早期那枚 `🔍` 同时充当刷新入口，语义与「积分管理助手」主题都不贴；现在换成 `assets/icons/brand.svg` 的**积分奖章**（橙色渐变圆环 + 白色五角星），是纯展示 `QLabel#brandIcon`，不绑定 `clicked`、不触发刷新。齿轮也改用 `assets/icons/gear.svg` 矢量图标（替代高度随字体变化的 `⚙` emoji），`icons.py` 的 `brand_pixmap()` / `gear_pixmap()` 优先渲染 SVG，资源缺失时用 QPainter 画同款造型兜底。品牌图标 / 标题 / 登录状态 / 齿轮由 `TOPBAR_ROW_H = 24` 与 `QLabel#topTitle` / `QPushButton#topAction` 的 QSS 固定**等高、统一 16px 字号**；刷新只由圆环承担，运行期或同步期点击圆环直接 return。任务行的 `numBadge` 统一使用绿色圆角徽章，搜索 60 分与活动 `+10` 完全一致。整轮结束的 `running → idle` 边沿调用 `_on_auto_run_finished()`，只补一次同步（`_post_run_sync_pending` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
+主页交互：`RingProgress` 是 `QAbstractButton`，本身就是唯一的显式手动刷新入口（任务卡头部不设文字按钮）。hover 时 1500ms 无限呼吸动画驱动光晕透明度、弧宽、外扩 2px、末端高光点、中心字号，圆环内小字从「今日任务」换成「点击刷新」——用内置文字而非悬浮提示框表达可点击性；移出 / 禁用立即归零。顶栏左侧不再是放大镜按钮：早期那枚 `🔍` 同时充当刷新入口，语义与「积分管理助手」主题都不贴；现在换成 `assets/icons/brand.svg` 的**积分奖章**（橙色渐变圆环 + 白色五角星），是纯展示 `QLabel#brandIcon`，不绑定 `clicked`、不触发刷新。齿轮也改用 `assets/icons/gear.svg` 矢量图标（替代高度随字体变化的 `⚙` emoji），`icons.py` 的 `brand_pixmap()` / `gear_pixmap()` 优先渲染 SVG，资源缺失时用 QPainter 画同款造型兜底。品牌图标 / 标题 / 登录状态 / 齿轮由 `TOPBAR_ROW_H = 32` 与 `QLabel#topTitle` / `QPushButton#topAction` 的 QSS 固定**等高、统一 16px 字号**，登录状态奖章与左侧品牌图标同为 32×32；刷新只由圆环承担，运行期或同步期点击圆环直接 return。任务行的 `numBadge` 统一使用绿色圆角徽章，搜索 60 分与活动 `+10` 完全一致。整轮结束的 `running → idle` 边沿调用 `_on_auto_run_finished()`，只补一次同步（`_post_run_sync_pending` 去重）。活动点击期间不做任何官方接口核验 / 请求，活动与搜索之间也不插入同步，避免同步与浏览器任务并行；同步结束后状态行从「正在…」切换为完成态，不会残留。
 
 **自动完成任务全程共用一个浏览器**：Playwright 同步对象绑定创建它的线程/greenlet，跨线程复用会报 `Cannot switch to a different thread`。旧实现里 `ActivityWorker` 点完卡片就关掉 Edge、`SearchWorker` 再起一份全新 Playwright + Edge，用户看到的就是「浏览器关掉又重新打开」。现在 `_start_activity_clicks()` 用 `SearchRunner.for_pending()` 预先算好搜索参数，`ActivityWorker(..., search_params=...)` 在同一个线程里持有唯一的 `pw` / `context` / `page`：点击阶段结束后把该对象注入 `api.run_human_search(page=..., context=..., close_browser=False)` 续跑拟人搜索，`finally` 里才统一 `ctx.close()` / `pw.stop()` / 清理临时 profile。整轮只有一次 Edge 启动、一次关闭；`_on_activity_completed()` 只汇总 `stats["search"]`，不再调用 `_start_pc_search()`，运行期也不插同步。只有「没有活动卡片、只跑搜索」时才由 `SearchRunner` 独立启动一次浏览器。
 
@@ -142,11 +143,11 @@ Microsoft Rewards 要求奖励搜索由本人手动进行，不建议用它获�
 
 ## 构建
 
-`build_ubuntu.sh` / `build_windows.bat` / `build_deb.sh` / `build_macos.sh` 都使用统一的 `MSRewardsAssistant.spec`：图标、可选字体、Playwright 驱动由 spec 收集，Qt 模块交给 PyInstaller 官方 hook 按 import 图收集；`shiboken6` 动态库显式平铺到 `_internal` 根目录并由 `normalize_bundle.py` 校验。`.deb` 的版本号取自 `config.APP_VERSION`（当前 `2.1`）。构建一律使用系统 Python（不创建虚拟环境），避免 `site-packages` 混用引入 `lazy_import` 代理污染；源码运行时仍可用虚拟环境。Windows 侧构建脚本与 `tools/normalize_bundle.py` 的输出保持纯 ASCII，并对 stdout / stderr 设 `backslashreplace`：CI 以管道捕获输出（cp1252），`chcp` 不作用于管道，中文路径与消息都不会让构建中断。
+`build_ubuntu.sh` / `build_windows.bat` / `build_deb.sh` / `build_macos.sh` 都使用统一的 `MSRewardsAssistant.spec`：图标、可选字体、Playwright 驱动由 spec 收集，Qt 模块交给 PyInstaller 官方 hook 按 import 图收集；`shiboken6` 动态库显式平铺到 `_internal` 根目录并由 `normalize_bundle.py` 校验。`.deb` 的版本号取自 `config.APP_VERSION`（当前 `2.2`）。构建一律使用系统 Python（不创建虚拟环境），避免 `site-packages` 混用引入 `lazy_import` 代理污染；源码运行时仍可用虚拟环境。Windows 侧构建脚本与 `tools/normalize_bundle.py` 的输出保持纯 ASCII，并对 stdout / stderr 设 `backslashreplace`：CI 以管道捕获输出（cp1252），`chcp` 不作用于管道，中文路径与消息都不会让构建中断。
 
-Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`，版本号同为 `2.1`：向导语言按系统 UI 自动选（`LanguageDetectionMethod=uilanguage` + `ShowLanguageDialog=no`，english 列在首位作回落，自定义文案放在 `Messages.en.isl` / `Messages.zh.isl`）；`PrivilegesRequired=lowest` + `OverridesAllowed=dialog` 提供「为所有用户安装 / 仅为我安装」，`{autopf}` 让一条 `DefaultDirName` 同时适配两种模式；`[Code]` 在 `InitializeSetup` 里按 AppId 查 HKCU / HKLM 卸载项、等待旧版静默卸载完成再装（只清 `{app}`，用户数据目录不动）；完成页的中英双语「打开」复选框由 `[Run] postinstall skipifsilent` 提供。详见 [installer/README.md](../installer/README.md)。
+Windows 安装包由 `installer/setup.iss`（Inno Setup 6/7）生成单文件 `MSRewardsAssistantSetup.exe`，版本号同为 `2.2`：向导语言按系统 UI 自动选（`LanguageDetectionMethod=uilanguage` + `ShowLanguageDialog=no`，english 列在首位作回落，自定义文案放在 `Messages.en.isl` / `Messages.zh.isl`）；`PrivilegesRequired=lowest` + `OverridesAllowed=dialog` 提供「为所有用户安装 / 仅为我安装」，`{autopf}` 让一条 `DefaultDirName` 同时适配两种模式；`[Code]` 在 `InitializeSetup` 里按 AppId 查 HKCU / HKLM 卸载项、等待旧版静默卸载完成再装（只清 `{app}`，用户数据目录不动）；完成页的中英双语「打开」复选框由 `[Run] postinstall skipifsilent` 提供。详见 [installer/README.md](../installer/README.md)。
 
-macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.1_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
+macOS 由 `build_macos.sh` 产出 `dist/MSRewardsAssistant.app` 与 `macos-dist/MSRewardsAssistant_2.2_<架构>.dmg`。spec 在 `sys.platform == 'darwin'` 时用 `BUNDLE(coll, ...)` 把同一个 COLLECT 结果封成应用包：PyInstaller 6 会按代码签名规则把二进制放进 `Contents/Frameworks`、数据放进 `Contents/Resources` 并做交叉链接，同时完成 ad-hoc 签名，脚本只做 `--verify --deep --strict` 校验，不重复签名。应用图标由系统自带的 `sips` + `iconutil` 从 PNG 生成 `.icns`；DMG 用 `ditto` 保留签名与链接、`hdiutil` 生成 UDZO 压缩镜像并附 `/Applications` 链接。产物架构跟随构建机（arm64 或 x86_64），不做 universal2 合并，也不做 Developer ID 签名与公证。Info.plist 版本由 `BUNDLE(version=APP_VERSION)` 写入，与 `.deb` / Windows 同源于 `config.APP_VERSION`。
 
 依赖按用途分成三份清单，互不夹带：`requirements.txt` 只装运行时（`PySide6-Essentials` / `requests` / `playwright`），`requirements-build.txt` 追加 `pyinstaller`，`requirements-dev.txt` 追加 `pytest`。Qt 只用 Essentials 的核心模块，不安装 `PySide6-Addons`（QtWebEngine / Qt3D / QtCharts / QtMultimedia 均为项目不需要的扩展）。`requests` 是首选 HTTP 后端，缺失时 `HttpFetcher` 自动切到标准库 `urllib`。
 

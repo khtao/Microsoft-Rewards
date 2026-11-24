@@ -71,21 +71,30 @@ def export_gif(pal: dict) -> None:
     print(f"  {gif.name}: {len(frames)} frames, {gif.stat().st_size:,} bytes")
 
 
-def export_dialog(app: QApplication, scheme: str) -> None:
+def export_dialog(app: QApplication, scheme: str,
+                  name: str = "", sync_result=None) -> None:
+    """导出一张对话框预览；``sync_result`` 可复现已登录 / 失败的状态行。"""
+    from rewards_assistant import sync_state
     from rewards_assistant.ui.login_dialog import LoginDialog
 
     theme.set_scheme(scheme)
+    sync_state.clear()
+    if sync_result is not None:
+        ok, detail = sync_result
+        sync_state.record(ok, detail)
     dlg = LoginDialog()
     # 定格在第 2 帧（浏览器里本人登录），截图内容稳定可复现
     dlg.guide.freeze(1, 0.45)
     dlg.show()
     app.processEvents()
-    name = "login_dialog_dark.png" if scheme == "dark" else "login_dialog.png"
+    if not name:
+        name = "login_dialog_dark.png" if scheme == "dark" else "login_dialog.png"
     path = OUT / name
     dlg.grab().save(str(path))
     print(f"  {name}: {dlg.width()}x{dlg.height()}, {path.stat().st_size:,} bytes")
     dlg.close()
     app.processEvents()
+    sync_state.clear()
 
 
 def main() -> int:
@@ -94,6 +103,11 @@ def main() -> int:
     export_gif(theme.current())
     export_dialog(app, "light")
     export_dialog(app, "dark")
+    # 主界面已「已登录」时，登录页显示的最近同步时间与绿色加粗状态行
+    export_dialog(app, "light", "login_dialog_synced.png",
+                  (True, "已登录 · 同步正常"))
+    export_dialog(app, "light", "login_dialog_failed.png",
+                  (False, "网络或服务异常（保留登录状态）"))
     theme.set_scheme("light")
     print("login guide previews OK")
     return 0

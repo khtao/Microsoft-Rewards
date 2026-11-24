@@ -21,7 +21,7 @@ from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import autostart, debug_log
+from . import autostart, debug_log, sync_state
 from .activity_worker import ActivityWorker
 from .auth import AuthManager
 from .claim import (CLAIM_SYNC_FALLBACK_SECONDS, CLAIM_URL, claim_ready,
@@ -864,9 +864,11 @@ class Application(QObject):
 
     def _on_sync_ok(self, payload: dict) -> None:
         self._syncing = False
-        # 「距上次同步过近」的跳过不带新页面，保留上一次的可信标记。
+        # 「距上次同步过近」的跳过不带新页面，保留上一次的可信标记；
+        # 只有真正完成一次同步才刷新「最近同步时间」。
         if not payload.get("skipped"):
             self._last_sync_ok = True
+            sync_state.record(True, "已登录 · 同步正常")
         if getattr(self, "_sync_enrich_current", False):
             self._last_page_enrichment = datetime.now()
         self._sync_enrich_current = False
@@ -917,6 +919,7 @@ class Application(QObject):
     def _on_sync_fail(self, message: str) -> None:
         self._syncing = False
         debug_log.error("sync", "同步失败", detail=message)
+        sync_state.record(False, message)
         # 读取不完整 / 未登录 / 网络异常：本地可领取值只是旧快照，卡片无动作。
         self._last_sync_ok = False
         self._sync_enrich_current = False

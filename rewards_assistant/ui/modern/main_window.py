@@ -48,7 +48,7 @@ from ...session import ALLOWED_PATHS, default_fetcher, redact
 from ...storage import Store, day_str
 from ...sync import sync_once
 from ...ui.legacy import QuickPanel, SearchPanel, SearchRunner
-from ...ui.icons import brand_pixmap, gear_pixmap
+from ...ui.icons import brand_pixmap, gear_pixmap, login_badge_pixmap
 from ...ui.login_dialog import LoginDialog
 from . import effects, theme, viewmodel as vm
 from .viewmodel import (calendar_days, calendar_months,
@@ -60,7 +60,8 @@ from .widgets import (CalendarGrid, Card, GroupBlock, RingProgress, Row,
 
 
 # 顶部栏统一行高：品牌图标 / 标题 / 登录状态 / 齿轮严格等高，字号统一 16px。
-TOPBAR_ROW_H = 24
+# 登录状态奖章与左侧品牌图标同为 32×32。
+TOPBAR_ROW_H = 32
 
 # 导出的日志包 / 关键页面包都带 YYYYmmdd_HHMMSS 后缀，避免多次导出互相覆盖。
 _EXPORT_STAMP_RE = re.compile(r"_\d{8}_\d{6}$")
@@ -253,18 +254,20 @@ class HomePage(QWidget):
             badge.setAlignment(Qt.AlignmentFlag.AlignVCenter)
             top.addWidget(badge)
         top.addStretch(1)
-        self.login_badge = QPushButton("🏅 " + tr(self._lang, "unknown"))
+        self.login_badge = QPushButton(tr(self._lang, "unknown"))
         self.login_badge.setObjectName("topAction")
         self.login_badge.setFixedHeight(TOPBAR_ROW_H)
-        self.login_badge.setStyleSheet(
-            "color:" + theme.current()["orange"] + ";font-size:16px;")
+        self.login_badge.setIconSize(QSize(TOPBAR_ROW_H, TOPBAR_ROW_H))
+        # 与标题同一套字体（16px / 700）；图标是复刻的矢量奖章，文字单独着色
+        self.login_badge.setFont(self.title.font())
+        self._style_login_badge(None)
         self.login_badge.clicked.connect(app.open_login)
         top.addWidget(self.login_badge)
         gear = QPushButton()
         gear.setObjectName("topAction")
         gear.setFixedHeight(TOPBAR_ROW_H)
-        gear.setIcon(QIcon(gear_pixmap(20, theme.current()["text_sub"])))
-        gear.setIconSize(QSize(20, 20))
+        gear.setIcon(QIcon(gear_pixmap(28, theme.current()["text_sub"])))
+        gear.setIconSize(QSize(28, 28))
         gear.setAccessibleName(tr(self._lang, "settings"))
         gear.clicked.connect(app.show_settings)
         top.addWidget(gear)
@@ -414,9 +417,25 @@ class HomePage(QWidget):
         self.ring.set_refresh_caption(tr(lang, "ring_refresh"))
         self.status_chip.set_language(lang)
 
+    def _style_login_badge(self, ok: Optional[bool]) -> None:
+        """只有文字变色：已登录金色、未登录红色、未检测中性；图标按状态/主题切换。
+
+        奖章是 QPainter 复刻的矢量造型（不是 emoji，也不是贴在按钮上的截图），
+        自带配色，不受 styleSheet 的 color 影响。
+        """
+        c = theme.current()
+        state = "unknown" if ok is None else ("signed_in" if ok else "signed_out")
+        color = (c.get("gold", c["orange"]) if ok is True else
+                 c["warn"] if ok is False else c["text_sub"])
+        self.login_badge.setIcon(QIcon(login_badge_pixmap(
+            TOPBAR_ROW_H, state, theme.scheme())))
+        self.login_badge.setStyleSheet(
+            f"color:{color};font-size:16px;font-weight:700;")
+
     def set_login_badge(self, ok: Optional[bool]) -> None:
         key = "unknown" if ok is None else ("signed_in" if ok else "signed_out")
-        self.login_badge.setText("🏅  " + tr(self.app.lang, key))
+        self.login_badge.setText(tr(self.app.lang, key))
+        self._style_login_badge(ok)
 
     def set_claim_available(self, available: bool) -> None:
         """只有控制器确认「此刻确实能领取」才让这张卡响应点击。"""

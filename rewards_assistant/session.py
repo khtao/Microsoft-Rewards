@@ -771,3 +771,7 @@ def clear_local_session() -> None:
     """供「退出登录」调用：删除加密凭证、明文遗留文件与 profile 登录态。"""
     CookieStore().clear()
     BrowserSessionFetcher().clear_session()
+    # 会话都没了，就不要再让登录窗口展示一条过期的「同步成功」。
+    from . import sync_state  # 延迟导入，避免与 credentials 的加载顺序耦合
+
+    sync_state.clear()

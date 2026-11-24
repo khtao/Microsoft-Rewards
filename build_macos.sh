@@ -145,7 +145,7 @@ else
     command -v "$tool" >/dev/null 2>&1 || fail "缺少系统工具 $tool，无法生成 .dmg。"
   done
   VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-    "$APP/Contents/Info.plist" 2>/dev/null || echo "2.1")"
+    "$APP/Contents/Info.plist" 2>/dev/null || echo "2.2")"
   ARCH="$(uname -m)"
   mkdir -p "$ROOT/macos-dist"
   OUT="$ROOT/macos-dist/MSRewardsAssistant_${VERSION}_${ARCH}.dmg"

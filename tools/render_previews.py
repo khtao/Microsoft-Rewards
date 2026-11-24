@@ -122,6 +122,12 @@ def main() -> int:
     seed_history(store, date.today())
     theme.set_scheme("light")
     win = ModernMainWindow(settings=settings, store=store)
+    # 预览展示真实使用中的「已登录」态：金色文字 + 复刻奖章，与标题同字号
+    win._login_ok = True
+    win.home.set_login_badge(True)
+    assert "已登录" in win.home.login_badge.text()
+    assert theme.current()["gold"] in win.home.login_badge.styleSheet()
+    assert not win.home.login_badge.icon().isNull()
     win.resize(392, 980)
     win.show()
     settle(app, 8, 1100)
@@ -285,6 +291,7 @@ def main() -> int:
     win.set_pref("ui_theme", "深色")
     settle(app, 8, 800)
     assert theme.scheme() == "dark"
+    assert theme.current()["gold"] in win.home.login_badge.styleSheet()
     assert "ui_reduce_motion" not in vm.VISIBLE_SETTING_KEYS
     win.show_home()
     settle(app, 8, 800)
