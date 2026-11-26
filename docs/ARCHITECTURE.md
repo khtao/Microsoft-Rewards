@@ -114,6 +114,8 @@ flowchart LR
 
 三种视图共用 `CalendarCell`（圆角矩形内三排：标签 / 蓝色粗体积分 / 圆点），`CalendarGrid` 按 `cell["unit"]` 决定 7 列或 1 列。`calendar_summary()` 的口径随视图变为日均 / 周均 / 月均，并给出最高与有积分的计数；图例是卡片内的第三排圆点。
 
+七列必须严格等宽，所以数字标签保留 `QSizePolicy.Ignored`（不按内容撑宽列）；`CalendarCell.fit_value()` 在 `resizeEvent` 与 `CalendarGrid` 布局完成后的定时器里，用 `QFontMetrics` 按标签**实际拿到的宽度**收字号，保证四位数（日视图不带千分位）与带千分位的周 / 月合计都完整显示、不被 `QLabel` 裁掉，且保底 8pt（周 / 月 12pt）不会被无限缩小。日视图左右内边距 4px、列间距 5px，给数字留出余量。
+
 ## 自动完成任务
 
 主页主按钮、托盘动作、快捷面板都调用 `Application.run_pending_tasks()`，与经典窗口同一份 Python 代码：

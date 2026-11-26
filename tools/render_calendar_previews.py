@@ -35,6 +35,11 @@ def main() -> int:
     settings.update({"ui_language": "中文", "ui_theme": "浅色",
                      "ui_calendar_view": "周"})
     seed_history(store, today)
+    # 额外造一笔四位数积分：三张预览图都要能验证「数字完整、不被裁切」。
+    four_digit_day = date(today.year, today.month, 17).isoformat()
+    with store.tx() as conn:
+        conn.execute("INSERT OR REPLACE INTO daily (day, points_earned) VALUES (?,?)",
+                     (four_digit_day, 2400))
     win = ModernMainWindow(settings=settings, store=store)
     win.resize(392, 1120)
     win.show()
@@ -53,6 +58,10 @@ def main() -> int:
                      for c in cells]
         assert cells, mode
         assert all(0 <= col < cols for _r, col in positions), (mode, positions)
+        # 无论四位 / 五位数，数字都必须完整落在格子里（不能被 QLabel 裁掉）
+        assert all(c.value_fits() for c in cells), \
+            [(c.value_text(), c._value.width(), c.value_point_size())
+             for c in cells if not c.value_fits()]
         grid.grab().save(str(OUT / name))
         print(f"{mode} 视图：{len(cells)} 个卡片，列数 {cols}，"
               f"汇总「{grid._summary.text()}」 -> {name}")

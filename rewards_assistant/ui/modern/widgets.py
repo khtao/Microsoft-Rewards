@@ -10,7 +10,7 @@ from typing import Iterable, Sequence
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QRectF, Qt,
                             QTimer, QVariantAnimation, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractButton, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -785,14 +785,18 @@ class CalendarCell(QFrame):
     """圆角矩形内三排：标签（W3 11/9-11/15）/ 蓝色粗体积分 / 一排圆点。
 
     ``compact`` 用于「日」视图的一排七个：字号与内边距等比缩小，但三排结构
-    和截图里的周卡片完全一致。
+    和截图里的周卡片完全一致。七列必须严格等宽，所以数字标签保留
+    ``QSizePolicy.Ignored``（不撑宽列），改用 ``fit_value()`` 按标签**实际拿
+    到的宽度**收字号——四位数（日视图不带千分位）、五位数（周月视图带千分位）
+    都能完整显示，不会被 QLabel 把右边裁掉。
     """
 
     def __init__(self, cell: dict, compact: bool = False, parent=None) -> None:
         super().__init__(parent)
         c = theme.current()
         self.setObjectName("calCell")
-        pad = 6 if compact else 12
+        # 七列格子只有 40 多 px：左右各留 4px 而非 6px，多给数字 4px 余量。
+        pad = 4 if compact else 12
         self.setFixedHeight(62 if compact else 88)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(
@@ -809,33 +813,75 @@ class CalendarCell(QFrame):
             % (c["blue_chip_text"], 9 if compact else 11))
         lay.addWidget(label)
 
-        value = QLabel(f"{int(cell.get('points') or 0):,}")
-        value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        f = QFont(value.font())
-        f.setBold(True)
-        # 一排七个时格子只有 40 多 px：4 位数用更小字号，且不加千分位，
-        # 免得把整列撑宽导致后面的格子被挤出容器。
         text = f"{int(cell.get('points') or 0):,}"
         if compact:
-            text = str(int(cell.get('points') or 0))
-            f.setPointSize(10 if len(text) >= 4 else 12)
-        else:
-            f.setPointSize(20)
-        value.setText(text)
-        value.setFont(f)
+            text = str(int(cell.get('points') or 0))   # 七列格子不写千分位
+        value = QLabel(text)
+        value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        value.setStyleSheet("color:%s;background:transparent;" % c["primary"])
         if compact:
             label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                 QSizePolicy.Policy.Preferred)
             value.setSizePolicy(QSizePolicy.Policy.Ignored,
                                 QSizePolicy.Policy.Preferred)
-        value.setStyleSheet("color:%s;background:transparent;" % c["primary"])
         lay.addWidget(value)
+
+        self._compact = compact
+        self._value = value
+        self._value_text = text
+        if compact:
+            self._base_pt = 12 if len(text) < 4 else 10
+            self._min_pt = 8
+        else:
+            self._base_pt = 20
+            self._min_pt = 12
+        self._last_fit_width = -1
+        self._apply_value_font(self._base_pt)
 
         dots = DotsRow(cell.get("dots") or [True],
                        diameter=5 if compact else 7,
                        gap=4 if compact else 6)
         lay.addWidget(dots, alignment=Qt.AlignmentFlag.AlignLeft)
         lay.addStretch(1) if not compact else None
+
+    def _apply_value_font(self, pt: int) -> None:
+        f = QFont(self._value.font())
+        f.setBold(True)
+        f.setPointSize(int(pt))
+        self._value.setFont(f)
+
+    def value_text(self) -> str:
+        return self._value.text()
+
+    def value_point_size(self) -> int:
+        return self._value.font().pointSize()
+
+    def value_fits(self) -> bool:
+        """文字是否完整落在标签实际宽度内（即没有被裁切）。"""
+        fm = QFontMetrics(self._value.font())
+        return fm.horizontalAdvance(self._value_text) <= max(1, self._value.width())
+
+    def fit_value(self) -> int:
+        """按标签拿到的真实宽度收字号，返回最终字号；不改列宽、不改文案。"""
+        avail = self._value.width()
+        if avail <= 1:                         # 还没完成布局，等 resizeEvent
+            return self.value_point_size()
+        pt = self._base_pt
+        while pt > self._min_pt:
+            self._apply_value_font(pt)
+            if QFontMetrics(self._value.font()).horizontalAdvance(
+                    self._value_text) <= avail:
+                return pt
+            pt -= 1
+        self._apply_value_font(self._min_pt)
+        return self._min_pt
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        width = self._value.width()
+        if width != self._last_fit_width:      # 只在宽度真的变了时重算，避免抖动
+            self._last_fit_width = width
+            self.fit_value()
 
 
 class CalendarGrid(QWidget):
@@ -875,9 +921,15 @@ class CalendarGrid(QWidget):
         self.clear_grid()
         unit = cells[0].get("unit", "day") if cells else "day"
         columns = 7 if unit == "day" else 1
+        # 七列等宽时略收紧列间距，给四位数多留几像素；周 / 月单列保持原样。
+        self._grid.setSpacing(5 if columns == 7 else 6)
+        built = []
         for i, cell in enumerate(cells):
-            self._grid.addWidget(CalendarCell(cell, compact=(columns == 7)),
-                                 i // columns, i % columns)
+            w = CalendarCell(cell, compact=(columns == 7))
+            self._grid.addWidget(w, i // columns, i % columns)
+            built.append(w)
+        # 布局完成后再按真实宽度收一次字号：resizeEvent 之外多一道保险。
+        QTimer.singleShot(0, lambda: [w.fit_value() for w in built])
         if not cells:
             empty = QLabel(empty_text or "暂无积分记录")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)

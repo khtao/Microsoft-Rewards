@@ -205,7 +205,7 @@ def brand_pixmap(size: int = 24) -> QPixmap:
     return pm if not pm.isNull() else _draw_brand_fallback(size)
 
 
-def gear_pixmap(size: int = 32, color: str = "#8895A8") -> QPixmap:
+def gear_pixmap(size: int = 20, color: str = "#8895A8") -> QPixmap:
     """顶部栏设置齿轮，优先 gear.svg；缺失时用主题色现画。"""
     pm = _render_svg(size, "gear.svg")
     return pm if not pm.isNull() else _draw_gear_fallback(size, color)
