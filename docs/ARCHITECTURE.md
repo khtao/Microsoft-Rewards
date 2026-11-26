@@ -116,6 +116,8 @@ flowchart LR
 
 七列必须严格等宽，所以数字标签保留 `QSizePolicy.Ignored`（不按内容撑宽列）；`CalendarCell.fit_value()` 在 `resizeEvent` 与 `CalendarGrid` 布局完成后的定时器里，用 `QFontMetrics` 按标签**实际拿到的宽度**收字号，保证四位数（日视图不带千分位）与带千分位的周 / 月合计都完整显示、不被 `QLabel` 裁掉，且保底 8pt（周 / 月 12pt）不会被无限缩小。日视图左右内边距 4px、列间距 5px，给数字留出余量。
 
+补一次重排的定时器是 `CalendarGrid` 自己的子 `QTimer`（单次、可被 `clear_grid()` 停止），回调只遍历此刻仍挂载在网格上的格子；grid 销毁时定时器与信号连接一并消失，不会留下捕获旧控件列表的悬空回调。`CalendarCell._value_width()` 对已被删除的 C++ 对象返回 -1，让 `fit_value()` / `value_fits()` 在极端时序下静默退出而不是抛 `RuntimeError`。
+
 ## 自动完成任务
 
 主页主按钮、托盘动作、快捷面板都调用 `Application.run_pending_tasks()`，与经典窗口同一份 Python 代码：

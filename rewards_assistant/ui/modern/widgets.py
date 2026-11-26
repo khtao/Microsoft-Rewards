@@ -856,14 +856,34 @@ class CalendarCell(QFrame):
     def value_point_size(self) -> int:
         return self._value.font().pointSize()
 
+    def _value_width(self) -> int:
+        """返回标签实际宽度；控件已随父对象销毁时返回 -1，不抛 RuntimeError。
+
+        ``CalendarCell`` 可能被外部变量或延迟回调持有，Qt 的 C++ 对象却已经
+        ``deleteLater`` 掉了；此时任何 ``self._value.width()`` 都会抛
+        ``RuntimeError: Internal C++ object already deleted``。
+        """
+        try:
+            return self._value.width()
+        except RuntimeError:
+            return -1
+
     def value_fits(self) -> bool:
         """文字是否完整落在标签实际宽度内（即没有被裁切）。"""
-        fm = QFontMetrics(self._value.font())
-        return fm.horizontalAdvance(self._value_text) <= max(1, self._value.width())
+        avail = self._value_width()
+        if avail <= 1:
+            return False
+        try:
+            fm = QFontMetrics(self._value.font())
+        except RuntimeError:
+            return False
+        return fm.horizontalAdvance(self._value_text) <= avail
 
     def fit_value(self) -> int:
         """按标签拿到的真实宽度收字号，返回最终字号；不改列宽、不改文案。"""
-        avail = self._value.width()
+        avail = self._value_width()
+        if avail < 0:                          # 控件已销毁，直接退出
+            return self._min_pt
         if avail <= 1:                         # 还没完成布局，等 resizeEvent
             return self.value_point_size()
         pt = self._base_pt
@@ -878,7 +898,9 @@ class CalendarCell(QFrame):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        width = self._value.width()
+        width = self._value_width()
+        if width < 0:
+            return
         if width != self._last_fit_width:      # 只在宽度真的变了时重算，避免抖动
             self._last_fit_width = width
             self.fit_value()
@@ -906,8 +928,20 @@ class CalendarGrid(QWidget):
         self._summary.setObjectName("tiny")
         self._summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lay.addWidget(self._summary)
+        # 布局完成后按真实宽度补一次字号。timer 是本 grid 的子对象：grid 一销毁，
+        # 连接与待执行回调一起消失，不会留下悬空闭包去访问已被 deleteLater
+        # 的旧 CalendarCell。
+        self._refit_timer = QTimer(self)
+        self._refit_timer.setSingleShot(True)
+        self._refit_timer.timeout.connect(self._refit_cells)
+
+    def _refit_cells(self) -> None:
+        """只遍历此刻仍挂在本 grid 上的格子；旧格子已不在 findChildren 里。"""
+        for w in self.findChildren(CalendarCell):
+            w.fit_value()
 
     def clear_grid(self) -> None:
+        self._refit_timer.stop()
         while self._grid.count():
             item = self._grid.takeAt(0)
             w = item.widget()
@@ -923,13 +957,12 @@ class CalendarGrid(QWidget):
         columns = 7 if unit == "day" else 1
         # 七列等宽时略收紧列间距，给四位数多留几像素；周 / 月单列保持原样。
         self._grid.setSpacing(5 if columns == 7 else 6)
-        built = []
         for i, cell in enumerate(cells):
             w = CalendarCell(cell, compact=(columns == 7))
             self._grid.addWidget(w, i // columns, i % columns)
-            built.append(w)
         # 布局完成后再按真实宽度收一次字号：resizeEvent 之外多一道保险。
-        QTimer.singleShot(0, lambda: [w.fit_value() for w in built])
+        # 连续切视图时只保留最后一次回调，不会累积旧格子的引用。
+        self._refit_timer.start(0)
         if not cells:
             empty = QLabel(empty_text or "暂无积分记录")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)

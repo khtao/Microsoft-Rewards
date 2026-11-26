@@ -122,6 +122,62 @@ def test_week_and_month_large_numbers_with_separators_fit(qapp, grid_in_324):
         assert c.value_point_size() >= 12
 
 
+# ---------------------------------------------------------------- 生命周期
+
+def _drop_grid_with_pending_refit() -> None:
+    """造一个局部 grid、排队 0ms 回调，然后让它的 Python 引用消失。
+
+    旧实现用全局 ``QTimer.singleShot(0, lambda: [...built...])`` 捕获格子列表：
+    grid 一销毁，格子 C++ 对象被删，但回调仍在事件队列里；下一个用例只要
+    ``processEvents()`` 就会抛 ``Internal C++ object already deleted``。
+    """
+    grid = CalendarGrid()
+    grid.set_cells(_days((1200,)), "2026 / 11", {})
+    return None
+
+
+def test_pending_refit_never_touches_deleted_cells(qapp):
+    _drop_grid_with_pending_refit()
+    # 关键：这里处理的是上一个（已销毁）grid 排队的事件，绝不能抛异常
+    for _ in range(12):
+        qapp.processEvents()
+
+
+def test_clear_grid_before_refit_is_safe(qapp):
+    """切视图时旧格子被 deleteLater，待执行回调也不能碰它们。"""
+    grid = CalendarGrid()
+    grid.set_cells(_days((1200, 2400)), "2026 / 11", {})
+    grid.set_cells(
+        [{"label": "W1", "points": 9999, "dots": [True] * 7, "unit": "week"}],
+        "2026 / 11", {})
+    for _ in range(12):
+        qapp.processEvents()
+    cells = grid.findChildren(CalendarCell)
+    assert len(cells) == 1 and cells[0].value_text() == "9,999"
+    assert cells[0].value_fits()
+    grid.deleteLater()
+    for _ in range(6):
+        qapp.processEvents()
+
+
+def test_destroyed_cell_is_inert(qapp):
+    """极端情况：外部仍持有已删格子的引用，方法也不能炸。
+
+    ``deleteLater`` 在还有 Python 引用时不保证立刻销毁，这里显式删除 C++ 对象，
+    精确复现报错里的 ``Internal C++ object already deleted``。
+    """
+    shiboken = pytest.importorskip("shiboken6")
+    cell = CalendarCell({"label": "11/9", "points": 1200,
+                         "has": True, "dots": [True], "unit": "day"},
+                        compact=True)
+    for _ in range(8):
+        qapp.processEvents()
+    shiboken.delete(cell)                  # 子 QLabel 一并销毁，Python 包装仍在
+    assert cell._value_width() == -1
+    assert cell.value_fits() is False
+    assert cell.fit_value() == 8
+
+
 # ---------------------------------------------------------------- 静态契约
 
 def test_fit_logic_is_wired_into_contract():
@@ -129,7 +185,14 @@ def test_fit_logic_is_wired_into_contract():
     assert "def fit_value(" in widgets
     assert "def resizeEvent(" in widgets
     assert "QFontMetrics" in widgets
-    assert "QTimer.singleShot(0, lambda: [w.fit_value()" in widgets
+    assert "def _value_width(" in widgets
+    assert "def _refit_cells(" in widgets
+    assert "self._refit_timer = QTimer(self)" in widgets
+    assert "self._refit_timer.start(0)" in widgets
+    assert "self._refit_timer.stop()" in widgets
+    # 全局 singleShot + 捕获旧控件列表的写法必须彻底消失
+    assert "QTimer.singleShot(0, lambda" not in widgets
+    assert "built" not in widgets
     assert "pad = 4 if compact else 12" in widgets
     assert "setSpacing(5 if columns == 7 else 6)" in widgets
     # 旧的硬编码「四位数一律 10pt」不再决定最终字号
