@@ -280,7 +280,8 @@ def test_debug_log_levels_stack_and_redaction(monkeypatch, tmp_path):
     assert "sid=abc" in rec and "repeat=3" in rec
 
 
-def test_debug_log_writes_debug_file_and_run_summary(monkeypatch, tmp_path):
+def test_single_log_file_and_export_view(monkeypatch, tmp_path):
+    """磁盘只有 debug.log 一份；run.log 只是导出时按级别过滤出的视图。"""
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
     monkeypatch.setenv("MS_REWARDS_DEBUG", "1")
     debug_log._ENABLED = None
@@ -289,12 +290,21 @@ def test_debug_log_writes_debug_file_and_run_summary(monkeypatch, tmp_path):
     debug_log.warn("claim", "关闭事件未捕获", fallback_seconds=30)
     debug_log.error("sync", "同步失败", exc=ValueError("bad html"))
     dbg = debug_log.debug_log_path().read_text("utf-8")
-    run = config.log_path().read_text("utf-8")
+    assert config.log_path() == debug_log.debug_log_path()
+    assert config.search_log_path() == debug_log.debug_log_path()
     assert "[DEBUG]" in dbg and "task=daily" in dbg and "index=2" in dbg
     assert "[INFO]" in dbg and "[WARN]" in dbg
     assert "[ERROR]" in dbg and "ValueError" in dbg
-    assert "[ERROR] 同步失败 (ValueError)" in run
-    assert "[DEBUG]" not in run and "卡片已点击" not in run
+    # 一条记录只落一次，不再是 run.log + debug.log 双写
+    assert dbg.count("卡片已点击") == 1
+
+    view = debug_log.run_log_view(dbg)
+    assert "[INFO] 同步完成" in view and "[ERROR] 同步失败" in view
+    assert "卡片已点击" not in view and "traceback" not in view.lower()
+    assert "ValueError" not in view, "摘要视图不带堆栈"
+    # 行为日志以 ACTION 前缀存在同一文件里，导出时可还原
+    assert debug_log.action_log_view("ACTION {\"action\":\"x\"}\n[INFO] y\n") == \
+        '{"action":"x"}\n'
     debug_log._ENABLED = None
 
 
@@ -349,7 +359,10 @@ def test_export_dialogs_use_timestamped_defaults_and_debug_log():
     assert 'timestamped_zip_name("rewards-pages")' in text
     assert text.count("ensure_timestamped_zip(path)") == 2
     assert 'z.write(dbg, arcname="debug.log")' in text
-    assert '"run-session.log"' in text
+    assert "debug_log.run_log_view(raw)" in text
+    assert "debug_log.action_log_view(raw)" in text
+    # 不再单独存一份与 debug.log 重复的 run-session.log
+    assert '"run-session.log"' not in text
     assert "导出时间" in text
 
 

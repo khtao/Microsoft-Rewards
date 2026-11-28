@@ -28,7 +28,6 @@ except Exception:                                   # pragma: no cover
     _HAS_ZONEINFO = False
     ZoneInfo = None                                  # type: ignore
 
-CACHE_PATH = Path.home() / ".cache/human_search_geo.json"
 CACHE_TTL = 6 * 3600                                 # 6 小时
 
 # 免费、无需 key 的 IP 归属查询（按顺序尝试）
@@ -194,20 +193,25 @@ def _normalize(data: dict, source: str) -> dict:
 
 
 def _load_cache() -> dict | None:
+    """从统一状态库读；坏值 / 过期都只让这一项失效，不影响其它状态。"""
     try:
-        if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < CACHE_TTL:
-            d = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-            if d.get("ip"):
-                return d
-    except Exception:
+        from . import state
+        box = state.json_get(state.K_GEO_CACHE)
+        if not box:
+            return None
+        age = time.time() - float(box.get("ts", 0))
+        d = box.get("data")
+        if 0 <= age < CACHE_TTL and isinstance(d, dict) and d.get("ip"):
+            return d
+    except (TypeError, ValueError, OSError):
         pass
     return None
 
 
 def _save_cache(d: dict):
     try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        from . import state
+        state.json_set(state.K_GEO_CACHE, {"ts": time.time(), "data": d})
     except Exception:
         pass
 

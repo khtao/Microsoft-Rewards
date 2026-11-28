@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from .config import db_path
+from .state import KV_SCHEMA
 from .task_labels import humanize_task
 from .pending import all_reward_tasks_done
 from .points import calculate_daily_points, TASK_FALLBACK, ALL_SOURCES
@@ -78,7 +79,7 @@ class Store:
         self.path = str(path or db_path())
         self._local = threading.local()
         with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+            conn.executescript(_SCHEMA + KV_SCHEMA)
         self._migrate()
         self._ensure_columns()
         self._migrate_legacy_points()
@@ -167,7 +168,9 @@ class Store:
         if conn is None:
             conn = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            # DELETE：空闲时库旁不再常驻 -wal / -shm，状态文件真的只有一个。
+            # 写事务都很短（同步一次一批），单进程下由 busy_timeout 串行即可。
+            conn.execute("PRAGMA journal_mode=DELETE")
             self._local.conn = conn
         return conn
 

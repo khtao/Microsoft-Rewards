@@ -307,14 +307,38 @@ def load_cache(path: Path = DEFAULT_CACHE, max_age: float = 86400.0) -> list[Key
         return []
 
 
+def _save_cache_kv(items: list[Keyword]) -> None:
+    """缓存进统一状态库，不再写 ``~/.cache``（既不受 HOME 覆盖也不分实例）。"""
+    from . import state
+    state.json_set(state.K_TRENDS_CACHE, {
+        "ts": time.time(),
+        "items": [k.to_dict() for k in items],
+    })
+
+
+def _load_cache_kv(max_age: float) -> list[Keyword]:
+    from . import state
+    box = state.json_get(state.K_TRENDS_CACHE)
+    if not box:
+        return []
+    try:
+        if time.time() - float(box.get("ts", 0)) > max_age:
+            return []
+        return [Keyword(**i) for i in box.get("items", [])]
+    except (TypeError, ValueError):
+        return []
+
+
 def get_keyword_pool(*, sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "sina"),
                      limit: int = 40, timeout: float = 8.0,
-                     page=None, cache_path: Path = DEFAULT_CACHE,
+                     page=None, cache_path: Path | None = None,
                      max_cache_age: float = 86400.0, use_cache_fallback: bool = True,
                      log=None) -> tuple[list[Keyword], str]:
     """三级降级拿到关键词池，返回 (关键词列表, 来源说明)。
 
     1) HTTP 直连；2) 不够就用浏览器抓；3) 还不行就读缓存，最后用内置词表。
+    ``cache_path=None``（默认）走统一状态库；显式传 Path 时仍用独立文件，
+    供离线诊断与回归测试指定临时目录。
     """
     items = fetch_trending_keywords(sources=sources, limit=limit, timeout=timeout, log=log)
     how = "http"
@@ -324,10 +348,14 @@ def get_keyword_pool(*, sources=("baidu", "weibo", "toutiao", "zhihu", "bing", "
             items = _dedup(items + more, limit)
             how = "http+browser" if items is not more else "browser"
     if items:
-        save_cache(items, cache_path)
+        if cache_path is None:
+            _save_cache_kv(items)
+        else:
+            save_cache(items, cache_path)
         return items, how
     if use_cache_fallback:
-        cached = load_cache(cache_path, max_cache_age)
+        cached = (_load_cache_kv(max_cache_age) if cache_path is None
+                  else load_cache(cache_path, max_cache_age))
         if cached:
             if log:
                 log("trend", f"实时采集失败，使用本地缓存 {len(cached)} 条")

@@ -64,6 +64,14 @@ def main(argv=None) -> int:
 
     # Qt 不需要看到这两个参数，避免把环境 id 当成 Qt 命令行选项。
     argv = [a for a in rest if a not in ("--widgets", "--classic")]
+
+    # 统一状态库：启动先做完整性检查（损坏则删除重建、回默认设置），再把
+    # 旧版散落的 settings/credentials/last_sync/两份日志/两个 ~/.cache 收进来。
+    # 必须在导入 app 之前完成，因为 Application 构造时就会 Settings() / Store()。
+    from rewards_assistant import state
+    state.ensure()
+    state.migrate_legacy()
+
     from rewards_assistant.app import main as app_main
 
     return app_main(argv)

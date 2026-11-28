@@ -1,14 +1,17 @@
-"""可在没有 PySide6 的环境下执行的设置回归测试。"""
+"""统一状态库下的设置回归：delta 存储、损坏回默认、写失败备选方案。"""
 import json
 
 import pytest
 
+from rewards_assistant import state
 from rewards_assistant.config import Settings, DEFAULT_SETTINGS
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("MS_REWARDS_HOME", str(tmp_path))
+    state._degraded_reason = None
+    state._last_event = "ok"
     return tmp_path
 
 
@@ -18,13 +21,18 @@ def test_defaults_and_batch_roundtrip(home):
     assert settings.update({"auto_open_time": "14:35", "auto_run_pending": True,
                             "search_panel": {"repeat": 17, "keyword_sources": []},
                             "chart_days": 90, "chart_metric": "streak"})
-    saved = home / "settings.json"
-    assert saved.is_file()
+    # 只有一个状态文件；旧 settings.json 不再落盘
+    assert state.db_file().is_file()
+    assert not (home / "settings.json").exists()
+    delta = state.json_get(state.K_SETTINGS)
+    assert delta is not None
+    # 不存重复信息：默认值由代码提供，磁盘只留差异
+    assert "sync_interval_minutes" not in delta
+    assert delta["chart_metric"] == "streak"
     assert Settings().get("search_panel") == {"repeat": 17, "keyword_sources": []}
     assert Settings().get("auto_open_time") is None
     assert Settings().get("chart_days") == 90
     assert not settings.update({"auto_run_pending": True})
-    assert json.loads(saved.read_text(encoding="utf-8"))["chart_metric"] == "streak"
 
 
 def test_disabled_settings_keep_editable_values(home):
@@ -39,28 +47,47 @@ def test_disabled_settings_keep_editable_values(home):
     assert again.get("evening_remind_time_value") == "18:15"
 
 
-def test_atomic_replace_does_not_corrupt_saved_file(home, monkeypatch):
+def test_write_failure_falls_back_to_standalone_file(home, monkeypatch):
+    """状态库写不进去 → 自动回退独立 JSON，设置仍可恢复且不崩。"""
     import rewards_assistant.config as config
+
     s = Settings()
     s.set("chart_days", 7)
-    path = home / "settings.json"
-    before = path.read_bytes()
-    def broken_replace(*args):
-        raise OSError("disk failed")
-    monkeypatch.setattr(config.os, "replace", broken_replace)
-    with pytest.raises(OSError):
-        s.set("chart_days", 90)
-    assert s.get("chart_days") == 7
-    assert path.read_bytes() == before
+    assert not (home / "settings.json").exists()
+
+    original_kv_set = state.kv_set
+    monkeypatch.setattr(state, "kv_set", lambda *a, **k: False)
+    s.set("chart_days", 90)
+    fallback = home / "settings.json"
+    assert fallback.is_file(), "库写失败必须回退到独立文件"
+    assert json.loads(fallback.read_text("utf-8"))["chart_days"] == 90
+    assert s.get("chart_days") == 90, "写失败也不能破坏内存态"
     assert not list(home.glob(".settings-*.tmp"))
+    # 库恢复后再次保存，会清掉回退文件，重新收敛成单文件；
+    # 只恢复 kv_set，保留 MS_REWARDS_HOME 指向本用例的临时目录。
+    monkeypatch.setattr(state, "kv_set", original_kv_set)
+    s.set("chart_days", 120)
+    assert not fallback.exists()
+    assert Settings().get("chart_days") == 120
 
 
 def test_broken_json_recovers_with_defaults(home):
     (home / "settings.json").write_text('{"bad":', encoding="utf-8")
     s = Settings()
     assert s.get("chart_days") == DEFAULT_SETTINGS["chart_days"]
+    assert not (home / "settings.json").exists(), "损坏文件按约定删除"
     s.set("chart_days", 90)
     assert Settings().get("chart_days") == 90
+
+
+def test_broken_kv_value_only_resets_that_item(home):
+    """单个 kv 值损坏：只回默认并删该项，不动积分库/凭证。"""
+    state.kv_set(state.K_CREDENTIALS, b"opaque-credential-blob")
+    state.kv_set(state.K_SETTINGS, b"not json at all")
+    s = Settings()
+    assert s.get("chart_days") == DEFAULT_SETTINGS["chart_days"]
+    assert state.kv_get(state.K_SETTINGS) is None
+    assert state.kv_get(state.K_CREDENTIALS) == b"opaque-credential-blob"
 
 
 def test_preserve_future_keys(home):
@@ -76,4 +103,6 @@ def test_old_browser_selection_is_dropped(home):
     settings = Settings()
     assert "browser_name" not in settings.as_dict()
     settings.set("chart_days", 30)
-    assert "browser_name" not in json.loads((home / "settings.json").read_text(encoding="utf-8"))
+    delta = state.json_get(state.K_SETTINGS)
+    assert "browser_name" not in delta
+    assert not (home / "settings.json").exists()

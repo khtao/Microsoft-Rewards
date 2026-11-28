@@ -44,7 +44,10 @@ def test_migrate_old_switch_and_save_atomically(monkeypatch, tmp_path):
     assert settings.get("search_panel")["level"] == 3
     assert settings.update({"auto_run_times": ["18:15", "08:20"]})
     assert Settings().get("auto_run_times") == ["08:20", "18:15"]
-    assert "auto_run_pending" not in path.read_text(encoding="utf-8")
+    from rewards_assistant import state
+    saved = state.json_get(state.K_SETTINGS) or {}
+    assert "auto_run_pending" not in saved
+    assert not path.exists(), "旧 settings.json 迁移后应被清理"
     with pytest.raises(ValueError):
         settings.update({"auto_run_times": ["12:00"] * 11})
     assert Settings().get("auto_run_times") == ["08:20", "18:15"]

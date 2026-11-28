@@ -1,24 +1,16 @@
 # -*- coding: utf-8 -*-
-"""分级运行日志：``run.log`` 保持日常操作级（INFO），另写 ``debug.log``。
+"""唯一运行日志 ``debug.log``：一份文件、四个级别，按实例隔离。
 
-为什么要分两层
---------------
-`ModernMainWindow.log()` 写进 ``run.log`` 的是给用户看的「日常操作」流水：
-同步完成、任务开始、设置变更……一行一句，导出时分享也放心。但排查浏览器
-启动失败、同步异常、领取窗口关不掉这类问题时，这些行不够：没有异常类型、
-没有堆栈、没有当时的上下文。
+同一条记录**只落一次**：界面流水是 INFO，浏览器启动 / Cookie 注入 / 活动卡
+命中 / 搜索轮次 / 领取窗口事件是 DEBUG，``warn`` / ``error`` 额外带异常类型、
+完整堆栈（含 traceback 与 cause 链）和键值上下文。所有内容都经
+``session.redact()`` 脱敏后再落盘：本机路径、Cookie、令牌不会因为「更细致的
+日志」被写进去。
 
-本模块补上 DEBUG / WARN / ERROR 三个级别：
-
-* ``debug(source, msg, **fields)``：细粒度过程记录（浏览器启动、Cookie 注入、
-  活动卡片命中、搜索轮次、领取窗口事件……），只进 ``debug.log``；
-* ``warn`` / ``error(source, msg, exc=..., **fields)``：带异常类型、完整堆栈
-  （含 traceback 与 cause 链）和键值上下文；ERROR 额外在 ``run.log`` 留一行
-  摘要，保证用户侧也能看到「出过错」。
-
-所有内容都经 ``session.redact()`` 脱敏后再落盘：本机路径、Cookie、令牌不会
-因为「更细致的日志」被写进去。``debug.log`` 与 ``run.log`` 一样按实例隔离，
-``export_logs`` 会把两者一起打进带时间戳的 zip。
+原先的 ``run.log``（日常流水）、``search_actions.jsonl``（结构化行为日志）不再
+各占一个磁盘文件：后者以 ``ACTION `` 前缀行并进同一文件，前者由
+:func:`run_log_view` 在导出 zip 时按级别过滤生成，:func:`action_log_view` 还原
+行为日志视图。磁盘上始终只有一份日志，不存储重复信息。
 
 开关：设置项 ``debug_log_enabled``（默认 True），或环境变量
 ``MS_REWARDS_DEBUG=0`` 临时关闭 DEBUG 细目；ERROR 详细记录始终写入。
@@ -32,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import data_dir, log_path
+from .config import data_dir
 
 DEBUG_LOG_NAME = "debug.log"
 _ENABLED: Optional[bool] = None
@@ -41,7 +33,7 @@ LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
 
 
 def debug_log_path() -> Path:
-    """DEBUG 细目文件；与 run.log 同目录，多开时各写各的。"""
+    """唯一运行日志；多开时每个实例一份。"""
     return data_dir() / DEBUG_LOG_NAME
 
 
@@ -127,12 +119,43 @@ def _append(path: Path, lines: list[str]) -> None:
         pass                      # 日志失败绝不影响业务
 
 
+# 记录形如：[2026-11-24 15:30:12.123] [INFO] [ui] 消息 | k=v
+_LINE_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d{3}\] "
+    r"\[(DEBUG|INFO|WARN|ERROR)\] \[[^\]]*\] (.*)$")
+
+
+def run_log_view(text: str) -> str:
+    """从 debug.log 生成「日常操作级」视图，供导出 zip 的 ``run.log`` 条目。
+
+    磁盘上只有一份日志；这里只在导出时按级别过滤、去掉 DEBUG 与堆栈续行，
+    不产生第二份落盘文件，也不重复存储。
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        m = _LINE_RE.match(line)
+        if not m or m.group(2) == "DEBUG":
+            continue                            # DEBUG 细目与堆栈续行都不进摘要
+        ts, level, body = m.group(1)[11:], m.group(2), m.group(3)
+        msg = body.split(" | ", 1)[0]
+        out.append(f"[{ts}] [{level}] {msg}")
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def action_log_view(text: str) -> str:
+    """从 debug.log 的 ``ACTION `` 前缀行还原结构化 JSONL 视图。"""
+    out = [line[len("ACTION "):] for line in text.splitlines()
+           if line.startswith("ACTION ")]
+    return "\n".join(out) + ("\n" if out else "")
+
+
 def write(level: str, source: str, message: str, *,
           exc: Optional[BaseException] = None,
           run_log_summary: bool = False, **fields: Any) -> None:
-    """写一条记录：DEBUG/INFO 只进 debug.log；ERROR 始终进 debug.log。
+    """写一条记录进**唯一**的 debug.log；一条只落一次，不再双写 run.log。
 
-    ``run_log_summary=True`` 时额外在 run.log 追加一行不带堆栈的摘要。
+    ``run_log_summary`` 保留参数兼容旧调用点：导出的 ``run.log`` 视图由
+    :func:`run_log_view()` 从本文件按级别过滤生成，磁盘上不存在第二份。
     """
     level = level.upper()
     if level not in LEVELS:
@@ -141,12 +164,6 @@ def write(level: str, source: str, message: str, *,
         return
     record = format_record(level, source, message, exc=exc, fields=fields)
     _append(debug_log_path(), [record])
-    if run_log_summary or level == "ERROR":
-        ts = datetime.now().strftime("%H:%M:%S")
-        summary = f"[{ts}] [{level}] {_redact(message)}"
-        if exc is not None:
-            summary += f" ({type(exc).__name__})"
-        _append(log_path(), [summary])
 
 
 def debug(source: str, message: str, **fields: Any) -> None:
@@ -164,5 +181,5 @@ def warn(source: str, message: str, *,
 
 def error(source: str, message: str, *,
           exc: Optional[BaseException] = None, **fields: Any) -> None:
-    """错误：debug.log 记完整堆栈，run.log 只留一行摘要。"""
+    """错误：debug.log 记完整堆栈；导出的摘要视图由级别过滤生成。"""
     write("ERROR", source, message, exc=exc, **fields)

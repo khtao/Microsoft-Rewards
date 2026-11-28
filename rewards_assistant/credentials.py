@@ -262,9 +262,18 @@ def live_only(cookies: Iterable[Dict[str, Any]], now: Optional[float] = None) ->
 
 
 class CookieStore:
-    """加密凭证文件；损坏 / 篡改 / 换机器一律当作「尚未保存会话」。"""
+    """加密凭证；损坏 / 篡改 / 换机器一律当作「尚未保存会话」。
+
+    默认（无显式 path）把 :func:`_seal` 的**密文 blob 原样**存进统一状态库
+    ``kv[credentials]``，不解密、不重新加密，安全性与原来的 0600 独立文件
+    等价。显式传 ``path`` 时保留独立文件模式，供诊断与回归测试使用。
+
+    状态库写失败时自动回退到独立文件；两项都不可用时 ``save()`` 返回 0，
+    调用方会把「没保存上」当成未登录，绝不假装登录成功。
+    """
 
     def __init__(self, path=None) -> None:
+        self._kv = path is None
         if path:
             self.path = Path(path)
         else:
@@ -274,41 +283,89 @@ class CookieStore:
             except Exception:
                 self.path = data_dir() / FILENAME
 
+    def _kv_blob(self):
+        from . import state
+        blob = state.kv_get(state.K_CREDENTIALS)
+        if blob is None or len(blob) <= len(MAGIC) + 1:
+            return None
+        return blob
+
     def exists(self) -> bool:
+        if self._kv:
+            return self._kv_blob() is not None
         return self.path.is_file() and self.path.stat().st_size > len(MAGIC) + 1
 
-    def save(self, cookies: Iterable[Dict[str, Any]]) -> int:
-        items = normalize(cookies)
-        raw = json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        blob = _seal(raw)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # ------------------------------------------------------------ 独立文件读写
+    def _save_to_file(self, blob: bytes) -> bool:
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(blob)
                 fh.flush()
                 os.fsync(fh.fileno())
-        except BaseException:
+            os.replace(str(tmp), str(self.path))
             try:
-                tmp.unlink(missing_ok=True)
+                os.chmod(str(self.path), 0o600)
+            except OSError:
+                pass                          # Windows 上 chmod 语义不同，忽略
+            return True
+        except (OSError, ValueError):
+            try:
+                self.path.with_name(self.path.name + ".tmp").unlink(missing_ok=True)
             except OSError:
                 pass
-            raise
-        os.replace(str(tmp), str(self.path))
+            return False
+
+    def _read_file(self) -> Optional[bytes]:
         try:
-            os.chmod(str(self.path), 0o600)
+            return self.path.read_bytes()
         except OSError:
-            pass                              # Windows 上 chmod 语义不同，忽略
-        return len(items)
+            return None
+
+    # ------------------------------------------------------------ 公开接口
+    def save(self, cookies: Iterable[Dict[str, Any]]) -> int:
+        items = normalize(cookies)
+        raw = json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        blob = _seal(raw)
+        if self._kv:
+            from . import state
+            if state.kv_set(state.K_CREDENTIALS, blob):
+                # 旧独立文件已完成迁移，删掉避免同一会话存两份
+                try:
+                    self.path.unlink(missing_ok=True)
+                    self.path.with_name(self.path.name + ".tmp").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return len(items)
+            # 备选方案：状态库不可写时退回独立文件
+            return len(items) if self._save_to_file(blob) else 0
+        return len(items) if self._save_to_file(blob) else 0
 
     def load(self, now: Optional[float] = None) -> List[dict]:
-        try:
-            blob = self.path.read_bytes()
-        except OSError:
+        if self._kv:
+            from . import state
+            blob = self._kv_blob()
+            if blob is None:
+                blob = self._read_file()       # 旧版文件 / 写失败回退产物
+                if blob is not None:
+                    state.kv_set(state.K_CREDENTIALS, blob)
+                    try:
+                        self.path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        else:
+            blob = self._read_file()
+        if blob is None:
             return []
         raw = _unseal(blob)
         if raw is None:
+            # 密文被篡改 / 换机器 / 跨实例拷贝：只清这一项，不影响积分库
+            if self._kv:
+                from . import state
+                state.kv_delete(state.K_CREDENTIALS)
+                state._note("凭证密文校验失败，已清除该项（视为未登录）")
             return []
         try:
             items = json.loads(raw.decode("utf-8"))
@@ -319,6 +376,9 @@ class CookieStore:
         return live_only((x for x in items if isinstance(x, dict)), now=now)
 
     def clear(self) -> None:
+        if self._kv:
+            from . import state
+            state.kv_delete(state.K_CREDENTIALS)
         try:
             self.path.unlink(missing_ok=True)
         except OSError:

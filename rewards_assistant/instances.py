@@ -3,10 +3,10 @@
 
 一个进程只绑定一个实例（见 ``config.instance_id()``）。每个实例有独立的：
 
-* ``settings.json`` / ``rewards.db``（积分历史、任务、定时计划）
-* ``session_cookies.bin``（本机加密凭证，可登录不同 Microsoft 账号）
+* ``rewards.db``（积分历史、任务、定时计划、设置、同步状态、缓存）
+* 加密凭证作为密文 blob 存在同一状态库，可登录不同 Microsoft 账号
 * ``browser_profile/``（登录窗口的 Playwright profile）
-* ``run.log`` / ``search_actions.jsonl`` / 自动化快照目录
+* ``debug.log``（唯一运行日志）/ 自动化快照目录
 * 单实例 IPC key、Windows AppUserModelID、开机自启项
 
 「新建并打开」不会在当前进程里切换环境（那样会污染已经打开的数据库、

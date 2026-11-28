@@ -102,7 +102,31 @@ flowchart LR
 - `default_fetcher()` 恒返回 `HttpFetcher`。`BrowserSessionFetcher` 只保留给登录窗口与「退出登录」清理 profile 使用，不在同步热路径上；`profile_guard` 只保护登录 / 清理这两类低频浏览器操作。
 - 会话工厂预检会真实构造一次 `requests.Session`：系统环境中若被 `lazy_import` 不可调用代理污染，整轮切到标准库 `urllib` 后端；运行时若仍遇到 `not callable`，该页再用标准库重试一次。两页始终并发，后端切换不改变五态判定。
 - **登录对话框不堆说明文字**：`ui/login_guide.py` 用 `QPainter` 画 5 帧循环插画（点按钮 → 独立 Edge 里本人登录 → 短信 / 验证器确认 → 回来点「我已完成登录」→ 凭证加密留本机、只读两页），`QTimer` 40ms 驱动帧内微动（流动光点、光标浮动、按钮呼吸）与帧间交叉淡入，底部只留一行随帧切换的短句和 5 个步骤圆点。实时绘制不依赖打包环境未必提供的动图解码插件；`tools/render_login_guide.py` 用同一套 `paint_guide()` 离屏导出 `login_flow.gif` 与浅色 / 深色对话框预览。配色取自当前主题，状态行也统一走主题色，深色下可读。
-- **状态行与主界面同源**：`sync_state.py` 在每次真正完成的同步后原子写入当前实例目录的 `last_sync.json`（时间、成功与否、失败原因摘要）；「距上次过近」的跳过不刷新时间戳。登录对话框打开时直接显示「最近同步：时间 · 同步成功 / 失败（原因）」，成功绿色、失败红色，两者加粗；只有从未同步过才回落到「尚未检测会话状态」，避免出现主界面已「已登录」、登录页却说没检测过的矛盾。退出登录 / 清除本地会话会一并清掉该记录。主界面顶栏的登录状态文字与标题同为 16px 加粗，只有文字变色：已登录金色、未登录红色、未检测中性；旁边的状态图标是 `icons.py` 里用 `QPainter` 复刻的 32×32 矢量奖章：细等宽橙环 + 白色圆盘 + 两条带 45° 斜纹的绶带 + 橙金渐变圆章（中央白勾），未登录态换成灰 / 深棕实心圆底与白色描边环、白色同款奖章；与左侧品牌图标同为 32px。不是 emoji 也不是截图素材，切换主题时随 `rebuild_ui()` 重新取色。
+- **状态行与主界面同源**：`sync_state.py` 在每次真正完成的同步后把时间、成功与否、失败原因摘要写入统一状态库 `kv[last_sync]`（库不可写时回退独立 JSON）；「距上次过近」的跳过不刷新时间戳。登录对话框打开时直接显示「最近同步：时间 · 同步成功 / 失败（原因）」，成功绿色、失败红色，两者加粗；只有从未同步过才回落到「尚未检测会话状态」，避免出现主界面已「已登录」、登录页却说没检测过的矛盾。退出登录 / 清除本地会话会一并清掉该记录。主界面顶栏的登录状态文字与标题同为 16px 加粗，只有文字变色：已登录金色、未登录红色、未检测中性；旁边的状态图标是 `icons.py` 里用 `QPainter` 复刻的 32×32 矢量奖章：细等宽橙环 + 白色圆盘 + 两条带 45° 斜纹的绶带 + 橙金渐变圆章（中央白勾），未登录态换成灰 / 深棕实心圆底与白色描边环、白色同款奖章；与左侧品牌图标同为 32px。不是 emoji 也不是截图素材，切换主题时随 `rebuild_ui()` 重新取色。
+
+## 统一状态文件
+
+`state.py` 把**积分库、设置、加密凭证、最近同步结果、两个缓存**全部收进当前实例目录下的一个 `rewards.db`；运行日志只有一份 `debug.log`。常态下应用自己写的文件就是这两个。
+
+| 原来 | 现在 |
+| --- | --- |
+| `rewards.db` + `-wal` / `-shm` | `rewards.db`（`PRAGMA journal_mode=DELETE`，空闲无常驻附属文件） |
+| `settings.json` | `kv[settings]`，且只存与 `DEFAULT_SETTINGS` 不同的 **delta** |
+| `session_cookies.bin` | `kv[credentials]`，**密文 blob 原样搬入**，不解密不重加密 |
+| `last_sync.json` | `kv[last_sync]` |
+| `run.log` + `debug.log` 双写 | `debug.log` 一份；`run.log` 只是导出时过滤出的视图 |
+| `search_actions.jsonl` | 同一日志里的 `ACTION ` 前缀行 |
+| `~/.cache/human_search_*.json` | `kv[trends_cache]` / `kv[geo_cache]`，随实例隔离、受 `MS_REWARDS_HOME` 覆盖 |
+
+`Store` 的 `daily` / `tasks` / `used_terms` 与 `kv` 表共用同一个文件；`state` 的每次读写都是显式 `close()` 的短连接 + `busy_timeout=5000`，不与 `Store` 的线程局部长连接抢事务。设置只存差异、日志只写一次、导出视图不落盘，避免重复信息。
+
+**稳健性与备选方案**（`__main__.main()` 在构造 `Application` 之前调用 `state.ensure()` 与 `state.migrate_legacy()`）：
+
+- 启动执行 `PRAGMA quick_check`；库损坏（非 SQLite 文件、页校验失败）→ **删除损坏文件** → 重建 schema → 回默认设置继续跑，并在 `debug.log` 留 WARN。需要排查时设 `MS_REWARDS_KEEP_CORRUPT=1` 保留一份带时间戳的副本。连重建都失败则转纯内存降级，不让应用起不来。
+- 单个 kv 值坏 JSON / 凭证密文校验失败 → 只删除该项并回默认（设置回 `DEFAULT_SETTINGS`、凭证视为未登录），**不重建整库**，积分历史与其它状态不受影响。
+- `kv_set` 失败（磁盘满、只读、权限不足）→ 返回 `False` 并标记降级；`Settings` / `CookieStore` / `sync_state` 各自回退到原来的独立文件 + 原子替换，内存态继续可用。两条路都写不进去时 `CookieStore.save()` 明确返回 0，绝不假装登录成功。
+- 旧版四个状态文件、两份日志、两个 `~/.cache` 在首次启动时一次性迁移：凭证搬密文、坏文件按约定删除、旧日志追加进 `debug.log` 后删除；任何一步失败都保留原文件，下次启动重试。
+- 保留 `default_instance.json` 与各 `instances/<id>/instance.json`：前者必须在**导入数据层之前**决定本进程实例 id，后者是 `list_instances()` 扫描目录时的身份锚点，两者都不能并进状态库。
 
 ## 积分赚取日历
 
@@ -133,9 +157,9 @@ SyncWorker（同步未完成任务）→ ActivityWorker（活动卡点击）
 
 启动健壮性：`launch_edge()` 在 `channel="msedge"` 解析不到 Edge 时自动改用 `find_edge_binary()` 的绝对路径；`launch_automation_edge()` 对占用类错误换全新空目录重试、对参数不兼容类错误（`Unexpected option` / `no_viewport` / `permissions` 等）降级为最小参数集重试，其余错误（没装 Edge、凭证为空）直接给出明确提示、不空转。
 
-日志与可观测性分两层：`run.log` 保持**日常操作级**（INFO）流水，给用户看、导出时分享也放心；`debug_log.py` 另写 `debug.log`，提供 `debug / info / warn / error` 四级细目——浏览器启动阶段、活动卡片命中、搜索轮次、领取窗口事件都带键值上下文，`error` 还附异常类型、完整 traceback 与 `__cause__` 链。ERROR 同时在 `run.log` 留一行不带堆栈的摘要。所有内容经 `session.redact()` 脱敏（凭证 / Bearer / token / 邮箱）后，再按 `browser_error_hint` 同款规则抹掉 `C:\Users\...` / `/home/...` 这类本机绝对路径；堆栈**逐行**脱敏，避免「更细致的错误记录」反而泄漏本机信息。`debug_log_enabled`（默认开）或 `MS_REWARDS_DEBUG=0` 可关闭 DEBUG 细目，ERROR 详细记录始终写入；`debug.log` 与 `run.log` 一样按实例隔离。
+日志与可观测性只有**一份文件** `debug.log`，提供 `debug / info / warn / error` 四级：界面流水是 INFO，浏览器启动阶段、活动卡片命中、搜索轮次、领取窗口事件是 DEBUG，`error` 附异常类型、完整 traceback 与 `__cause__` 链。结构化行为日志以 `ACTION ` 前缀行并进同一文件，不再是独立的 `search_actions.jsonl`。所有内容经 `session.redact()` 脱敏（凭证 / Bearer / token / 邮箱）后，再按 `browser_error_hint` 同款规则抹掉 `C:\Users\...` / `/home/...` 这类本机绝对路径；堆栈**逐行**脱敏。`debug_log_enabled`（默认开）或 `MS_REWARDS_DEBUG=0` 可关闭 DEBUG 细目，ERROR 详细记录始终写入；每个实例一份 `debug.log`。
 
-`launch_automation_edge(log=...)` 把 `credentials`（凭证条数）、`profile`（全新空目录）、`edge`（启动成功/失败）、`cookies`（注入条数）逐阶段写进运行日志；`api.run_human_search()` 在启动异常分支先写 `browser_error: 异常类型: 原因`，再安全 `pw.stop()` 并以 `session_end error: 原因` 收尾，主循环异常的 `finally` 同样区分 `ok` / `error`。`SearchWorker` 先发一条单行完整原因（`error`），再把栈帧压成一行（`trace`）；界面日志上限 500 字符，原因不会被截断。导出运行日志 zip 会同时打包 `run.log` / `run-session.log` 与 `debug.log`，并在 README 写明两者用途。`export_logs` / `capture_html` 的默认文件名与用户改名后的最终路径都经 `ensure_timestamped_zip()` 补 `YYYYmmdd_HHMMSS` 后缀，多次导出不互相覆盖；关键页面 zip 的 README 也记录导出时间。
+`launch_automation_edge(log=...)` 把 `credentials`（凭证条数）、`profile`（全新空目录）、`edge`（启动成功/失败）、`cookies`（注入条数）逐阶段写进这唯一日志；`api.run_human_search()` 在启动异常分支先写 `browser_error: 异常类型: 原因`，再安全 `pw.stop()` 并以 `session_end error: 原因` 收尾，主循环异常的 `finally` 同样区分 `ok` / `error`。`SearchWorker` 先发一条单行完整原因（`error`），再把栈帧压成一行（`trace`）；界面日志上限 500 字符，原因不会被截断。导出日志 zip 时 `debug_log.run_log_view()` 按级别过滤出 `run.log` 视图（不含 DEBUG 与堆栈）、`action_log_view()` 还原 `search_actions.jsonl`，并把 `debug.log` 原样打进去——这些都是导出瞬间的视图，磁盘上不存第二份。`export_logs` / `capture_html` 的默认文件名与用户改名后的最终路径都经 `ensure_timestamped_zip()` 补 `YYYYmmdd_HHMMSS` 后缀，多次导出不互相覆盖；关键页面 zip 的 README 也记录导出时间。
 
 运行期互斥：`Application.auto_running()` 为真时，`sync_now()` 直接拒绝手动同步、定时同步静默跳过；主按钮与托盘第 3 项切换为「停止自动运行」，主按钮同时通过 `danger` 动态属性切到红色 QSS（浅色 / 深色各一套），窗口统一禁用 `act_sync` / 圆环，并锁定停止按钮防连点；顶栏品牌图标是纯展示 `QLabel`，不随运行状态禁用。
 

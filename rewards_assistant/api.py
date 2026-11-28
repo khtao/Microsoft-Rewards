@@ -120,7 +120,9 @@ class ActionLogger:
         }
         rec.update({k: v for k, v in kw.items() if v is not None})
         if self.fp:
-            self.fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            # 与 debug_log 共用一个文件，ACTION 前缀让 action_log_view() 能还原
+            # 结构化 JSONL；磁盘上不再多出 search_actions.jsonl。
+            self.fp.write("ACTION " + json.dumps(rec, ensure_ascii=False) + "\n")
             self.fp.flush()
         if self.sink is not None:
             self.sink.append(rec)

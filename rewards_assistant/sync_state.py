@@ -25,13 +25,32 @@ def path():
     return config.data_dir() / FILE_NAME
 
 
+def _valid(data) -> Optional[dict]:
+    if not isinstance(data, dict) or not data.get("at") or "ok" not in data:
+        return None
+    return {"at": str(data["at"]), "ok": bool(data["ok"]),
+            "detail": str(data.get("detail") or "")}
+
+
 def record(ok: bool, detail: str = "") -> dict:
-    """记一次**真正完成**的同步（距上次过近的跳过不算）。"""
+    """记一次**真正完成**的同步（距上次过近的跳过不算）。
+
+    写入统一状态库；库不可写时回退到独立 JSON（原子替换），两条路都失败
+    也只丢这一条状态，不影响同步本身。
+    """
     entry = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "ok": bool(ok),
         "detail": str(detail or "").strip()[:_MAX_DETAIL],
     }
+    from . import state
+    if state.json_set(state.K_LAST_SYNC, entry):
+        try:
+            path().unlink(missing_ok=True)
+            path().with_name(path().name + ".tmp").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return entry
     try:
         p = path()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -44,21 +63,30 @@ def record(ok: bool, detail: str = "") -> dict:
 
 
 def last() -> Optional[dict]:
-    """读最近一次记录；文件缺失 / 损坏 / 字段不全都当作「从未同步」。"""
-    try:
-        data = json.loads(path().read_text("utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict) or not data.get("at") or "ok" not in data:
-        return None
-    return {"at": str(data["at"]), "ok": bool(data["ok"]),
-            "detail": str(data.get("detail") or "")}
+    """读最近一次记录；缺失 / 损坏 / 字段不全都当作「从未同步」。"""
+    from . import state
+    data = state.json_get(state.K_LAST_SYNC)
+    if data is None:
+        try:
+            data = json.loads(path().read_text("utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if data is not None:
+            state.json_set(state.K_LAST_SYNC, data)
+            try:
+                path().unlink(missing_ok=True)
+            except OSError:
+                pass
+    return _valid(data)
 
 
 def clear() -> None:
     """退出登录 / 清除本地会话后调用，状态行回到「尚未检测」。"""
+    from . import state
+    state.kv_delete(state.K_LAST_SYNC)
     try:
         path().unlink(missing_ok=True)
+        path().with_name(path().name + ".tmp").unlink(missing_ok=True)
     except OSError:
         pass
 

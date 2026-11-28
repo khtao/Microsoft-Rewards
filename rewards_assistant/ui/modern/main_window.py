@@ -1434,17 +1434,12 @@ class ModernMainWindow(QWidget):
     # ------------------------------------------------------------ 日志 / 抓取
 
     def log(self, message: str) -> None:
-        """日常操作级流水（run.log）+ 同条 INFO 进 debug.log 形成完整时间线。"""
+        """唯一运行日志 ``debug.log``：一条 INFO，不再另写一份 run.log。"""
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {redact(message)}"
         self._log_lines.append(line)
         self._log_lines = self._log_lines[-500:]
-        debug_log.info("ui", redact(message))
         if self.prefs.get("ui_log_enabled", True):
-            try:
-                with (data_dir() / "run.log").open("a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except OSError:
-                pass
+            debug_log.info("ui", redact(message))
 
     def export_logs(self) -> None:
         default = str(data_dir() / timestamped_zip_name("run-log"))
@@ -1454,22 +1449,27 @@ class ModernMainWindow(QWidget):
             return
         path = ensure_timestamped_zip(path)
         try:
+            dbg = debug_log.debug_log_path()
+            try:
+                raw = dbg.read_text("utf-8", errors="replace") if dbg.exists() else ""
+            except OSError:
+                raw = ""
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-                # 落盘的完整流水优先；内存里的最后 500 行另存一份，避免重名覆盖。
-                legacy = data_dir() / "run.log"
-                if legacy.exists():
-                    z.write(legacy, arcname="run.log")
-                    z.writestr("run-session.log",
-                               "\n".join(self._log_lines) + "\n")
-                else:
-                    z.writestr("run.log", "\n".join(self._log_lines) + "\n")
-                dbg = debug_log.debug_log_path()
+                # 磁盘只有 debug.log 一份；run.log / search_actions.jsonl 都是
+                # 导出时按级别或前缀生成的视图，不另存重复内容。
+                summary = debug_log.run_log_view(raw)
+                z.writestr("run.log", summary or "\n".join(self._log_lines) + "\n")
                 if dbg.exists():
                     z.write(dbg, arcname="debug.log")
+                actions = debug_log.action_log_view(raw)
+                if actions.strip():
+                    z.writestr("search_actions.jsonl", actions)
                 notes = [
                     "运行日志已脱敏；分享前请再自行检查。",
                     f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
-                    "run.log / run-session.log：日常操作级流水（INFO）。",
+                    "应用只在数据目录保留 debug.log 一份运行日志；",
+                    "run.log 是从中过滤出的日常操作级视图（不含 DEBUG 与堆栈）。",
+                    "search_actions.jsonl 是从 ACTION 前缀行还原的结构化行为日志。",
                     "debug.log：DEBUG 细目与 ERROR 完整堆栈，含异常类型、",
                     "traceback 与上下文键值，用于排查问题。",
                 ]

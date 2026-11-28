@@ -25,6 +25,8 @@ from functools import lru_cache
 import re
 from typing import Optional
 
+from . import state
+
 APP_NAME = "MSRewardsAssistant"
 APP_TITLE = "积分管理助手"
 APP_VERSION = "2.2"
@@ -233,11 +235,13 @@ def _settings_path() -> Path:
 
 
 def log_path() -> Path:
-    return data_dir() / "run.log"
+    """运行日志只有一个文件；保留函数名兼容旧调用点。"""
+    return data_dir() / "debug.log"
 
 
 def search_log_path() -> Path:
-    return data_dir() / "search_actions.jsonl"
+    """行为日志并入同一份 debug.log（以 ACTION 前缀行区分），不再单独落盘。"""
+    return data_dir() / "debug.log"
 
 
 def credentials_path() -> Path:
@@ -279,7 +283,7 @@ DEFAULT_SETTINGS = {
     # 趋势图显示天数
     "chart_days": 30,
     "chart_metric": "earned",
-    # DEBUG 级别细目日志（debug.log）：含异常堆栈与上下文；run.log 仍只记
+    # DEBUG 级别细目日志（唯一 debug.log）：含异常堆栈与上下文；导出时
     # 日常操作级流水。可用环境变量 MS_REWARDS_DEBUG=0 临时关闭细目。
     "debug_log_enabled": True,
     # 账户与设置中拟人搜索区域的全部表单选项（兼容原独立选项卡）。
@@ -326,52 +330,82 @@ class Settings:
         self.load()
 
     def load(self) -> None:
-        path = _settings_path()
-        if path.exists():
-            try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    # 已取消浏览器选择，下次保存时自动丢弃废弃字段。
-                    for obsolete in ("browser_name", "earn_browser_fallback", "streak_rule",
-                                     "auto_open_gap_min", "auto_open_gap_max"):
-                        loaded.pop(obsolete, None)
-                    if isinstance(loaded.get("search_panel"), dict):
-                        # 老版本高级选项已取消，不再默默影响浏览器行为。
-                        # 拟人强度档位的 6 项参数随 search_panel 一起持久化。
-                        loaded["search_panel"] = {
-                            k: v for k, v in loaded["search_panel"].items()
-                            if k in SEARCH_PANEL_KEYS}
-                    # 「后台与通知」拆成「托盘运行 / 消息通知」时的一次性迁移：
-                    # 旧组关闭会把下面三个键同时写成 False。若新键尚未落盘且
-                    # 命中该特征，两个新开关继承「关闭」，不擅自重新打开用户
-                    # 明确关掉的托盘与系统消息；全新安装仍默认打开。
-                    if ("tray_enabled" not in loaded
-                            and "messages_enabled" not in loaded
-                            and loaded.get("notify_after_sync") is False
-                            and loaded.get("silent_when_all_done") is False
-                            and loaded.get("close_to_tray") is False):
-                        loaded["tray_enabled"] = False
-                        loaded["messages_enabled"] = False
-                    # 从既有的「到点自动运行」开关迁移，保留原有时间。
-                    if "auto_run_times" not in loaded:
-                        old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
-                        loaded["auto_run_times"] = [old_time] if _TIME_RE.fullmatch(str(old_time)) else ["09:00"]
-                        loaded["auto_run_enabled"] = bool(loaded.get("auto_run_pending", False))
-                    # 单时刻的自动打开与多时刻任务计划重复，取消旧自动打开计划。
-                    # 不擅自迁移为自动搜索（可能造成意外自动操作）。
-                    loaded.pop("auto_open_time", None)
-                    loaded.pop("auto_open_time_value", None)
-                    loaded.pop("auto_run_pending", None)
+        """设置只存「与默认值不同的差异」，默认值由代码提供，不再落盘重复一份。
+
+        读取顺序：``kv[settings]`` → 旧版 ``settings.json``（一次性迁移）→
+        全默认。任何一层解析失败都只影响设置这一项，不影响积分库与凭证。
+        """
+        loaded = state.json_get(state.K_SETTINGS)
+        if loaded is None:
+            legacy = _settings_path()
+            if legacy.exists():
+                try:
+                    raw = json.loads(legacy.read_text(encoding="utf-8"))
+                    loaded = raw if isinstance(raw, dict) else None
+                except (OSError, ValueError, TypeError):
+                    loaded = None
+                if loaded is None:
+                    # 损坏文件按约定删掉，回落默认设置
                     try:
-                        loaded["auto_run_times"] = normalize_run_times(loaded["auto_run_times"])
-                    except ValueError:
-                        loaded["auto_run_times"] = ["09:00"]
-                    self._data.update(loaded)
-            except (OSError, ValueError, TypeError):
-                # 损坏文件不阻断启动；下一次保存使用正常数据原子替换。
-                pass
+                        legacy.unlink()
+                    except OSError:
+                        pass
+                    state._note("旧 settings.json 损坏，已删除并改用默认设置")
+        if not isinstance(loaded, dict):
+            return
+        # 已取消浏览器选择，下次保存时自动丢弃废弃字段。
+        for obsolete in ("browser_name", "earn_browser_fallback", "streak_rule",
+                         "auto_open_gap_min", "auto_open_gap_max"):
+            loaded.pop(obsolete, None)
+        if isinstance(loaded.get("search_panel"), dict):
+            # 老版本高级选项已取消，不再默默影响浏览器行为。
+            # 拟人强度档位的 6 项参数随 search_panel 一起持久化。
+            loaded["search_panel"] = {
+                k: v for k, v in loaded["search_panel"].items()
+                if k in SEARCH_PANEL_KEYS}
+        # 「后台与通知」拆成「托盘运行 / 消息通知」时的一次性迁移：
+        if ("tray_enabled" not in loaded
+                and "messages_enabled" not in loaded
+                and loaded.get("notify_after_sync") is False
+                and loaded.get("silent_when_all_done") is False
+                and loaded.get("close_to_tray") is False):
+            loaded["tray_enabled"] = False
+            loaded["messages_enabled"] = False
+        # 从既有的「到点自动运行」开关迁移，保留原有时间。
+        if "auto_run_times" not in loaded:
+            old_time = loaded.get("auto_open_time") or loaded.get("auto_open_time_value", "09:00")
+            loaded["auto_run_times"] = [old_time] if _TIME_RE.fullmatch(str(old_time)) else ["09:00"]
+            loaded["auto_run_enabled"] = bool(loaded.get("auto_run_pending", False))
+        loaded.pop("auto_open_time", None)
+        loaded.pop("auto_open_time_value", None)
+        loaded.pop("auto_run_pending", None)
+        try:
+            loaded["auto_run_times"] = normalize_run_times(loaded["auto_run_times"])
+        except ValueError:
+            loaded["auto_run_times"] = ["09:00"]
+        self._data.update(loaded)
+
+    def _delta(self, data: dict) -> dict:
+        """只保留与代码默认值不同的键：不把 DEFAULT_SETTINGS 再抄一份到磁盘。"""
+        return {k: v for k, v in data.items()
+                if k not in DEFAULT_SETTINGS or DEFAULT_SETTINGS[k] != v}
 
     def _write(self, data: dict) -> None:
+        delta = self._delta(data)
+        if state.json_set(state.K_SETTINGS, delta):
+            # 迁移完成后旧文件与原子写残留都不再需要
+            legacy = _settings_path()
+            try:
+                legacy.unlink(missing_ok=True)
+                Path(str(legacy) + ".tmp").unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        # 备选方案：状态库写不进去（磁盘满 / 只读 / 损坏后重建失败），
+        # 退回原先的独立 JSON + 原子替换，内存态与界面都不受影响。
+        self._write_legacy(data)
+
+    def _write_legacy(self, data: dict) -> None:
         path = _settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_name = None
@@ -383,10 +417,15 @@ class Settings:
                 temp_name = file.name
                 json.dump(data, file, ensure_ascii=False, indent=2)
                 file.write("\n")
-            os.replace(temp_name, path)  # 避免程序意外退出导致设置文件只写了一半
+            os.replace(temp_name, path)
+        except OSError:
+            pass                       # 两条路都写不进去时保留内存态，不崩
         finally:
             if temp_name and os.path.exists(temp_name):
-                os.unlink(temp_name)
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
 
     def save(self) -> None:
         self._write(self._data)

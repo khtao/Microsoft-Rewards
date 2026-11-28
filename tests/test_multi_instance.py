@@ -52,16 +52,18 @@ def test_all_data_paths_are_per_instance(monkeypatch):
     monkeypatch.setenv(config.ENV_INSTANCE, "acct-2")
     home = config.base_data_dir() / "instances" / "acct-2"
     assert config.data_dir() == home
+    # 逻辑路径仍按实例隔离；常态下真正落盘的只有 rewards.db + debug.log。
     for fn, name in ((config.db_path, "rewards.db"),
-                     (config.log_path, "run.log"),
-                     (config.search_log_path, "search_actions.jsonl"),
+                     (config.log_path, "debug.log"),
+                     (config.search_log_path, "debug.log"),
                      (config.credentials_path, "session_cookies.bin"),
                      (config._settings_path, "settings.json")):
         assert fn() == home / name
+    assert config.log_path() == config.search_log_path(), "运行日志只能有一个"
     assert config.profile_dir() == home / "browser_profile"
     assert credentials.CookieStore().path == home / "session_cookies.bin"
     assert credentials.data_dir() == home
-    assert str(api.default_log_path()) == str(home / "search_actions.jsonl")
+    assert str(api.default_log_path()) == str(home / "debug.log")
     assert config.single_instance_key().endswith("_acct-2")
     assert config.autostart_name() == "MSRewardsAssistant_acct-2"
     assert "积分管理助手" in config.window_title()
@@ -83,6 +85,9 @@ def test_credentials_are_isolated_by_path_and_entropy(monkeypatch):
     assert credentials._entropy() == credentials.ENTROPY  # 旧凭证零迁移
     a = credentials.CookieStore()
     a.save([{"name": "MSPAuth", "value": "ACCOUNT_A", "domain": ".bing.com"}])
+    from rewards_assistant import state
+    stolen = state.kv_get(state.K_CREDENTIALS)
+    assert stolen, "A 环境的凭证应存在统一状态库里"
 
     monkeypatch.setenv(config.ENV_INSTANCE, "acct-2")
     assert credentials._entropy() != credentials.ENTROPY
@@ -90,8 +95,8 @@ def test_credentials_are_isolated_by_path_and_entropy(monkeypatch):
     assert b.path != a.path
     assert b.load() == [], "B 环境不该看到 A 账号的 Cookie"
 
-    # 把 A 的密文原样拷到 B 的路径，密钥熵不同 → 解不开
-    b.path.write_bytes(a.path.read_bytes())
+    # 把 A 的密文 blob 原样塞进 B 的状态库，密钥熵不同 → 解不开
+    assert state.kv_set(state.K_CREDENTIALS, stolen)
     assert b.load() == [], "跨实例复制凭证必须失效"
 
     b.save([{"name": "MSPAuth", "value": "ACCOUNT_B", "domain": ".bing.com"}])
